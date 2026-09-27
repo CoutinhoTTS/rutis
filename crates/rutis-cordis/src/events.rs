@@ -1,13 +1,13 @@
 //! 宿主事件链路(M3,design-config-hot-update-and-dynamic-events §2.4):
 //! `evt/emit` 通知帧 → rutis 内核 keyed 事件的翻译缝。
 //!
-//! 订阅方:`ctx.events().on_keyed::<HostEvent>(ctx, "session/event", listener)`;
+//! 订阅方:`ctx.events().on::<HostEvent>(ctx, &rutis::EventKey::dynamic("session/event"), listener)`;
 //! 四分发语义 / fiber 生命周期清理 / once / prepend 全部由内核 keyed 面
 //! 免费提供。事件名 = `params.event`(字符串内容匹配,静态/动态互通)。
 
 use std::sync::Arc;
 
-use rutis::Ctx;
+use rutis::{Ctx, EventKey};
 use serde_json::Value;
 
 use crate::rpc::{EventOrigin, NotifyHook};
@@ -34,13 +34,14 @@ impl rutis::Event for HostEvent {
 /// 组装 `evt/emit` → `HostEvent` 的入站通知钩子。
 ///
 /// - `evt/emit`(`params.event` 非空字符串):翻译为
-///   `emit_keyed::<HostEvent>(name, HostEvent)` 转发进内核事件总线。
+///   `emit(ctx, &EventKey::dynamic(name), event)` 转发进内核事件总线。
+///   无法接收事件时,错误交给 ErrorSink。
 ///   恶形(无 event / 非字符串)丢弃并 `eprintln!` 一行截断摘要——通知帧
 ///   无回执通道,错误无处上报,但不可静默消失,也不可被巨型载荷打爆日志
 ///   (防御纵深)。
 /// - 所有通知帧(Ntf):原样交给 `observe`(可选观察者,如 stderr 摘要
 ///   日志)。**转发先于 observe** 且互不隔离:observe panic/阻塞不吞事件
-///   (emit_keyed 只入队尾链任务,不等待派发完成)。
+///   (emit 只入队尾链任务,不等待派发完成)。
 pub fn forward_host_events(ctx: &Ctx, observe: Option<NotifyHook>) -> NotifyHook {
     let ctx = ctx.clone();
     Arc::new(move |method, params, origin| {
@@ -51,15 +52,17 @@ pub fn forward_host_events(ctx: &Ctx, observe: Option<NotifyHook>) -> NotifyHook
                 if let Some(name) = params.get("event").and_then(Value::as_str) {
                     let payload = params.get("params").cloned().unwrap_or(Value::Null);
                     // 先转发后观察:转发是主线,observe 是诊断辅助。
-                    ctx.events().emit_keyed::<HostEvent>(
+                    if let Err(error) = ctx.events().emit::<HostEvent>(
                         &ctx,
-                        name.to_string(),
+                        &EventKey::dynamic(name),
                         Arc::new(HostEvent {
                             name: name.to_string(),
                             payload,
                             origin: origin.clone(),
                         }),
-                    );
+                    ) {
+                        ctx.error_sink()(Arc::new(error));
+                    }
                 } else {
                     let summary = serde_json::to_string(&params).unwrap_or_else(|_| "?".into());
                     eprintln!(

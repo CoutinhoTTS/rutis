@@ -31,7 +31,7 @@ When your application needs a plugin architecture — editors, bots, agent hosts
 ## 🚀 Getting started
 
 ```bash
-cargo add rutis@0.3
+cargo add rutis@0.4
 ```
 
 A provider, a consumer that declares a dependency, and a provider swap — full code at [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs) (`cargo run -p rutis --example quickstart`):
@@ -162,9 +162,12 @@ view.update(cfg_v2).await?;   // dry-run failure leaves everything untouched; su
 **Dynamic event names** — events whose names are only known at runtime (host events, script-registered channels): typed events + dynamic qualifiers inherit all four dispatch semantics and lifecycle cleanup for free:
 
 ```rust
-ctx.events().on_keyed::<HostEvent>(&ctx, "session/event", listener)?;
-ctx.events().emit_keyed(&ctx, name, Arc::new(event));
+let key = rutis::EventKey::<HostEvent>::dynamic(name);
+ctx.events().on(&ctx, &key, listener)?;
+ctx.events().emit(&ctx, &key, Arc::new(event))?;
 ```
+
+**Patterns and synchronous decisions** — `EventPattern::prefix("room/")` subscribes to dynamic channels and delivers the actual matching key. Events implementing `SyncEvent` can use `bail_sync` / `waterfall_sync`; the terminal can borrow the caller's local variables or MutexGuard. See the [0.3 → 0.4 migration guide (Chinese)](docs/migration-0.3-to-0.4.md). Version 0.4.0 is not published yet.
 
 **API boundaries** — `require/require_as` are strict reads corresponding to Cordis's ordinary plugin service access. They check `injects()` along the fiber ancestry and distinguish undeclared, unavailable, out-of-scope, and inactive reads, retaining the call site. If a read is both out of scope and inactive, the instance boundary takes precedence; registration and instance dispatch define their own error order. `get/get_as` correspond to Cordis's explicit `ctx.get()` locator: they return `Option` without enforcing declarations. A service is normally hidden while its provider is inactive or the reader is unloading, except that the provider's subtree can read its own service during cleanup. Instance keys also have subtree visibility checks. The `Ctx` passed to `on` owns a listener; the callback's `Ctx` belongs to the emitter. Capture the registration `Ctx` when the callback must register resources for its own plugin. See the compiling [listener ownership example](crates/rutis/examples/listener_ctx_ownership.rs).
 
@@ -199,6 +202,8 @@ cargo test                                    # full test suite
 **Bridge & host** — [Protocol plugin design (Chinese)](docs/design-protocol-plugins-2026-09-25.md) · [dual-core architecture & rustification roadmap](docs/design-dual-core-2026-08-20.md) · [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
 
 **Agent** — [agent framework](docs/design-min-agent-2026-08-18.md) · [verification & TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
+
+**Upgrading** — [0.3 → 0.4 migration guide (Chinese)](docs/migration-0.3-to-0.4.md) · [0.1.0 → 0.2.0 migration guide (Chinese)](docs/migration-0.1-to-0.2.md)
 
 ## License
 

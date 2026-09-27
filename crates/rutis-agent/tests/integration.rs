@@ -72,7 +72,10 @@ async fn collect_turn(
     input: &str,
 ) -> (String, Result<String, AgentError>) {
     let text = Arc::new(Mutex::new(String::new()));
-    let _d = root.events().on(root, TextL(text.clone())).unwrap();
+    let _d = root
+        .events()
+        .on(root, &rutis::EventKey::of(), TextL(text.clone()))
+        .unwrap();
     let result = agent.followup(input).await;
     let collected = text.lock().unwrap().clone();
     (collected, result)
@@ -249,7 +252,7 @@ async fn replay_backend_drives_followup() {
         ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
             let text = self.text.clone();
             Box::pin(async move {
-                ctx.events().on(ctx, TextL(text))?;
+                ctx.events().on(ctx, &rutis::EventKey::of(), TextL(text))?;
                 Ok(rutis::Effect::Done)
             })
         }
@@ -378,8 +381,10 @@ async fn events_observed_and_listeners_unload_with_fiber() {
         ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
             let events = self.events.clone();
             Box::pin(async move {
-                ctx.events().on(ctx, StepL(events.clone()))?;
-                ctx.events().on(ctx, ToolL(events))?;
+                ctx.events()
+                    .on(ctx, &rutis::EventKey::of(), StepL(events.clone()))?;
+                ctx.events()
+                    .on(ctx, &rutis::EventKey::of(), ToolL(events))?;
                 Ok(rutis::Effect::Done)
             })
         }
@@ -517,7 +522,8 @@ async fn pre_execute_gate_can_block_specific_tool() {
             ctx: &'a Ctx,
         ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
             Box::pin(async move {
-                ctx.events().on_waterfall(ctx, BashGate)?;
+                ctx.events()
+                    .on_waterfall(ctx, &rutis::EventKey::of(), BashGate)?;
                 Ok(rutis::Effect::Done)
             })
         }
@@ -622,7 +628,8 @@ async fn post_execute_can_rewrite_result() {
             ctx: &'a Ctx,
         ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
             Box::pin(async move {
-                ctx.events().on_waterfall(ctx, RedactResult)?;
+                ctx.events()
+                    .on_waterfall(ctx, &rutis::EventKey::of(), RedactResult)?;
                 Ok(rutis::Effect::Done)
             })
         }

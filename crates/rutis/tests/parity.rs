@@ -429,12 +429,13 @@ async fn logs_disposal_observer_failures_without_rejecting_disposal() {
     }));
     (&view).await.expect("load");
     ctx.events()
-        .on(&ctx, ErrOnDisposed { id: view.id })
+        .on(&ctx, &rutis::EventKey::of(), ErrOnDisposed { id: view.id })
         .unwrap();
     let seen = str_seq();
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             MarkDisposed {
                 id: view.id,
                 seen: seen.clone(),
@@ -515,6 +516,7 @@ async fn does_not_await_async_disposal_observers_but_still_observes_rejections()
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             SlowObserver {
                 id: view.id,
                 started: observer_started.clone(),
@@ -1280,7 +1282,11 @@ async fn inertia_lock_1() {
     let ctx = Ctx::root().unwrap();
     let log: TransitionLog = Arc::new(Mutex::new(Vec::new()));
     ctx.events()
-        .on(&ctx, StatusLog { seen: log.clone() })
+        .on(
+            &ctx,
+            &rutis::EventKey::of(),
+            StatusLog { seen: log.clone() },
+        )
         .unwrap();
     let exec_hold = gate();
     let cleanup_count = counter();
@@ -1342,7 +1348,11 @@ async fn inertia_lock_2() {
     let ctx = Ctx::root().unwrap();
     let log: TransitionLog = Arc::new(Mutex::new(Vec::new()));
     ctx.events()
-        .on(&ctx, StatusLog { seen: log.clone() })
+        .on(
+            &ctx,
+            &rutis::EventKey::of(),
+            StatusLog { seen: log.clone() },
+        )
         .unwrap();
     let exec_hold = gate();
     let applies = counter();
@@ -1428,7 +1438,8 @@ async fn plugin_error() {
         simple("apply-fail", move |ctx: &Ctx| {
             let hits = hits.clone();
             Box::pin(async move {
-                ctx.events().on(ctx, Rec { hits, notify: None })?;
+                ctx.events()
+                    .on(ctx, &rutis::EventKey::of(), Rec { hits, notify: None })?;
                 Err(err("plugin error"))
             })
         })
@@ -1438,7 +1449,8 @@ async fn plugin_error() {
         simple("apply-ok", move |ctx: &Ctx| {
             let hits = hits.clone();
             Box::pin(async move {
-                ctx.events().on(ctx, Rec { hits, notify: None })?;
+                ctx.events()
+                    .on(ctx, &rutis::EventKey::of(), Rec { hits, notify: None })?;
                 Ok(Effect::Done)
             })
         })
@@ -1452,7 +1464,10 @@ async fn plugin_error() {
     assert_eq!(fiber2.state().state, FiberState::Active);
     assert!(sink.lock().unwrap().is_empty()); // 偏差:不记 logger
 
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 1); // 只有成功 fiber 的监听器
 }
 
@@ -1618,6 +1633,7 @@ async fn yield_dispose() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: h_in,
                 notify: None,
@@ -1956,7 +1972,11 @@ async fn plugin_inactive_context() {
                 if let Some(e) = ctx3.effect(move || Effect::Done).err() {
                     errs.lock().unwrap().push(e);
                 }
-                if let Some(e) = ctx3.events().on(&ctx3, Rec { hits, notify: None }).err() {
+                if let Some(e) = ctx3
+                    .events()
+                    .on(&ctx3, &rutis::EventKey::of(), Rec { hits, notify: None })
+                    .err()
+                {
                     errs.lock().unwrap().push(e);
                 }
                 let child = ctx3.plugin(simple("late", move |_c: &Ctx| {
@@ -2012,6 +2032,7 @@ impl Plugin for Nested {
             let h = hits.clone();
             ctx.events().on(
                 ctx,
+                &rutis::EventKey::of(),
                 Rec {
                     hits: h,
                     notify: None,
@@ -2038,6 +2059,7 @@ async fn plugin_nested_plugins() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: root_hits,
                 notify: None,
@@ -2050,15 +2072,24 @@ async fn plugin_nested_plugins() {
     });
     (&view).await.expect("nested applied");
 
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 4); // root + 三层嵌套
 
     view.dispose().await.unwrap();
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 5); // 只剩 root 的 1 个
 
     view.dispose().await.unwrap(); // 二次 dispose 幂等
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 6); // 仍然 1 个
 }
 
@@ -2120,13 +2151,17 @@ async fn plugin_compare_snapshot() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: root_hits,
                 notify: None,
             },
         )
         .unwrap();
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     let baseline = hits.load(Ordering::SeqCst);
 
     let view = ctx.plugin(Nested {
@@ -2134,12 +2169,18 @@ async fn plugin_compare_snapshot() {
         hits: hits.clone(),
     });
     (&view).await.expect("applied");
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     let with_plugin = hits.load(Ordering::SeqCst);
     assert_eq!(with_plugin - baseline, 4);
 
     view.dispose().await.unwrap();
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(hits.load(Ordering::SeqCst) - with_plugin, 1); // 恢复基线
 
     let view2 = ctx.plugin(Nested {
@@ -2147,7 +2188,10 @@ async fn plugin_compare_snapshot() {
         hits: hits.clone(),
     });
     (&view2).await.expect("re-applied");
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), with_plugin + 1 + 4); // 重装一致
 }
 
@@ -2416,16 +2460,21 @@ async fn events_ctx_on() {
         .events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 notify: Some(done.clone()),
             },
         )
         .unwrap();
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     soon(done.notified()).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     soon(async {
         while hits.load(Ordering::SeqCst) < 2 {
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -2434,7 +2483,9 @@ async fn events_ctx_on() {
     .await;
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     d.dispose().await.unwrap();
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2); // 卸载后不再分发
 }
@@ -2449,20 +2500,27 @@ async fn events_ctx_once() {
         .events()
         .once(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 notify: Some(done.clone()),
             },
         )
         .unwrap();
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     soon(done.notified()).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1); // 至多一次
     d.dispose().await.unwrap();
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
@@ -2526,6 +2584,7 @@ async fn events_ctx_waterfall() {
     ctx.events()
         .on_waterfall(
             &ctx,
+            &rutis::EventKey::of(),
             Adder {
                 called: a1_called.clone(),
             },
@@ -2534,6 +2593,7 @@ async fn events_ctx_waterfall() {
     ctx.events()
         .on_waterfall(
             &ctx,
+            &rutis::EventKey::of(),
             Adder {
                 called: a2_called.clone(),
             },
@@ -2541,7 +2601,12 @@ async fn events_ctx_waterfall() {
         .unwrap();
     let out = ctx
         .events()
-        .waterfall(&ctx, &Ping { value: 1 }, ConstTerminal(2))
+        .waterfall(
+            &ctx,
+            &rutis::EventKey::of(),
+            &Ping { value: 1 },
+            ConstTerminal(2),
+        )
         .await
         .unwrap();
     assert_eq!(out, 4); // 1 + (1 + terminal 2)
@@ -2551,6 +2616,7 @@ async fn events_ctx_waterfall() {
     ctx.events()
         .on_waterfall(
             &ctx,
+            &rutis::EventKey::of(),
             Veto {
                 called: veto_called.clone(),
             },
@@ -2559,6 +2625,7 @@ async fn events_ctx_waterfall() {
     ctx.events()
         .on_waterfall(
             &ctx,
+            &rutis::EventKey::of(),
             Adder {
                 called: a4_called.clone(),
             },
@@ -2566,7 +2633,12 @@ async fn events_ctx_waterfall() {
         .unwrap();
     let out2 = ctx
         .events()
-        .waterfall(&ctx, &Ping { value: 1 }, ConstTerminal(2))
+        .waterfall(
+            &ctx,
+            &rutis::EventKey::of(),
+            &Ping { value: 1 },
+            ConstTerminal(2),
+        )
         .await
         .unwrap();
     assert_eq!(out2, 3); // veto 截断:1 + (1 + veto 1)

@@ -426,7 +426,14 @@ impl FiberInner {
             std::mem::take(&mut tr.status_queue)
         };
         for event in queue {
-            self.ctx.shared().bus.emit(&self.ctx, Arc::new(event));
+            if let Err(error) =
+                self.ctx
+                    .shared()
+                    .bus
+                    .emit(&self.ctx, &crate::EventKey::of(), Arc::new(event))
+            {
+                self.ctx.error_sink()(Arc::new(error));
+            }
         }
     }
 
@@ -597,11 +604,14 @@ impl FiberInner {
     /// 画面,sink 仍是额外观察者)。
     async fn fail_load(this: &Arc<Self>, error: CordisError) {
         {
+            let _admission = this.ctx.shared().admission.lock().unwrap();
             let mut tr = this.transition.lock().unwrap();
             Self::set_state(this, &mut tr, FiberState::Unloading);
         }
         this.flush_status();
         this.cancel_current();
+
+        this.wait_events().await;
 
         let cleanup_errors = Self::drain_effects(this).await;
         let sink = this.ctx.error_sink();
@@ -644,6 +654,9 @@ impl FiberInner {
     /// → ④EffectRecord LIFO 清理 → ⑤发布终态。
     async fn unload(this: &Arc<Self>, next: NextState) {
         {
+            // Close dispatch admission and transition together. A snapshot
+            // must either register its flight first or see Unloading.
+            let _admission = this.ctx.shared().admission.lock().unwrap();
             let mut tr = this.transition.lock().unwrap();
             Self::set_state(this, &mut tr, FiberState::Unloading);
         }
@@ -651,6 +664,9 @@ impl FiberInner {
 
         // ② 取消当前代 token(插件后台任务经 ctx.cancelled() 协作退出)
         this.cancel_current();
+
+        // Includes synchronous terminals with no listener cleanup record.
+        this.wait_events().await;
 
         // ④ EffectRecord 严格 LIFO 串行清理
         let errors = Self::drain_effects(this).await;
@@ -844,10 +860,12 @@ async fn recover_driver_panic(
 ) {
     this.cancel_current();
     {
+        let _admission = this.ctx.shared().admission.lock().unwrap();
         let mut tr = this.transition.lock().unwrap();
         FiberInner::set_state(this, &mut tr, FiberState::Unloading);
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.flush_status()));
+    this.wait_events().await;
     let mut errors = vec![Arc::new(panic_error(panic))];
     let cleanup_errors = match CatchUnwind::new(FiberInner::drain_effects(this)).await {
         Ok(cleanup_errors) => cleanup_errors,

@@ -55,7 +55,7 @@
 //! #         print!("{}", e.delta); Box::pin(async { Ok(None) })
 //! #     }
 //! # }
-//! root.events().on(&root, L)?;
+//! root.events().on(&root, &rutis::EventKey::of(), L)?;
 //!
 //! let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
 //! let answer = agent.followup("weather in Oslo?").await?; // 终态

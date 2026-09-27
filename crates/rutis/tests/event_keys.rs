@@ -167,9 +167,9 @@ async fn keyed_channels_are_isolated_by_name() {
     let b_done = Arc::new(Notify::new());
 
     ctx.events()
-        .on_keyed::<Ping>(
+        .on::<Ping>(
             &ctx,
-            "chan/a",
+            &rutis::EventKey::dynamic("chan/a"),
             Counting {
                 hits: hits(),
                 log: Some(log.clone()),
@@ -178,9 +178,9 @@ async fn keyed_channels_are_isolated_by_name() {
         )
         .unwrap();
     ctx.events()
-        .on_keyed::<Ping>(
+        .on::<Ping>(
             &ctx,
-            "chan/b",
+            &rutis::EventKey::dynamic("chan/b"),
             Counting {
                 hits: h_b.clone(),
                 log: None,
@@ -191,14 +191,24 @@ async fn keyed_channels_are_isolated_by_name() {
 
     // 只发 a:b 通道无任务(a 的链处理完即确定)
     ctx.events()
-        .emit_keyed(&ctx, "chan/a", Arc::new(Ping { value: 7 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("chan/a"),
+            Arc::new(Ping { value: 7 }),
+        )
+        .expect("default event dispatch");
     wait_until(|| log.lock().unwrap().len() == 1, done.clone()).await;
     assert_eq!(log.lock().unwrap().as_slice(), [7]);
     assert_eq!(h_b.load(Ordering::SeqCst), 0);
 
     // 发 b:a 通道无任务(此前 a 的链已排干)
     ctx.events()
-        .emit_keyed(&ctx, "chan/b", Arc::new(Ping { value: 9 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("chan/b"),
+            Arc::new(Ping { value: 9 }),
+        )
+        .expect("default event dispatch");
     wait_until(|| h_b.load(Ordering::SeqCst) == 1, b_done.clone()).await;
     assert_eq!(log.lock().unwrap().as_slice(), [7]);
 
@@ -223,9 +233,9 @@ async fn runtime_constructed_name_dispatches() {
     // 名字运行时才知道(如桥转发宿主事件)
     let name = format!("host/session-{}", 42);
     ctx.events()
-        .on_keyed::<Ping>(
+        .on::<Ping>(
             &ctx,
-            name.clone(),
+            &rutis::EventKey::dynamic(name.clone()),
             Counting {
                 hits: h.clone(),
                 log: None,
@@ -234,7 +244,12 @@ async fn runtime_constructed_name_dispatches() {
         )
         .unwrap();
     ctx.events()
-        .emit_keyed(&ctx, name, Arc::new(Ping { value: 1 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic(name),
+            Arc::new(Ping { value: 1 }),
+        )
+        .expect("default event dispatch");
     wait_until(|| h.load(Ordering::SeqCst) == 1, done.clone()).await;
 }
 
@@ -247,9 +262,9 @@ async fn keyed_emit_preserves_emission_order_per_name() {
     let done = Arc::new(Notify::new());
 
     ctx.events()
-        .on_keyed::<Ping>(
+        .on::<Ping>(
             &ctx,
-            "ordered",
+            &rutis::EventKey::dynamic("ordered"),
             Counting {
                 hits: hits(),
                 log: Some(log.clone()),
@@ -263,7 +278,12 @@ async fn keyed_emit_preserves_emission_order_per_name() {
     tokio::spawn(async move {
         for i in 0..20u32 {
             ctx2.events()
-                .emit_keyed(&ctx2, "ordered", Arc::new(Ping { value: i }));
+                .emit(
+                    &ctx2,
+                    &rutis::EventKey::dynamic("ordered"),
+                    Arc::new(Ping { value: i }),
+                )
+                .expect("default event dispatch");
         }
     })
     .await
@@ -279,15 +299,19 @@ async fn keyed_emit_preserves_emission_order_per_name() {
 async fn keyed_serial_short_circuits() {
     let ctx = Ctx::root().unwrap();
     ctx.events()
-        .on_keyed::<Ping>(&ctx, "serial", Bail(11))
+        .on::<Ping>(&ctx, &rutis::EventKey::dynamic("serial"), Bail(11))
         .unwrap();
     ctx.events()
-        .on_keyed::<Ping>(&ctx, "serial", Bail(22))
+        .on::<Ping>(&ctx, &rutis::EventKey::dynamic("serial"), Bail(22))
         .unwrap();
 
     let out = ctx
         .events()
-        .serial_keyed(&ctx, "serial", &Ping { value: 0 })
+        .serial(
+            &ctx,
+            &rutis::EventKey::dynamic("serial"),
+            &Ping { value: 0 },
+        )
         .await
         .unwrap();
     assert_eq!(out, Some(11)); // 注册序第一个短路
@@ -295,7 +319,7 @@ async fn keyed_serial_short_circuits() {
     // 空通道:None
     let out = ctx
         .events()
-        .serial_keyed(&ctx, "empty", &Ping { value: 0 })
+        .serial(&ctx, &rutis::EventKey::dynamic("empty"), &Ping { value: 0 })
         .await
         .unwrap();
     assert_eq!(out, None);
@@ -307,7 +331,7 @@ async fn keyed_waterfall_veto_and_chain() {
 
     // veto:不调 next,终态不可达
     ctx.events()
-        .on_waterfall_keyed::<Ping>(&ctx, "wf", Veto(99))
+        .on_waterfall::<Ping>(&ctx, &rutis::EventKey::dynamic("wf"), Veto(99))
         .unwrap();
     let terminal = TerminalCount {
         value: 1,
@@ -316,7 +340,12 @@ async fn keyed_waterfall_veto_and_chain() {
     let reached = terminal.reached.clone();
     let out = ctx
         .events()
-        .waterfall_keyed(&ctx, "wf", &Ping { value: 1 }, terminal)
+        .waterfall(
+            &ctx,
+            &rutis::EventKey::dynamic("wf"),
+            &Ping { value: 1 },
+            terminal,
+        )
         .await
         .unwrap();
     assert_eq!(out, 99);
@@ -324,13 +353,13 @@ async fn keyed_waterfall_veto_and_chain() {
 
     // 正常链:中间件 + 终态
     ctx.events()
-        .on_waterfall_keyed::<Ping>(&ctx, "wf2", AddEventValue)
+        .on_waterfall::<Ping>(&ctx, &rutis::EventKey::dynamic("wf2"), AddEventValue)
         .unwrap();
     let out = ctx
         .events()
-        .waterfall_keyed(
+        .waterfall(
             &ctx,
-            "wf2",
+            &rutis::EventKey::dynamic("wf2"),
             &Ping { value: 10 },
             TerminalCount {
                 value: 5,
@@ -347,9 +376,9 @@ async fn keyed_parallel_runs_all_and_aggregates() {
     let ctx = Ctx::root().unwrap();
     let h = hits();
     ctx.events()
-        .on_keyed::<Ping>(
+        .on::<Ping>(
             &ctx,
-            "par",
+            &rutis::EventKey::dynamic("par"),
             Counting {
                 hits: h.clone(),
                 log: None,
@@ -357,11 +386,17 @@ async fn keyed_parallel_runs_all_and_aggregates() {
             },
         )
         .unwrap();
-    ctx.events().on_keyed::<Ping>(&ctx, "par", Failing).unwrap();
+    ctx.events()
+        .on::<Ping>(&ctx, &rutis::EventKey::dynamic("par"), Failing)
+        .unwrap();
 
     let out = ctx
         .events()
-        .parallel_keyed(&ctx, "par", Arc::new(Ping { value: 1 }))
+        .parallel(
+            &ctx,
+            &rutis::EventKey::dynamic("par"),
+            Arc::new(Ping { value: 1 }),
+        )
         .await;
     assert!(out.is_err()); // 聚合错误上抛
     assert_eq!(h.load(Ordering::SeqCst), 1); // 全部执行
@@ -375,9 +410,9 @@ async fn keyed_once_fires_exactly_once() {
     let h = hits();
     let done = Arc::new(Notify::new());
     ctx.events()
-        .once_keyed::<Ping>(
+        .once::<Ping>(
             &ctx,
-            "once",
+            &rutis::EventKey::dynamic("once"),
             Counting {
                 hits: h.clone(),
                 log: None,
@@ -387,7 +422,12 @@ async fn keyed_once_fires_exactly_once() {
         .unwrap();
     for _ in 0..3 {
         ctx.events()
-            .emit_keyed(&ctx, "once", Arc::new(Ping { value: 1 }));
+            .emit(
+                &ctx,
+                &rutis::EventKey::dynamic("once"),
+                Arc::new(Ping { value: 1 }),
+            )
+            .expect("default event dispatch");
     }
     // 第一次派发取走 once 条目后,后续 emit 的 take_hooks 同步拿空,
     // 不再产生任务——h==1 即为终态(无"稍后再触发"的路径)。
@@ -421,19 +461,31 @@ async fn keyed_prepend_runs_first() {
 
     // 先注册 base,再 prepend front
     ctx.events()
-        .on_keyed::<Ping>(&ctx, "prep", Named("base", order.clone(), done.clone()))
+        .on::<Ping>(
+            &ctx,
+            &rutis::EventKey::dynamic("prep"),
+            Named("base", order.clone(), done.clone()),
+        )
         .unwrap();
     ctx.events()
-        .on_keyed_opt::<Ping>(
+        .on_opt::<Ping>(
             &ctx,
-            "prep",
+            &rutis::EventKey::dynamic("prep"),
             Named("front", order.clone(), done.clone()),
-            rutis::EventOptions { prepend: true },
+            rutis::EventOptions {
+                prepend: true,
+                ..Default::default()
+            },
         )
         .unwrap();
 
     ctx.events()
-        .emit_keyed(&ctx, "prep", Arc::new(Ping { value: 1 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("prep"),
+            Arc::new(Ping { value: 1 }),
+        )
+        .expect("default event dispatch");
     wait_until(|| order.lock().unwrap().len() == 2, done.clone()).await;
     assert_eq!(order.lock().unwrap().as_slice(), ["front", "base"]);
 }
@@ -445,9 +497,9 @@ async fn same_name_different_event_types_do_not_cross() {
     let ctx = Ctx::root().unwrap();
     let h_ping = hits();
     ctx.events()
-        .on_keyed::<Ping>(
+        .on::<Ping>(
             &ctx,
-            "shared-name",
+            &rutis::EventKey::dynamic("shared-name"),
             Counting {
                 hits: h_ping.clone(),
                 log: None,
@@ -458,7 +510,12 @@ async fn same_name_different_event_types_do_not_cross() {
     // Other 类型同名 emit:Ping 通道的注册表无此键(类型烙在键里),
     // take_hooks 同步拿空、不产生任务——无需等待,断言即确定性。
     ctx.events()
-        .emit_keyed(&ctx, "shared-name", Arc::new(Other));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("shared-name"),
+            Arc::new(Other),
+        )
+        .expect("default event dispatch");
     assert_eq!(h_ping.load(Ordering::SeqCst), 0);
 }
 
@@ -482,9 +539,9 @@ async fn keyed_listener_removed_with_owner_fiber() {
             let hits = self.hits.clone();
             let done = self.done.clone();
             Box::pin(async move {
-                ctx.events().on_keyed::<Ping>(
+                ctx.events().on::<Ping>(
                     ctx,
-                    "owned",
+                    &rutis::EventKey::dynamic("owned"),
                     Counting {
                         hits,
                         log: None,
@@ -503,7 +560,12 @@ async fn keyed_listener_removed_with_owner_fiber() {
     owner.clone().await.expect("owner loads");
 
     ctx.events()
-        .emit_keyed(&ctx, "owned", Arc::new(Ping { value: 1 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("owned"),
+            Arc::new(Ping { value: 1 }),
+        )
+        .expect("default event dispatch");
     wait_until(|| h.load(Ordering::SeqCst) == 1, done.clone()).await;
 
     owner.dispose().await.unwrap();
@@ -511,7 +573,12 @@ async fn keyed_listener_removed_with_owner_fiber() {
     // dispose().await 返回 = 卸载五步完成,监听器已从注册表摘除;
     // 再 emit 走 take_hooks 空快照的同步路径——不触发即确定性,无需等待。
     ctx.events()
-        .emit_keyed(&ctx, "owned", Arc::new(Ping { value: 2 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("owned"),
+            Arc::new(Ping { value: 2 }),
+        )
+        .expect("default event dispatch");
     assert_eq!(h.load(Ordering::SeqCst), 1); // 卸载后不再收
 }
 
@@ -531,9 +598,9 @@ async fn parity_string_event_name_on_once_waterfall() {
     let once_done = Arc::new(Notify::new());
 
     ctx.events()
-        .on_keyed::<Ping>(
+        .on::<Ping>(
             &ctx,
-            "evt/foo",
+            &rutis::EventKey::dynamic("evt/foo"),
             Counting {
                 hits: h_on.clone(),
                 log: None,
@@ -542,9 +609,9 @@ async fn parity_string_event_name_on_once_waterfall() {
         )
         .unwrap();
     ctx.events()
-        .once_keyed::<Ping>(
+        .once::<Ping>(
             &ctx,
-            "evt/bar",
+            &rutis::EventKey::dynamic("evt/bar"),
             Counting {
                 hits: h_once.clone(),
                 log: None,
@@ -554,20 +621,35 @@ async fn parity_string_event_name_on_once_waterfall() {
         .unwrap();
 
     ctx.events()
-        .emit_keyed(&ctx, "evt/foo", Arc::new(Ping { value: 1 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("evt/foo"),
+            Arc::new(Ping { value: 1 }),
+        )
+        .expect("default event dispatch");
     ctx.events()
-        .emit_keyed(&ctx, "evt/bar", Arc::new(Ping { value: 1 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("evt/bar"),
+            Arc::new(Ping { value: 1 }),
+        )
+        .expect("default event dispatch");
     ctx.events()
-        .emit_keyed(&ctx, "evt/bar", Arc::new(Ping { value: 1 }));
+        .emit(
+            &ctx,
+            &rutis::EventKey::dynamic("evt/bar"),
+            Arc::new(Ping { value: 1 }),
+        )
+        .expect("default event dispatch");
     wait_until(|| h_on.load(Ordering::SeqCst) == 1, on_done.clone()).await;
     wait_until(|| h_once.load(Ordering::SeqCst) == 1, once_done.clone()).await;
 
     // waterfall:无中间件直落终态(空链 = 注册序语义的最简内核)
     let out = ctx
         .events()
-        .waterfall_keyed(
+        .waterfall(
             &ctx,
-            "evt/wf",
+            &rutis::EventKey::dynamic("evt/wf"),
             &Ping { value: 3 },
             TerminalCount {
                 value: 0,

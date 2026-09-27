@@ -486,7 +486,7 @@ async fn minimal_turn_edits_file_and_runs_command() {
     }
     let _d = root
         .events()
-        .on(&root, ToolResultL(results.clone()))
+        .on(&root, &rutis::EventKey::of(), ToolResultL(results.clone()))
         .unwrap();
     let text = soon(agent.followup("bump timeout and show the file"))
         .await

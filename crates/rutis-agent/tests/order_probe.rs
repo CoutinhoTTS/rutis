@@ -46,7 +46,9 @@ async fn emit_rounds(root: &Ctx, log: &Arc<Mutex<Vec<usize>>>, gap_ms: u64) -> u
     for _ in 0..ROUNDS {
         log.lock().unwrap().clear();
         for seq in 0..N {
-            root.events().emit(root, Arc::new(ProbeEvent { seq }));
+            root.events()
+                .emit(root, &rutis::EventKey::of(), Arc::new(ProbeEvent { seq }))
+                .expect("default event dispatch");
             if gap_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(gap_ms)).await;
             }
@@ -74,7 +76,9 @@ async fn emit_rounds(root: &Ctx, log: &Arc<Mutex<Vec<usize>>>, gap_ms: u64) -> u
 async fn emit_delivers_in_order_back_to_back_multi_thread() {
     let root = Ctx::root().unwrap();
     let log = Arc::new(Mutex::new(Vec::new()));
-    root.events().on(&root, Recorder(log.clone())).unwrap();
+    root.events()
+        .on(&root, &rutis::EventKey::of(), Recorder(log.clone()))
+        .unwrap();
     let misplaced = emit_rounds(&root, &log, 0).await;
     assert_eq!(misplaced, 0, "同事件类型 emit 必须按发射序投递");
 }
@@ -84,7 +88,9 @@ async fn emit_delivers_in_order_back_to_back_multi_thread() {
 async fn emit_delivers_in_order_with_network_gap() {
     let root = Ctx::root().unwrap();
     let log = Arc::new(Mutex::new(Vec::new()));
-    root.events().on(&root, Recorder(log.clone())).unwrap();
+    root.events()
+        .on(&root, &rutis::EventKey::of(), Recorder(log.clone()))
+        .unwrap();
     let misplaced = emit_rounds(&root, &log, 1).await;
     assert_eq!(misplaced, 0, "同事件类型 emit 必须按发射序投递");
 }
@@ -94,7 +100,9 @@ async fn emit_delivers_in_order_with_network_gap() {
 async fn emit_delivers_in_order_single_thread() {
     let root = Ctx::root().unwrap();
     let log = Arc::new(Mutex::new(Vec::new()));
-    root.events().on(&root, Recorder(log.clone())).unwrap();
+    root.events()
+        .on(&root, &rutis::EventKey::of(), Recorder(log.clone()))
+        .unwrap();
     let misplaced = emit_rounds(&root, &log, 0).await;
     assert_eq!(misplaced, 0, "同事件类型 emit 必须按发射序投递");
 }

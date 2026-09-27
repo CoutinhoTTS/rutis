@@ -91,7 +91,7 @@ async fn exercise() {
     ));
     assert!(isolated.cancellation_token().is_cancelled());
     assert!(matches!(
-        first.events().on(&first, listener),
+        first.events().on(&first, &rutis::EventKey::of(), listener),
         Err(CordisError::StaleGeneration { .. })
     ));
     let child = first.plugin(Noop);

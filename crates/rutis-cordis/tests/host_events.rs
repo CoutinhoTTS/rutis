@@ -114,9 +114,9 @@ async fn host_evt_emit_reaches_keyed_subscriber() {
 
     // 订阅两个名字的宿主事件(运行时字符串)
     ctx.events()
-        .on_keyed::<HostEvent>(
+        .on::<HostEvent>(
             &ctx,
-            "session/event",
+            &rutis::EventKey::dynamic("session/event"),
             Recorder {
                 seen: seen.clone(),
                 done: done.clone(),
@@ -127,9 +127,9 @@ async fn host_evt_emit_reaches_keyed_subscriber() {
         Arc::new(Mutex::new(Vec::new()));
     let other_done = Arc::new(Notify::new());
     ctx.events()
-        .on_keyed::<HostEvent>(
+        .on::<HostEvent>(
             &ctx,
-            "agent/turn",
+            &rutis::EventKey::dynamic("agent/turn"),
             Recorder {
                 seen: other_seen.clone(),
                 done: other_done.clone(),
@@ -231,9 +231,9 @@ async fn event_bus_survives_bridge_drop() {
     let seen: Arc<Mutex<Vec<(String, Value, EventOrigin)>>> = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(Notify::new());
     ctx.events()
-        .on_keyed::<HostEvent>(
+        .on::<HostEvent>(
             &ctx,
-            "after/drop",
+            &rutis::EventKey::dynamic("after/drop"),
             Recorder {
                 seen: seen.clone(),
                 done: done.clone(),
@@ -247,17 +247,19 @@ async fn event_bus_survives_bridge_drop() {
     drop(host_wire);
     drop(bridge); // 桥断连/析构
 
-    // ctx 独立于 bridge 存活:emit_keyed 直发仍达订阅方
+    // ctx 独立于 bridge 存活:emit 直发仍达订阅方
     // (emit 为同步快照 + spawn 尾链,不依赖 bridge)
-    ctx.events().emit_keyed::<HostEvent>(
-        &ctx,
-        "after/drop",
-        Arc::new(HostEvent {
-            name: "after/drop".into(),
-            payload: json!({ "ok": true }),
-            origin: EventOrigin::default(),
-        }),
-    );
+    ctx.events()
+        .emit::<HostEvent>(
+            &ctx,
+            &rutis::EventKey::dynamic("after/drop"),
+            Arc::new(HostEvent {
+                name: "after/drop".into(),
+                payload: json!({ "ok": true }),
+                origin: EventOrigin::default(),
+            }),
+        )
+        .expect("default event dispatch");
     wait_until(|| seen.lock().unwrap().len() == 1, done.clone()).await;
     assert_eq!(seen.lock().unwrap()[0].0, "after/drop");
 }
