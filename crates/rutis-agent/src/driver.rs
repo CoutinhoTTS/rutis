@@ -19,7 +19,7 @@ use aimux_core::options::CallOptions;
 use aimux_core::stream_part::StreamPart;
 use aimux_core::tool::ToolCall;
 use futures::StreamExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Plugin, TypeKey};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentError, AgentStatus, SessionSnapshot, StatusCell};
@@ -161,98 +161,67 @@ impl AgentDriver {
     }
 
     fn emit_delta(&self, session: SessionId, step: usize, delta: String) {
-        self.ctx
-            .events()
-            .emit(
-                &self.ctx,
-                &rutis::EventKey::of(),
-                Arc::new(AgentTextDelta {
-                    session,
-                    step,
-                    delta,
-                }),
-            )
-            .expect("default event dispatch");
+        self.emit_default(AgentTextDelta {
+            session,
+            step,
+            delta,
+        });
     }
 
     fn emit_reasoning(&self, session: SessionId, step: usize, delta: String) {
-        self.ctx
-            .events()
-            .emit(
-                &self.ctx,
-                &rutis::EventKey::of(),
-                Arc::new(AgentReasoning {
-                    session,
-                    step,
-                    delta,
-                }),
-            )
-            .expect("default event dispatch");
+        self.emit_default(AgentReasoning {
+            session,
+            step,
+            delta,
+        });
     }
 
     fn emit_step(&self, session: SessionId, step: usize, content: Option<String>, calls: usize) {
-        self.ctx
-            .events()
-            .emit(
-                &self.ctx,
-                &rutis::EventKey::of(),
-                Arc::new(AgentStepEvent {
-                    session,
-                    step,
-                    content,
-                    tool_calls: calls,
-                }),
-            )
-            .expect("default event dispatch");
+        self.emit_default(AgentStepEvent {
+            session,
+            step,
+            content,
+            tool_calls: calls,
+        });
     }
 
     fn emit_tool_call(&self, session: SessionId, name: &str, args: &serde_json::Value) {
-        self.ctx
-            .events()
-            .emit(
-                &self.ctx,
-                &rutis::EventKey::of(),
-                Arc::new(AgentToolCall {
-                    session,
-                    name: name.to_string(),
-                    args: args.clone(),
-                }),
-            )
-            .expect("default event dispatch");
+        self.emit_default(AgentToolCall {
+            session,
+            name: name.to_string(),
+            args: args.clone(),
+        });
     }
 
     fn emit_tool_result(&self, session: SessionId, name: &str, out: &ToolOutput) {
-        self.ctx
-            .events()
-            .emit(
-                &self.ctx,
-                &rutis::EventKey::of(),
-                Arc::new(AgentToolResult {
-                    session,
-                    name: name.to_string(),
-                    ok: out.ok,
-                    output: out.output.clone(),
-                }),
-            )
-            .expect("default event dispatch");
+        self.emit_default(AgentToolResult {
+            session,
+            name: name.to_string(),
+            ok: out.ok,
+            output: out.output.clone(),
+        });
     }
 
     fn emit_turn_end(&self, session: SessionId, result: &Result<String, AgentError>) {
-        self.ctx
+        self.emit_default(AgentTurnEnd {
+            session,
+            ok: result.is_ok(),
+            error: match result {
+                Ok(_) => String::new(),
+                Err(e) => e.to_string(),
+            },
+        });
+    }
+
+    /// 通知无法入队时交给 ErrorSink,不中断 agent 循环。
+    fn emit_default<E: Event>(&self, event: E) {
+        if let Err(error) = self
+            .ctx
             .events()
-            .emit(
-                &self.ctx,
-                &rutis::EventKey::of(),
-                Arc::new(AgentTurnEnd {
-                    session,
-                    ok: result.is_ok(),
-                    error: match result {
-                        Ok(_) => String::new(),
-                        Err(e) => e.to_string(),
-                    },
-                }),
-            )
-            .expect("default event dispatch");
+            .emit(&self.ctx, &EventKey::of(), Arc::new(event))
+        {
+            self.ctx.error_sink()(Arc::new(error));
+        }
     }
 
     /// 工具三段管线(设计 §四.1):`tools/pre-execute` 门控 → 执行 →
@@ -273,7 +242,7 @@ impl AgentDriver {
             .events()
             .waterfall(
                 &self.ctx,
-                &rutis::EventKey::of(),
+                &EventKey::of(),
                 &ToolPreExecute {
                     session,
                     call: call.clone(),
@@ -296,7 +265,7 @@ impl AgentDriver {
             .events()
             .waterfall(
                 &self.ctx,
-                &rutis::EventKey::of(),
+                &EventKey::of(),
                 &ToolPostExecute {
                     session,
                     call: call.clone(),
@@ -400,7 +369,7 @@ impl AgentDriver {
                     .events()
                     .waterfall(
                         &self.ctx,
-                        &rutis::EventKey::of(),
+                        &EventKey::of(),
                         &AgentPreStep {
                             session,
                             step,

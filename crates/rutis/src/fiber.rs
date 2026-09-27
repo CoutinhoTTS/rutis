@@ -426,11 +426,14 @@ impl FiberInner {
             std::mem::take(&mut tr.status_queue)
         };
         for event in queue {
-            self.ctx
-                .shared()
-                .bus
-                .emit(&self.ctx, &crate::EventKey::of(), Arc::new(event))
-                .expect("default event dispatch");
+            if let Err(error) =
+                self.ctx
+                    .shared()
+                    .bus
+                    .emit(&self.ctx, &crate::EventKey::of(), Arc::new(event))
+            {
+                self.ctx.error_sink()(Arc::new(error));
+            }
         }
     }
 

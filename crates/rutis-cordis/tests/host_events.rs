@@ -247,7 +247,7 @@ async fn event_bus_survives_bridge_drop() {
     drop(host_wire);
     drop(bridge); // 桥断连/析构
 
-    // ctx 独立于 bridge 存活:emit_keyed 直发仍达订阅方
+    // ctx 独立于 bridge 存活:emit 直发仍达订阅方
     // (emit 为同步快照 + spawn 尾链,不依赖 bridge)
     ctx.events()
         .emit::<HostEvent>(

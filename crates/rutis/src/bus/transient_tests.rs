@@ -75,7 +75,6 @@ async fn thousand_sync_subtrees_release_exact_and_pattern_tables() {
         assert!(inner.sync_wf_hooks.is_empty());
         assert_eq!(inner.sync_hooks.pattern_count(), 0);
         assert_eq!(inner.sync_wf_hooks.pattern_count(), 0);
-        assert!(inner.dispatch_tail.is_empty());
     }
     root.shutdown().await.unwrap();
 }

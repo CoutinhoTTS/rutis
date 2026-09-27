@@ -29,13 +29,13 @@ bus.emit(&ctx, &named, Arc::new(event))?;
 | `serial(ctx, event).await` | `serial(ctx, &key, event).await` |
 | `waterfall(ctx, event, terminal).await` | `waterfall(ctx, &key, event, terminal).await` |
 
-原 `*_keyed` / `*_instance` 方法保留为弃用包装。原默认方法已经改签名，不能根据参数数量重载。实例 waterfall、once 和 prepend 现在也通过同一键接口使用。
+Rust 不能按参数数量重载同名方法，因此原默认方法改为接收事件键。原 `*_keyed` / `*_instance` 方法保留为弃用包装。实例 waterfall、once 和 prepend 现在也通过同一键接口使用。
 
-`emit` 返回同步接纳结果；实例越界 / 关闭会返回错误。已接纳监听器的错误仍进入 ErrorSink，不表示派发已经完成。非实例派发保留旧上下文的历史行为；所有派发要求总线与上下文来自同一 root。
+`emit` 返回是否接收了本次调用；实例越界 / 关闭会返回错误。返回成功不表示监听器已经执行完；监听器执行失败仍交给 ErrorSink。非实例派发保留旧上下文的历史行为；`ctx` 必须属于这个总线。库内状态通知、agent 通知和宿主事件转发无法入队时，也把错误交给 ErrorSink。
 
 `EventKey::named` 可用于 const 静态键且不分配。静态 / 动态同名等值，默认键不等于任何命名键。身份仍包含类型和实例号；名字自由构造不会检查拼写，业务接口应导出键常量或构造函数。
 
-`EventOptions` 增加 `once`：旧结构体字面量改成 `EventOptions { prepend: true, ..Default::default() }`。`on_waterfall_opt` 同样支持 once。once 在派发取得快照时被认领，前面的 short circuit / veto 可以使它没有实际调用；语义是至多一次。
+`EventOptions` 新增 `once` 字段。旧代码直接构造该结构体时，需要补 `once: false` 或 `..Default::default()`。例如，保留原 prepend 设置用 `EventOptions { prepend: true, ..Default::default() }`；只调用一次用 `EventOptions { once: true, ..Default::default() }`。`on_waterfall_opt` 同样支持 once。once 在派发取得快照时被认领，前面的监听器可能中止后续处理，使它没有实际执行；语义是至多一次。
 
 ## 一次订阅一组动态名字
 
@@ -44,7 +44,7 @@ bus.on_pattern(&ctx, EventPattern::<RoomEvent>::prefix("room/"), listener)?;
 bus.on_pattern(&ctx, EventPattern::any_prefix(["room/", "room/special"]), listener)?;
 ```
 
-`PatternListener<E>` 接收实际命中的 `EventKey<E>`、借用的载荷与发射方 Ctx。键按值传入，动态名复用 Arc；监听器可保存名字而不会受到续延借用生命周期限制。
+`PatternListener<E>` 接收实际命中的 `EventKey<E>`、借用的载荷与发送方 Ctx。键按值传入，动态名复用 Arc；监听器可以保存这个键，在回调返回后继续使用。
 
 模式仅匹配同事件类型的显式命名、非实例通道；空前缀匹配全部此类通道。实例隔离不被模式绕过。一个注册的重叠前缀只选择一次；同一回调独立注册两次仍是两份订阅。
 
@@ -76,7 +76,7 @@ bail 按注册 / prepend 顺序返回第一个 Some；waterfall 的 `SyncNext::c
 
 可运行例子：[sync_decision.rs](../crates/rutis/examples/sync_decision.rs)。调用方持锁读旧值，在终点生成候选值，监听器改写返回值，调用方校验后仍在同一个临界区内提交：`cargo run -p rutis --example sync_decision`。
 
-普通错误原样返回。监听器 / 终点 panic 被捕获，报告一次 ErrorSink，并通过 `CordisError::SyncEventPanicked` 返回；ErrorSink 自己的 panic 也被隔离。投递尝试观察器沿用原契约，panic 报告后继续；模式新增 BailSync / WaterfallSync。
+普通错误原样返回。监听器 / 终点 panic 被捕获，报告一次 ErrorSink，并通过 `CordisError::SyncEventPanicked` 返回；ErrorSink 自己的 panic 也被隔离。投递尝试观察器沿用原契约，panic 报告后继续；`DispatchMode` 枚举新增 `BailSync` / `WaterfallSync` 两个值。
 
 若业务穷举匹配 `DispatchMode` 或 `CordisError`，需补齐新增分支。同步派发是 Rust 本地调用，不增加桥协议的远程派发模式。
 
@@ -90,7 +90,7 @@ bail 按注册 / prepend 顺序返回第一个 Some；waterfall 的 `SyncNext::c
 
 等待沿用 owner 级计数，可能包括同一 owner 的其他回调。保护覆盖同步派发调用栈，不包括返回后的业务提交；服务更新继续复查 provider、generation 与绑定身份。
 
-现有服务拦截仍按注册顺序把改写结果交给下一项。固定输入 waterfall 的值从下游往上返回，两者不等价；本次没有迁移服务拦截。
+现有服务拦截按注册顺序把改写后的值交给下一项。事件 waterfall 中，下游仍收到原始输入，返回值按回调嵌套顺序向上返回。因此服务拦截保留原实现。
 
 ## dylib SDK 与基准
 
@@ -100,12 +100,6 @@ rutis 的破坏性 API 版本准备为 0.4.0；共享 SDK 版本准备为 0.2.0�
 cargo bench -p rutis --bench events
 ```
 
-基准报告同步空链 / 1 / 8 / 64 监听器、实例空链，以及异步精确派发与 0 / 1 / 8 / 64 / 1024 个前缀。同步空链仍包含准入、重入保护和在途计数；没有 future / spawn 不意味着只有一次查找或没有其他成本。基准结果是本机样本，不作为跨机器的固定延迟保证。
+基准报告同步空链 / 1 / 8 / 64 监听器、实例空链，以及异步精确派发与 0 / 1 / 8 / 64 / 1024 个前缀。同步空链没有 future / spawn，仍需检查上下文、阻止重入并记录正在执行的调用。基准结果是本机样本，不作为跨机器的固定延迟保证。
 
 本机结果、测试方法与新旧精确派发对比见 [性能样本](performance-event-dispatch-2026-09-27.md)。
-
-## 本分支验证
-
-2026-09-27，Linux / rustc 1.98.1：全工作区 389 项通过、2 项沿用原 ignored 设置（真实后端和需外部检出的 Cordis host）。真实 Node 进程的 TCP / LLM 端到端测试已运行。载荷错配、重复 next、续延逃逸的 compile-fail 文档测试通过。
-
-`cargo check --workspace --all-targets --offline`、`cargo clippy -p rutis --all-targets --offline -- -D warnings`、fmt 与 diff 检查通过。CLI 的 dylib feature 测试与 `tools/test-dylib.sh`、`tools/test-dylib-launcher.sh`、`tools/test-dylib-repro.sh` 全部通过，覆盖插件换版 / 重载、加载前身份拒绝、执行前篡改拒绝，以及不同源码 / target 路径产物一致。同步持锁例子和两项性能命令均已运行。

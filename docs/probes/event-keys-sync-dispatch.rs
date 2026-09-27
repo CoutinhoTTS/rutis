@@ -1,4 +1,11 @@
 // Standalone design probe, not an EventBus implementation.
+// Run from the repository root:
+// rustc --edition=2021 docs/probes/event-keys-sync-dispatch.rs -o /tmp/rutis-events-probe
+// /tmp/rutis-events-probe
+// These three commands must fail to compile:
+// rustc --edition=2021 --cfg mismatched_payload docs/probes/event-keys-sync-dispatch.rs
+// rustc --edition=2021 --cfg double_next docs/probes/event-keys-sync-dispatch.rs
+// rustc --edition=2021 --cfg escape_next docs/probes/event-keys-sync-dispatch.rs
 use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};

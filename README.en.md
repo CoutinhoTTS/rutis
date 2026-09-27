@@ -167,7 +167,7 @@ ctx.events().on(&ctx, &key, listener)?;
 ctx.events().emit(&ctx, &key, Arc::new(event))?;
 ```
 
-**Patterns and synchronous decisions** — `EventPattern::prefix("room/")` subscribes to dynamic channels and delivers the actual matching key. Events implementing `SyncEvent` can use `bail_sync` / `waterfall_sync`; the terminal can borrow caller-held state. See the [0.3 → 0.4 migration guide](docs/migration-0.3-to-0.4.md). Version 0.4.0 is not published yet.
+**Patterns and synchronous decisions** — `EventPattern::prefix("room/")` subscribes to dynamic channels and delivers the actual matching key. Events implementing `SyncEvent` can use `bail_sync` / `waterfall_sync`; the terminal can borrow the caller's local variables or MutexGuard. See the [0.3 → 0.4 migration guide (Chinese)](docs/migration-0.3-to-0.4.md). Version 0.4.0 is not published yet.
 
 **API boundaries** — `require/require_as` are strict reads corresponding to Cordis's ordinary plugin service access. They check `injects()` along the fiber ancestry and distinguish undeclared, unavailable, out-of-scope, and inactive reads, retaining the call site. If a read is both out of scope and inactive, the instance boundary takes precedence; registration and instance dispatch define their own error order. `get/get_as` correspond to Cordis's explicit `ctx.get()` locator: they return `Option` without enforcing declarations. A service is normally hidden while its provider is inactive or the reader is unloading, except that the provider's subtree can read its own service during cleanup. Instance keys also have subtree visibility checks. The `Ctx` passed to `on` owns a listener; the callback's `Ctx` belongs to the emitter. Capture the registration `Ctx` when the callback must register resources for its own plugin. See the compiling [listener ownership example](crates/rutis/examples/listener_ctx_ownership.rs).
 
@@ -202,6 +202,8 @@ cargo test                                    # full test suite
 **Bridge & host** — [Protocol plugin design (Chinese)](docs/design-protocol-plugins-2026-09-25.md) · [dual-core architecture & rustification roadmap](docs/design-dual-core-2026-08-20.md) · [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
 
 **Agent** — [agent framework](docs/design-min-agent-2026-08-18.md) · [verification & TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
+
+**Upgrading** — [0.3 → 0.4 migration guide (Chinese)](docs/migration-0.3-to-0.4.md) · [0.1.0 → 0.2.0 migration guide (Chinese)](docs/migration-0.1-to-0.2.md)
 
 ## License
 

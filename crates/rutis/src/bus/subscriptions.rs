@@ -149,6 +149,8 @@ impl<C> HookTable<C> {
     pub(super) fn take(&mut self, key: &TypeKey, live_exact: bool) -> Vec<Arc<Hook<C>>> {
         let mut snapshot = Vec::new();
         if let Some(list) = self.exact.get_mut(key) {
+            // Non-instance async exact listeners keep their legacy snapshot and
+            // unload behavior. Patterns and sync listeners always require live owners.
             if live_exact {
                 snapshot.extend(list.iter().filter(|hook| hook.live()).cloned());
             } else {

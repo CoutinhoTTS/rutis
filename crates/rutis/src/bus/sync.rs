@@ -93,6 +93,8 @@ thread_local! {
 struct ReentryGuard;
 impl ReentryGuard {
     fn enter(bus: &EventBus, key: &TypeKey) -> Result<Self, CordisError> {
+        // Dispatch borrows the bus until this guard drops, so its Arc allocation
+        // remains alive and this address cannot be reused while it is active.
         let identity = Arc::as_ptr(&bus.inner) as usize;
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
@@ -229,11 +231,7 @@ impl EventBus {
 
     fn sync_preflight(&self, ctx: &Ctx, key: &TypeKey) -> Result<(), CordisError> {
         ctx.registration_preflight()?;
-        if !Arc::ptr_eq(&self.inner, &ctx.events().inner) {
-            return Err(CordisError::Validation {
-                issues: vec!["synchronous dispatch belongs to another event bus".into()],
-            });
-        }
+        self.ensure_bus(ctx)?;
         ctx.check_instance(key)
     }
 
