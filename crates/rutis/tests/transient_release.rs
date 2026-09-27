@@ -43,7 +43,8 @@ impl Plugin for Probe {
         let channel = self.channel.clone();
         Box::pin(async move {
             ctx.provide_as::<u32>(key, Arc::new(7))?;
-            ctx.events().on_keyed::<Ping>(ctx, channel, Nop)?;
+            ctx.events()
+                .on::<Ping>(ctx, &rutis::EventKey::dynamic(channel), Nop)?;
             Ok(Effect::Done)
         })
     }
@@ -92,7 +93,12 @@ async fn churn_on_long_lived_root_releases_instances() {
         drop(view);
         // 已销毁通道再派发:无监听器早退,不 panic
         ctx.events()
-            .emit_keyed::<Ping>(&ctx, format!("branch/{i}"), Arc::new(Ping));
+            .emit::<Ping>(
+                &ctx,
+                &rutis::EventKey::dynamic(format!("branch/{i}")),
+                Arc::new(Ping),
+            )
+            .expect("default event dispatch");
     }
     // 实例析构尾随 dispose 完成点(mount 记录 drain 释放最后引用)
     let start = tokio::time::Instant::now();

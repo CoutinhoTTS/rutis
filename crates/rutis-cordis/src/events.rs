@@ -1,7 +1,7 @@
 //! 宿主事件链路(M3,design-config-hot-update-and-dynamic-events §2.4):
 //! `evt/emit` 通知帧 → rutis 内核 keyed 事件的翻译缝。
 //!
-//! 订阅方:`ctx.events().on_keyed::<HostEvent>(ctx, "session/event", listener)`;
+//! 订阅方:`ctx.events().on::<HostEvent>(ctx, &rutis::EventKey::dynamic("session/event"), listener)`;
 //! 四分发语义 / fiber 生命周期清理 / once / prepend 全部由内核 keyed 面
 //! 免费提供。事件名 = `params.event`(字符串内容匹配,静态/动态互通)。
 
@@ -51,15 +51,17 @@ pub fn forward_host_events(ctx: &Ctx, observe: Option<NotifyHook>) -> NotifyHook
                 if let Some(name) = params.get("event").and_then(Value::as_str) {
                     let payload = params.get("params").cloned().unwrap_or(Value::Null);
                     // 先转发后观察:转发是主线,observe 是诊断辅助。
-                    ctx.events().emit_keyed::<HostEvent>(
-                        &ctx,
-                        name.to_string(),
-                        Arc::new(HostEvent {
-                            name: name.to_string(),
-                            payload,
-                            origin: origin.clone(),
-                        }),
-                    );
+                    ctx.events()
+                        .emit::<HostEvent>(
+                            &ctx,
+                            &rutis::EventKey::dynamic(name.to_string()),
+                            Arc::new(HostEvent {
+                                name: name.to_string(),
+                                payload,
+                                origin: origin.clone(),
+                            }),
+                        )
+                        .expect("default event dispatch");
                 } else {
                     let summary = serde_json::to_string(&params).unwrap_or_else(|_| "?".into());
                     eprintln!(

@@ -2,7 +2,7 @@
 name = "rutis-sdk"
 description = "Shared Rust ABI and metadata for trusted rutis dylib plugins"
 edition.workspace = true
-version = "0.1.0"
+version = "0.2.0"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ test = false
 doctest = false
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.3.0" }
+rutis = { path = "../rutis", version = "0.4.0" }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["full"] }
 serde_json = { version = "1", features = ["preserve_order"] }

@@ -252,9 +252,12 @@ async fn denied_reads_do_not_run_checks_or_change_bindings_and_callbacks_are_che
 
     let reasons = Arc::new(Mutex::new(Vec::new()));
     ctx.events()
-        .on(&ctx, CallbackRead(reasons.clone()))
+        .on(&ctx, &rutis::EventKey::of(), CallbackRead(reasons.clone()))
         .unwrap();
-    ctx.events().serial(&ctx, &Pulse).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Pulse)
+        .await
+        .unwrap();
     assert_eq!(
         *reasons.lock().unwrap(),
         vec![ServiceReadFailure::Undeclared]

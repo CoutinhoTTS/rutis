@@ -67,7 +67,10 @@ impl rutis::Listener<AgentToolCall> for ToolFlagL {
 /// 跑一个 turn,返回拼接增量文本(终态断言在调用侧)。
 async fn run_turn(root: &Ctx, agent: &Arc<dyn Agent>, input: &str) -> String {
     let text = Arc::new(Mutex::new(String::new()));
-    let _d = root.events().on(root, TextL(text.clone())).unwrap();
+    let _d = root
+        .events()
+        .on(root, &rutis::EventKey::of(), TextL(text.clone()))
+        .unwrap();
     let result = agent.followup(input).await.expect("turn ok");
     drop(result);
     let collected = text.lock().unwrap().clone();
@@ -108,7 +111,7 @@ async fn real_backend_multi_turn_with_tool() {
     let saw_tool = Arc::new(AtomicBool::new(false));
     let _tool_l = root
         .events()
-        .on(&root, ToolFlagL(saw_tool.clone()))
+        .on(&root, &rutis::EventKey::of(), ToolFlagL(saw_tool.clone()))
         .unwrap();
     let a1 = run_turn(
         &root,

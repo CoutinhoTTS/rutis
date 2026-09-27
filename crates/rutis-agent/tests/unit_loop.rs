@@ -152,7 +152,10 @@ async fn run_turn(
     input: &str,
 ) -> (String, Result<String, AgentError>) {
     let text = Arc::new(Mutex::new(String::new()));
-    let _d = observer.events().on(observer, TextL(text.clone())).unwrap();
+    let _d = observer
+        .events()
+        .on(observer, &rutis::EventKey::of(), TextL(text.clone()))
+        .unwrap();
     let result = agent.followup(input).await;
     let collected = text.lock().unwrap().clone();
     (collected, result)
@@ -175,7 +178,9 @@ async fn direct_answer_without_tools() {
     let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
     let (_ov, _octx) = observer(&root, move |ctx| {
-        ctx.events().on(ctx, DeltaTxL(tx.clone())).unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), DeltaTxL(tx.clone()))
+            .unwrap();
     })
     .await;
 
@@ -212,8 +217,12 @@ async fn text_arrives_as_multiple_deltas() {
     let text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let (n, t) = (deltas.clone(), text.clone());
     let (_ov, _octx) = observer(&root, move |ctx| {
-        ctx.events().on(ctx, CountL(n.clone())).unwrap();
-        ctx.events().on(ctx, TextL(t.clone())).unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), CountL(n.clone()))
+            .unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), TextL(t.clone()))
+            .unwrap();
     })
     .await;
     agent.followup("stream").await.unwrap();
@@ -253,7 +262,9 @@ async fn tool_round_trip() {
     let agent = root.get_as::<dyn Agent>(agent_key()).unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
     let (_ov, _octx) = observer(&root, move |ctx| {
-        ctx.events().on(ctx, DeltaTxL(tx.clone())).unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), DeltaTxL(tx.clone()))
+            .unwrap();
     })
     .await;
 
@@ -384,8 +395,12 @@ async fn multiple_tool_calls_run_in_order() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Seen>(8);
     let (tx1, tx2) = (tx.clone(), tx.clone());
     let (_ov, _octx) = observer(&root, move |ctx| {
-        ctx.events().on(ctx, ToolCallTxL(tx1.clone())).unwrap();
-        ctx.events().on(ctx, ToolResultTxL(tx2.clone())).unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), ToolCallTxL(tx1.clone()))
+            .unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), ToolResultTxL(tx2.clone()))
+            .unwrap();
     })
     .await;
     agent.followup("add twice").await.unwrap();
@@ -720,7 +735,9 @@ async fn cancel_interrupts_mid_stream() {
     // 首个增量到(driver 在流内)→ cancel ⇒ 循环 select 到取消
     let (dtx, mut drx) = tokio::sync::mpsc::channel::<String>(4);
     let (_ov, _octx) = observer(&root, move |ctx| {
-        ctx.events().on(ctx, DeltaTxL(dtx.clone())).unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), DeltaTxL(dtx.clone()))
+            .unwrap();
     })
     .await;
 
@@ -827,9 +844,15 @@ async fn status_transitions_and_session_grows() {
     let hold_slot = Mutex::new(Some(hold));
     let (_ov, octx) = observer(&root, move |ctx| {
         ctx.events()
-            .on_waterfall(ctx, hold_slot.lock().unwrap().take().unwrap())
+            .on_waterfall(
+                ctx,
+                &rutis::EventKey::of(),
+                hold_slot.lock().unwrap().take().unwrap(),
+            )
             .unwrap();
-        ctx.events().on(ctx, TurnEndTxL(etx.clone())).unwrap();
+        ctx.events()
+            .on(ctx, &rutis::EventKey::of(), TurnEndTxL(etx.clone()))
+            .unwrap();
     })
     .await;
 

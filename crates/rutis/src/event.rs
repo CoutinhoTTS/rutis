@@ -8,6 +8,12 @@ use crate::ctx::Ctx;
 use crate::error::CordisError;
 use crate::BoxFuture;
 
+pub(crate) mod sync;
+pub use sync::{
+    SyncEvent, SyncListener, SyncNext, SyncPatternListener, SyncPatternWaterfallListener,
+    SyncWaterfallListener,
+};
+
 /// 类型化事件(D16)。`NAME` 仅日志诊断,不参与唯一性与分发;
 /// `Value` 是 serial 短路值类型(裁决开放问题 2)。
 pub trait Event: Send + Sync + 'static {
@@ -55,6 +61,100 @@ pub trait WaterfallListener<E: Event>: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<E::Value, CordisError>>;
 }
 
+/// A grouped prefix listener also receives the actual matching channel key.
+pub trait PatternListener<E: Event>: Send + Sync + 'static {
+    fn call<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        key: crate::EventKey<E>,
+        e: &'a E,
+    ) -> BoxFuture<'a, Result<Option<E::Value>, CordisError>>;
+}
+
+impl<E: Event, F> PatternListener<E> for F
+where
+    F: for<'a> Fn(
+            &'a Ctx,
+            crate::EventKey<E>,
+            &'a E,
+        ) -> BoxFuture<'a, Result<Option<E::Value>, CordisError>>
+        + Send
+        + Sync
+        + 'static,
+{
+    fn call<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        key: crate::EventKey<E>,
+        e: &'a E,
+    ) -> BoxFuture<'a, Result<Option<E::Value>, CordisError>> {
+        self(ctx, key, e)
+    }
+}
+
+pub trait PatternWaterfallListener<E: Event>: Send + Sync + 'static {
+    fn call<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        key: crate::EventKey<E>,
+        e: &'a E,
+        next: Next<'a, E>,
+    ) -> BoxFuture<'a, Result<E::Value, CordisError>>;
+}
+
+pub(crate) struct PatternAdapter<L, E: Event>(pub L, pub PhantomData<fn() -> E>);
+impl<E: Event, L: PatternListener<E>> crate::bus::ErasedCall for PatternAdapter<L, E> {
+    fn call<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        key: &'a crate::TypeKey,
+        e: &'a DynEvent,
+    ) -> BoxFuture<'a, Result<Option<ErasedValue>, CordisError>> {
+        Box::pin(async move {
+            let e = e
+                .downcast_ref::<E>()
+                .ok_or_else(|| CordisError::PluginFailed("event type mismatch".into()))?;
+            let key = crate::EventKey::from_erased(key);
+            self.0
+                .call(ctx, key, e)
+                .await
+                .map(|value| value.map(|v| Box::new(v) as ErasedValue))
+        })
+    }
+}
+
+pub(crate) struct PatternWaterfallAdapter<L, E: Event>(pub L, pub PhantomData<fn() -> E>);
+impl<E: Event, L: PatternWaterfallListener<E>> crate::bus::ErasedWaterfallCall
+    for PatternWaterfallAdapter<L, E>
+{
+    fn call<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        key: &'a crate::TypeKey,
+        e: &'a DynEvent,
+        next: crate::bus::ErasedNext<'a>,
+    ) -> BoxFuture<'a, Result<ErasedValue, CordisError>> {
+        Box::pin(async move {
+            let e = e
+                .downcast_ref::<E>()
+                .ok_or_else(|| CordisError::PluginFailed("event type mismatch".into()))?;
+            let key = crate::EventKey::from_erased(key);
+            self.0
+                .call(
+                    ctx,
+                    key,
+                    e,
+                    Next {
+                        inner: next,
+                        _marker: PhantomData,
+                    },
+                )
+                .await
+                .map(|value| Box::new(value) as ErasedValue)
+        })
+    }
+}
+
 /// waterfall 终态续延(D17):由调用方提供的兜底行为,不与事件并列。
 pub trait Terminal<E: Event>: Send + 'static {
     fn call<'a>(&'a self, ctx: &'a Ctx, e: &'a E) -> BoxFuture<'a, Result<E::Value, CordisError>>;
@@ -97,6 +197,9 @@ impl<'a, E: Event> Next<'a, E> {
 pub struct EventOptions {
     /// 插到现有监听器之前(默认追加在后)。
     pub prepend: bool,
+    /// Claim this registration at most once, when a dispatch selects its
+    /// snapshot. A preceding short circuit can still skip its actual call.
+    pub once: bool,
 }
 
 // ── 类型擦除适配层(内部) ────────────────────────────────────────
@@ -110,6 +213,7 @@ impl<E: Event, L: Listener<E>> crate::bus::ErasedCall for ListenerAdapter<L, E> 
     fn call<'a>(
         &'a self,
         ctx: &'a Ctx,
+        _key: &'a crate::TypeKey,
         e: &'a DynEvent,
     ) -> BoxFuture<'a, Result<Option<ErasedValue>, CordisError>> {
         match e.downcast_ref::<E>() {
@@ -130,6 +234,7 @@ impl<E: Event, L: WaterfallListener<E>> crate::bus::ErasedWaterfallCall for Wate
     fn call<'a>(
         &'a self,
         ctx: &'a Ctx,
+        _key: &'a crate::TypeKey,
         e: &'a DynEvent,
         next: crate::bus::ErasedNext<'a>,
     ) -> BoxFuture<'a, Result<ErasedValue, CordisError>> {

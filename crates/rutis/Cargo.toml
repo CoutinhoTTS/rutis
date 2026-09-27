@@ -2,7 +2,7 @@
 name = "rutis"
 description = "Cordis core paradigms in idiomatic Rust: plugin assembly, fiber lifecycle, typed service registry, dependency-driven reload"
 edition.workspace = true
-version = "0.3.0"
+version = "0.4.0"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
@@ -14,3 +14,7 @@ categories = ["asynchronous", "concurrency"]
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
+
+[[bench]]
+name = "events"
+harness = false

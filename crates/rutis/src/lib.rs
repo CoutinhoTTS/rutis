@@ -21,7 +21,7 @@ mod key;
 mod plugin;
 mod registry;
 
-pub use bus::{DispatchAttempt, DispatchMode, EventBus};
+pub use bus::{DispatchAttempt, DispatchMode, EventBus, EventSubscription, ListenerKind};
 pub use ctx::Ctx;
 pub use diagnostics::{
     BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
@@ -32,10 +32,17 @@ pub use error::{
     CordisError, ErrorSink, ServiceReadError, ServiceReadFailure, ServiceWriteError,
     ServiceWriteFailure,
 };
-pub use event::{Event, EventOptions, Listener, Next, Terminal, WaterfallListener};
+pub use event::{
+    Event, EventOptions, Listener, Next, PatternListener, PatternWaterfallListener, Terminal,
+    WaterfallListener,
+};
+pub use event::{
+    SyncEvent, SyncListener, SyncNext, SyncPatternListener, SyncPatternWaterfallListener,
+    SyncWaterfallListener,
+};
 pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, PluginId, Snapshot};
 pub use intercept::{ServiceIntercept, ServiceWriter};
-pub use key::{InstanceId, Key, ServiceKey, TypeKey};
+pub use key::{EventKey, EventPattern, InstanceId, Key, ServiceKey, TypeKey};
 pub use plugin::{Plugin, PluginFactory};
 
 /// dyn 兼容的 future 别名(与 `futures::future::BoxFuture` 同一定义,D1)。

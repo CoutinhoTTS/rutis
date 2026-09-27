@@ -49,6 +49,7 @@ impl Plugin for Register {
         Box::pin(async move {
             ctx.events().on::<Tick>(
                 ctx,
+                &rutis::EventKey::of(),
                 OwnedListener {
                     owner: ctx.clone(),
                     cleaned: self.0.clone(),
@@ -65,7 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cleaned = Arc::new(AtomicUsize::new(0));
     let plugin = root.plugin(Register(cleaned.clone()));
     (&plugin).await?;
-    root.events().serial(&root, &Tick).await?;
+    root.events()
+        .serial(&root, &rutis::EventKey::of(), &Tick)
+        .await?;
     plugin.shutdown().await?;
     assert_eq!(cleaned.load(Ordering::SeqCst), 1);
     root.shutdown().await?;

@@ -115,7 +115,10 @@ async fn framework_labels_and_child_ownership_follow_lifecycle() {
     let root = Ctx::root().unwrap();
     let root_view = root.root_view().unwrap();
     let service = root.provide(7u64).unwrap();
-    let listener = root.events().on(&root, Nop).unwrap();
+    let listener = root
+        .events()
+        .on(&root, &rutis::EventKey::of(), Nop)
+        .unwrap();
     let effects = root_view.effects();
     assert!(effects
         .iter()

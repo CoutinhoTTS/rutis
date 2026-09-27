@@ -163,10 +163,18 @@ async fn instance_emit_reports_synchronous_listener_panic() {
     });
     let (view, ctx) = child(&root).await;
     ctx.events()
-        .on_instance(&ctx, ctx.instance(), PanicCall)
+        .on(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            PanicCall,
+        )
         .unwrap();
     ctx.events()
-        .emit_instance(&ctx, ctx.instance(), Arc::new(Ping(1)))
+        .emit(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            Arc::new(Ping(1)),
+        )
         .unwrap();
     let error = tokio::time::timeout(Duration::from_secs(2), rx)
         .await
@@ -183,12 +191,12 @@ async fn instance_serial_short_circuits_and_parallel_aggregates() {
     let (view, ctx) = child(&root).await;
     let log = Arc::new(Mutex::new(Vec::new()));
     ctx.events()
-        .on_instance(&ctx, ctx.instance(), Bail)
+        .on(&ctx, &rutis::EventKey::of().instance(ctx.instance()), Bail)
         .unwrap();
     ctx.events()
-        .on_instance(
+        .on(
             &ctx,
-            ctx.instance(),
+            &rutis::EventKey::of().instance(ctx.instance()),
             Record {
                 log: log.clone(),
                 entered: Mutex::new(None),
@@ -198,21 +206,37 @@ async fn instance_serial_short_circuits_and_parallel_aggregates() {
         .unwrap();
     let value = ctx
         .events()
-        .serial_instance(&ctx, ctx.instance(), &Ping(2))
+        .serial(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            &Ping(2),
+        )
         .await
         .unwrap();
     assert_eq!(value, Some(()));
     assert!(log.lock().unwrap().is_empty());
 
     ctx.events()
-        .on_instance(&ctx, ctx.instance(), FailListener)
+        .on(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            FailListener,
+        )
         .unwrap();
     ctx.events()
-        .on_instance(&ctx, ctx.instance(), FailListener)
+        .on(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            FailListener,
+        )
         .unwrap();
     let error = ctx
         .events()
-        .parallel_instance(&ctx, ctx.instance(), Arc::new(Fault))
+        .parallel(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            Arc::new(Fault),
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, CordisError::Aggregate { errors } if errors.len() == 2));
@@ -300,20 +324,31 @@ async fn registration_errors_prioritize_closed_then_inactive_then_instance_scope
         Err(CordisError::InstanceOutOfScope { .. })
     ));
     assert!(matches!(
-        root.events().on_instance(&root, id, Bail),
+        root.events()
+            .on(&root, &rutis::EventKey::of().instance(id), Bail),
         Err(CordisError::InstanceOutOfScope { .. })
     ));
     assert!(matches!(
-        root.events().emit_instance(&root, id, Arc::new(Ping(1))),
-        Err(CordisError::InstanceOutOfScope { .. })
-    ));
-    assert!(matches!(
-        root.events().serial_instance(&root, id, &Ping(1)).await,
+        root.events().emit(
+            &root,
+            &rutis::EventKey::of().instance(id),
+            Arc::new(Ping(1))
+        ),
         Err(CordisError::InstanceOutOfScope { .. })
     ));
     assert!(matches!(
         root.events()
-            .parallel_instance(&root, id, Arc::new(Ping(1)))
+            .serial(&root, &rutis::EventKey::of().instance(id), &Ping(1))
+            .await,
+        Err(CordisError::InstanceOutOfScope { .. })
+    ));
+    assert!(matches!(
+        root.events()
+            .parallel(
+                &root,
+                &rutis::EventKey::of().instance(id),
+                Arc::new(Ping(1))
+            )
             .await,
         Err(CordisError::InstanceOutOfScope { .. })
     ));
@@ -328,26 +363,34 @@ async fn registration_errors_prioritize_closed_then_inactive_then_instance_scope
         Err(CordisError::InactiveEffect)
     ));
     assert!(matches!(
-        disposed.events().on_instance(&disposed, id, Bail),
+        disposed
+            .events()
+            .on(&disposed, &rutis::EventKey::of().instance(id), Bail),
+        Err(CordisError::InactiveEffect)
+    ));
+    assert!(matches!(
+        disposed.events().emit(
+            &disposed,
+            &rutis::EventKey::of().instance(id),
+            Arc::new(Ping(1))
+        ),
         Err(CordisError::InactiveEffect)
     ));
     assert!(matches!(
         disposed
             .events()
-            .emit_instance(&disposed, id, Arc::new(Ping(1))),
-        Err(CordisError::InactiveEffect)
-    ));
-    assert!(matches!(
-        disposed
-            .events()
-            .serial_instance(&disposed, id, &Ping(1))
+            .serial(&disposed, &rutis::EventKey::of().instance(id), &Ping(1))
             .await,
         Err(CordisError::InactiveEffect)
     ));
     assert!(matches!(
         disposed
             .events()
-            .parallel_instance(&disposed, id, Arc::new(Ping(1)))
+            .parallel(
+                &disposed,
+                &rutis::EventKey::of().instance(id),
+                Arc::new(Ping(1))
+            )
             .await,
         Err(CordisError::InactiveEffect)
     ));
@@ -362,23 +405,34 @@ async fn registration_errors_prioritize_closed_then_inactive_then_instance_scope
         Err(CordisError::Closed)
     ));
     assert!(matches!(
-        closed.events().on_instance(&closed, id, Bail),
+        closed
+            .events()
+            .on(&closed, &rutis::EventKey::of().instance(id), Bail),
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        closed.events().emit(
+            &closed,
+            &rutis::EventKey::of().instance(id),
+            Arc::new(Ping(1))
+        ),
         Err(CordisError::Closed)
     ));
     assert!(matches!(
         closed
             .events()
-            .emit_instance(&closed, id, Arc::new(Ping(1))),
-        Err(CordisError::Closed)
-    ));
-    assert!(matches!(
-        closed.events().serial_instance(&closed, id, &Ping(1)).await,
+            .serial(&closed, &rutis::EventKey::of().instance(id), &Ping(1))
+            .await,
         Err(CordisError::Closed)
     ));
     assert!(matches!(
         closed
             .events()
-            .parallel_instance(&closed, id, Arc::new(Ping(1)))
+            .parallel(
+                &closed,
+                &rutis::EventKey::of().instance(id),
+                Arc::new(Ping(1))
+            )
             .await,
         Err(CordisError::Closed)
     ));
@@ -398,20 +452,31 @@ async fn registration_errors_prioritize_closed_then_inactive_then_instance_scope
         Err(CordisError::Closed)
     ));
     assert!(matches!(
-        root.events().on_instance(&root, id, Bail),
+        root.events()
+            .on(&root, &rutis::EventKey::of().instance(id), Bail),
         Err(CordisError::Closed)
     ));
     assert!(matches!(
-        root.events().emit_instance(&root, id, Arc::new(Ping(1))),
-        Err(CordisError::Closed)
-    ));
-    assert!(matches!(
-        root.events().serial_instance(&root, id, &Ping(1)).await,
+        root.events().emit(
+            &root,
+            &rutis::EventKey::of().instance(id),
+            Arc::new(Ping(1))
+        ),
         Err(CordisError::Closed)
     ));
     assert!(matches!(
         root.events()
-            .parallel_instance(&root, id, Arc::new(Ping(1)))
+            .serial(&root, &rutis::EventKey::of().instance(id), &Ping(1))
+            .await,
+        Err(CordisError::Closed)
+    ));
+    assert!(matches!(
+        root.events()
+            .parallel(
+                &root,
+                &rutis::EventKey::of().instance(id),
+                Arc::new(Ping(1))
+            )
             .await,
         Err(CordisError::Closed)
     ));
@@ -547,9 +612,9 @@ async fn dropping_borrowed_serial_releases_shutdown_flight() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let gate = Arc::new(Semaphore::new(0));
     ctx.events()
-        .on_instance(
+        .on(
             &ctx,
-            ctx.instance(),
+            &rutis::EventKey::of().instance(ctx.instance()),
             Record {
                 log: Arc::new(Mutex::new(Vec::new())),
                 entered: Mutex::new(Some(entered_tx)),
@@ -558,7 +623,11 @@ async fn dropping_borrowed_serial_releases_shutdown_flight() {
         )
         .unwrap();
     let event = Ping(1);
-    let mut dispatch = Box::pin(ctx.events().serial_instance(&ctx, ctx.instance(), &event));
+    let mut dispatch = Box::pin(ctx.events().serial(
+        &ctx,
+        &rutis::EventKey::of().instance(ctx.instance()),
+        &event,
+    ));
     tokio::select! {
         result = &mut dispatch => panic!("serial completed before its gate: {result:?}"),
         result = entered_rx => result.unwrap(),
@@ -596,9 +665,9 @@ async fn callback_can_start_own_shutdown_and_return() {
     let (view, ctx) = child(&root).await;
     let calls = Arc::new(AtomicUsize::new(0));
     ctx.events()
-        .on_instance(
+        .on(
             &ctx,
-            ctx.instance(),
+            &rutis::EventKey::of().instance(ctx.instance()),
             StartOwnShutdown {
                 view: view.clone(),
                 calls: calls.clone(),
@@ -606,7 +675,11 @@ async fn callback_can_start_own_shutdown_and_return() {
         )
         .unwrap();
     ctx.events()
-        .serial_instance(&ctx, ctx.instance(), &Ping(1))
+        .serial(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            &Ping(1),
+        )
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), view.shutdown())
@@ -664,9 +737,9 @@ async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
     let release = Arc::new(Semaphore::new(0));
     let (entered_tx, entered_rx) = oneshot::channel();
     a.events()
-        .on_instance(
+        .on(
             &a,
-            a.instance(),
+            &rutis::EventKey::of().instance(a.instance()),
             Record {
                 log: log_a.clone(),
                 entered: Mutex::new(Some(entered_tx)),
@@ -675,9 +748,9 @@ async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
         )
         .unwrap();
     b.events()
-        .on_instance(
+        .on(
             &b,
-            b.instance(),
+            &rutis::EventKey::of().instance(b.instance()),
             Record {
                 log: log_b.clone(),
                 entered: Mutex::new(None),
@@ -686,14 +759,26 @@ async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
         )
         .unwrap();
     a.events()
-        .emit_instance(&a, a.instance(), Arc::new(Ping(1)))
+        .emit(
+            &a,
+            &rutis::EventKey::of().instance(a.instance()),
+            Arc::new(Ping(1)),
+        )
         .unwrap();
     entered_rx.await.unwrap();
     a.events()
-        .emit_instance(&a, a.instance(), Arc::new(Ping(3)))
+        .emit(
+            &a,
+            &rutis::EventKey::of().instance(a.instance()),
+            Arc::new(Ping(3)),
+        )
         .unwrap();
     b.events()
-        .emit_instance(&b, b.instance(), Arc::new(Ping(2)))
+        .emit(
+            &b,
+            &rutis::EventKey::of().instance(b.instance()),
+            Arc::new(Ping(2)),
+        )
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while log_b.lock().unwrap().is_empty() {
@@ -706,8 +791,11 @@ async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
 
     let pending = view_a.shutdown();
     assert!(matches!(
-        a.events()
-            .emit_instance(&a, a.instance(), Arc::new(Ping(4))),
+        a.events().emit(
+            &a,
+            &rutis::EventKey::of().instance(a.instance()),
+            Arc::new(Ping(4))
+        ),
         Err(CordisError::Closed)
     ));
     assert!(matches!(
@@ -715,7 +803,8 @@ async fn instance_events_are_isolated_ordered_and_drained_by_shutdown() {
         Err(CordisError::Closed)
     ));
     assert!(matches!(
-        a.events().on_instance(&a, a.instance(), Bail),
+        a.events()
+            .on(&a, &rutis::EventKey::of().instance(a.instance()), Bail),
         Err(CordisError::Closed)
     ));
     let closed_child = a.plugin(PanicMetadata);
@@ -742,9 +831,9 @@ async fn closing_listener_is_excluded_from_new_ancestor_dispatches() {
     let (entered_tx, entered_rx) = oneshot::channel();
     listener_ctx
         .events()
-        .on_instance(
+        .on(
             &listener_ctx,
-            parent.instance(),
+            &rutis::EventKey::of().instance(parent.instance()),
             Record {
                 log: log.clone(),
                 entered: Mutex::new(Some(entered_tx)),
@@ -754,13 +843,21 @@ async fn closing_listener_is_excluded_from_new_ancestor_dispatches() {
         .unwrap();
     parent
         .events()
-        .emit_instance(&parent, parent.instance(), Arc::new(Ping(1)))
+        .emit(
+            &parent,
+            &rutis::EventKey::of().instance(parent.instance()),
+            Arc::new(Ping(1)),
+        )
         .unwrap();
     entered_rx.await.unwrap();
     let closing = child_view.shutdown();
     parent
         .events()
-        .emit_instance(&parent, parent.instance(), Arc::new(Ping(2)))
+        .emit(
+            &parent,
+            &rutis::EventKey::of().instance(parent.instance()),
+            Arc::new(Ping(2)),
+        )
         .unwrap();
     release.add_permits(1);
     closing.await.unwrap();
@@ -776,9 +873,9 @@ async fn dropped_parallel_waiter_does_not_finish_dispatch_early() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let log = Arc::new(Mutex::new(Vec::new()));
     ctx.events()
-        .on_instance(
+        .on(
             &ctx,
-            ctx.instance(),
+            &rutis::EventKey::of().instance(ctx.instance()),
             Record {
                 log: log.clone(),
                 entered: Mutex::new(Some(entered_tx)),
@@ -790,7 +887,11 @@ async fn dropped_parallel_waiter_does_not_finish_dispatch_early() {
     let waiting = tokio::spawn(async move {
         dispatch_ctx
             .events()
-            .parallel_instance(&dispatch_ctx, dispatch_ctx.instance(), Arc::new(Ping(1)))
+            .parallel(
+                &dispatch_ctx,
+                &rutis::EventKey::of().instance(dispatch_ctx.instance()),
+                Arc::new(Ping(1)),
+            )
             .await
     });
     entered_rx.await.unwrap();
@@ -816,9 +917,9 @@ async fn manual_instance_listener_disposal_waits_for_accepted_callback() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let listener = ctx
         .events()
-        .on_instance(
+        .on(
             &ctx,
-            ctx.instance(),
+            &rutis::EventKey::of().instance(ctx.instance()),
             Record {
                 log: log.clone(),
                 entered: Mutex::new(Some(entered_tx)),
@@ -827,7 +928,11 @@ async fn manual_instance_listener_disposal_waits_for_accepted_callback() {
         )
         .unwrap();
     ctx.events()
-        .emit_instance(&ctx, ctx.instance(), Arc::new(Ping(1)))
+        .emit(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            Arc::new(Ping(1)),
+        )
         .unwrap();
     entered_rx.await.unwrap();
 
@@ -840,7 +945,11 @@ async fn manual_instance_listener_disposal_waits_for_accepted_callback() {
     release.add_permits(1);
     removing.await.unwrap().unwrap();
     ctx.events()
-        .emit_instance(&ctx, ctx.instance(), Arc::new(Ping(2)))
+        .emit(
+            &ctx,
+            &rutis::EventKey::of().instance(ctx.instance()),
+            Arc::new(Ping(2)),
+        )
         .unwrap();
     assert_eq!(*log.lock().unwrap(), vec![1]);
     view.shutdown().await.unwrap();

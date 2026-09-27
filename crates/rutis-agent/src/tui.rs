@@ -658,11 +658,16 @@ impl Plugin for TuiPlugin {
             //   (input 经 EventStream 直接读,转 key 到 thread_tx)
             let (ui_tx, mut ui_rx) = mpsc::channel::<UiCmd>(256);
             // agent/* 事件订阅:监听器归本 fiber 所有,随 fiber 卸载(D28)
-            ctx.events().on(ctx, ReasoningL(ui_tx.clone()))?;
-            ctx.events().on(ctx, DeltaL(ui_tx.clone()))?;
-            ctx.events().on(ctx, ToolCallL(ui_tx.clone()))?;
-            ctx.events().on(ctx, ToolResultL(ui_tx.clone()))?;
-            ctx.events().on(ctx, TurnEndL(ui_tx.clone()))?;
+            ctx.events()
+                .on(ctx, &rutis::EventKey::of(), ReasoningL(ui_tx.clone()))?;
+            ctx.events()
+                .on(ctx, &rutis::EventKey::of(), DeltaL(ui_tx.clone()))?;
+            ctx.events()
+                .on(ctx, &rutis::EventKey::of(), ToolCallL(ui_tx.clone()))?;
+            ctx.events()
+                .on(ctx, &rutis::EventKey::of(), ToolResultL(ui_tx.clone()))?;
+            ctx.events()
+                .on(ctx, &rutis::EventKey::of(), TurnEndL(ui_tx.clone()))?;
 
             // 渲染线程 ↔ async 侧的 std 通道(Send,跨 OS 线程)
             let (thread_tx, thread_rx) = std::sync::mpsc::channel::<ThreadMsg>();

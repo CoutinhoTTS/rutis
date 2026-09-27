@@ -138,7 +138,7 @@ async fn up() {
     let dispatch = ServiceDispatch::new(vec![face]);
     let mut hooks = dispatch.hooks();
     // evt/emit → 内核 keyed 事件(HostEvent);stderr 摘要作为观察者并行保留
-    // (M3 事件链路,订阅方用 ctx.events().on_keyed::<HostEvent>(ctx, name, ..))。
+    // (M3 事件链路,订阅方用 ctx.events().on::<HostEvent>(ctx, &rutis::EventKey::dynamic(name), ..))。
     hooks.on_notify = Some(forward_host_events(
         &ctx,
         Some(Arc::new(|method, params, _origin| {

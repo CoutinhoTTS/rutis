@@ -115,6 +115,10 @@ pub enum CordisError {
     ServiceExists(String),
     #[error("instance {instance} is outside the caller's fiber subtree")]
     InstanceOutOfScope { instance: InstanceId },
+    #[error("synchronous event {key:?} reentered on the same bus")]
+    ReentrantEvent { key: TypeKey },
+    #[error(transparent)]
+    SyncEventPanicked(Arc<CordisError>),
 }
 
 /// 错误汇聚点。默认实现输出到 stderr(设计 §二)。

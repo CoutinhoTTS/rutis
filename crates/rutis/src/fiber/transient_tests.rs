@@ -130,8 +130,11 @@ impl Plugin for ChurnPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide_as(TypeKey::instance::<u64>(ctx.instance()), Arc::new(1u64))?;
-            ctx.events()
-                .on_instance(ctx, ctx.instance(), IdleListener)?;
+            ctx.events().on(
+                ctx,
+                &crate::EventKey::of().instance(ctx.instance()),
+                IdleListener,
+            )?;
             Ok(Effect::Done)
         })
     }

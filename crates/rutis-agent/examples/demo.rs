@@ -93,9 +93,15 @@ async fn main() -> Result<(), CordisError> {
     let root = Ctx::root().expect("run inside a tokio runtime");
 
     // 过程增量观察方:订阅 agent/* 事件,逐块打印(归 root 所有,demo 全程有效)
-    let _delta = root.events().on(&root, print_delta)?;
-    let _tool_call = root.events().on(&root, print_tool_call)?;
-    let _tool_result = root.events().on(&root, print_tool_result)?;
+    let _delta = root
+        .events()
+        .on(&root, &rutis::EventKey::of(), print_delta)?;
+    let _tool_call = root
+        .events()
+        .on(&root, &rutis::EventKey::of(), print_tool_call)?;
+    let _tool_result = root
+        .events()
+        .on(&root, &rutis::EventKey::of(), print_tool_result)?;
 
     // LLM 服务直接 provide(设计 §六:无 LlmPlugin 空壳)
     let llm_disposer = root

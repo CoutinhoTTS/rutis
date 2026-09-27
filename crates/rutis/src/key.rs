@@ -35,7 +35,7 @@ pub(crate) enum Qualifier {
 }
 
 impl Qualifier {
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             Qualifier::Static(s) => s,
             Qualifier::Dynamic(s) => s,
@@ -111,6 +111,14 @@ impl std::fmt::Debug for TypeKey {
 }
 
 impl TypeKey {
+    pub(crate) fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    /// The explicit channel name, if this key has one.
+    pub fn name(&self) -> Option<&str> {
+        self.qualifier.as_ref().map(Qualifier::as_str)
+    }
     pub(crate) fn has_type<T: ?Sized + 'static>(&self) -> bool {
         self.type_id == TypeId::of::<T>()
     }
@@ -177,6 +185,169 @@ impl TypeKey {
             Some(id) => format!("{base}@{id}"),
             None => base,
         }
+    }
+}
+
+/// A channel whose payload and result types are fixed by `E`.
+///
+/// Static and dynamic names compare by content. The default type channel is
+/// separate from every named channel; an instance scopes either kind to its
+/// fiber subtree. Constructing a name does not check its spelling.
+///
+/// ```compile_fail
+/// use rutis::{Ctx, Event, EventKey};
+/// use std::sync::Arc;
+/// struct One;
+/// struct Two;
+/// impl Event for One { const NAME: &'static str = "one"; type Value = (); }
+/// impl Event for Two { const NAME: &'static str = "two"; type Value = (); }
+/// fn wrong(ctx: &Ctx) {
+///     ctx.events().emit(ctx, &EventKey::<One>::named("one"), Arc::new(Two));
+/// }
+/// ```
+pub struct EventKey<E: crate::Event> {
+    qualifier: Option<Qualifier>,
+    instance: Option<InstanceId>,
+    marker: PhantomData<fn(E) -> E>,
+}
+
+impl<E: crate::Event> EventKey<E> {
+    /// The original, unnamed type channel. This constructor is allocation free.
+    pub const fn of() -> Self {
+        Self {
+            qualifier: None,
+            instance: None,
+            marker: PhantomData,
+        }
+    }
+
+    /// An allocation-free static channel name.
+    pub const fn named(name: &'static str) -> Self {
+        Self {
+            qualifier: Some(Qualifier::Static(name)),
+            instance: None,
+            marker: PhantomData,
+        }
+    }
+
+    pub fn dynamic(name: impl Into<Arc<str>>) -> Self {
+        Self {
+            qualifier: Some(Qualifier::Dynamic(name.into())),
+            instance: None,
+            marker: PhantomData,
+        }
+    }
+
+    pub const fn instance(mut self, id: InstanceId) -> Self {
+        self.instance = Some(id);
+        self
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.qualifier.as_ref().map(Qualifier::as_str)
+    }
+
+    pub fn instance_id(&self) -> Option<InstanceId> {
+        self.instance
+    }
+
+    pub fn describe(&self) -> String {
+        self.erased().describe()
+    }
+
+    pub(crate) fn erased(&self) -> TypeKey {
+        TypeKey {
+            type_id: TypeId::of::<E>(),
+            type_name: std::any::type_name::<E>(),
+            qualifier: self.qualifier.clone(),
+            instance: self.instance,
+        }
+    }
+
+    pub(crate) fn from_erased(key: &TypeKey) -> Self {
+        debug_assert!(key.has_type::<E>());
+        Self {
+            qualifier: key.qualifier.clone(),
+            instance: key.instance,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<E: crate::Event> Default for EventKey<E> {
+    fn default() -> Self {
+        Self::of()
+    }
+}
+impl<E: crate::Event> Clone for EventKey<E> {
+    fn clone(&self) -> Self {
+        Self {
+            qualifier: self.qualifier.clone(),
+            instance: self.instance,
+            marker: PhantomData,
+        }
+    }
+}
+impl<E: crate::Event> PartialEq for EventKey<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.qualifier == other.qualifier && self.instance == other.instance
+    }
+}
+impl<E: crate::Event> Eq for EventKey<E> {}
+impl<E: crate::Event> std::hash::Hash for EventKey<E> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.erased().hash(state);
+    }
+}
+impl<E: crate::Event> std::fmt::Debug for EventKey<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.erased().fmt(f)
+    }
+}
+
+/// One registration matching any of its prefixes, within one event type.
+/// Only named channels without an instance can match. An empty prefix matches
+/// every such channel; overlapping prefixes still select the registration once.
+pub struct EventPattern<E: crate::Event> {
+    prefixes: Vec<Arc<str>>,
+    marker: PhantomData<fn(E) -> E>,
+}
+
+impl<E: crate::Event> EventPattern<E> {
+    pub fn prefix(prefix: impl Into<Arc<str>>) -> Self {
+        Self::any_prefix([prefix])
+    }
+
+    pub fn any_prefix<S: Into<Arc<str>>>(prefixes: impl IntoIterator<Item = S>) -> Self {
+        Self {
+            prefixes: prefixes.into_iter().map(Into::into).collect(),
+            marker: PhantomData,
+        }
+    }
+
+    pub fn prefixes(&self) -> &[Arc<str>] {
+        &self.prefixes
+    }
+
+    pub(crate) fn into_prefixes(self) -> Vec<Arc<str>> {
+        self.prefixes
+    }
+}
+
+impl<E: crate::Event> Clone for EventPattern<E> {
+    fn clone(&self) -> Self {
+        Self {
+            prefixes: self.prefixes.clone(),
+            marker: PhantomData,
+        }
+    }
+}
+impl<E: crate::Event> std::fmt::Debug for EventPattern<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventPattern")
+            .field("type", &std::any::type_name::<E>())
+            .field("prefixes", &self.prefixes)
+            .finish()
     }
 }
 

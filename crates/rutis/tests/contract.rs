@@ -185,6 +185,7 @@ async fn plugin_registers_n_listeners() {
         Box::pin(async move {
             ctx.events().on(
                 ctx,
+                &rutis::EventKey::of(),
                 Rec {
                     hits: h1,
                     bail: None,
@@ -195,6 +196,7 @@ async fn plugin_registers_n_listeners() {
             )?;
             ctx.events().on(
                 ctx,
+                &rutis::EventKey::of(),
                 Rec {
                     hits: h2,
                     bail: None,
@@ -207,11 +209,15 @@ async fn plugin_registers_n_listeners() {
         })
     }));
     (&view).await.expect("load");
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     soon(done.notified()).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     view.dispose().await.unwrap();
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2); // 卸载后不再分发
 }
@@ -272,7 +278,9 @@ async fn state_transitions() {
             })
         }
     }
-    ctx.events().on(&ctx, S(seen.clone())).unwrap();
+    ctx.events()
+        .on(&ctx, &rutis::EventKey::of(), S(seen.clone()))
+        .unwrap();
 
     let view = ctx.plugin(simple("states", move |_ctx: &Ctx| {
         Box::pin(async { Ok(Effect::Done) })
@@ -719,11 +727,16 @@ async fn emit_async_safe() {
     ) -> rutis::BoxFuture<'a, Result<Option<u32>, CordisError>> {
         Box::pin(async move { Ok(Some(e.value)) })
     }
-    ctx.events().on(&ctx, ok_ping).unwrap();
-    ctx.events().on(&ctx, ValueL(seen.clone())).unwrap();
+    ctx.events()
+        .on(&ctx, &rutis::EventKey::of(), ok_ping)
+        .unwrap();
+    ctx.events()
+        .on(&ctx, &rutis::EventKey::of(), ValueL(seen.clone()))
+        .unwrap();
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -735,7 +748,9 @@ async fn emit_async_safe() {
         .unwrap();
     let event = Arc::new(Ping { value: 42 });
     let kept = event.clone();
-    ctx.events().emit(&ctx, event);
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), event)
+        .expect("default event dispatch");
     drop(kept); // 调用栈持有的克隆先释放,spawn 任务仍安全读
     soon(done.notified()).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -766,6 +781,7 @@ async fn emit_error_sink() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -775,8 +791,10 @@ async fn emit_error_sink() {
             },
         )
         .unwrap();
-    ctx.events().on(&ctx, Boom).unwrap();
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events().on(&ctx, &rutis::EventKey::of(), Boom).unwrap();
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     // Err 与 panic 都进 ErrorSink(D30),各一次
     soon(async {
         loop {
@@ -800,6 +818,7 @@ async fn parallel_aggregates() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -812,6 +831,7 @@ async fn parallel_aggregates() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -823,7 +843,7 @@ async fn parallel_aggregates() {
         .unwrap();
     let err = ctx
         .events()
-        .parallel(&ctx, Arc::new(Ping { value: 1 }))
+        .parallel(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .await
         .expect_err("aggregates");
     match err {
@@ -835,6 +855,7 @@ async fn parallel_aggregates() {
     ctx2.events()
         .on(
             &ctx2,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -846,7 +867,7 @@ async fn parallel_aggregates() {
         .unwrap();
     let single = ctx2
         .events()
-        .parallel(&ctx2, Arc::new(Ping { value: 1 }))
+        .parallel(&ctx2, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .await
         .expect_err("single");
     assert!(matches!(single, CordisError::ServiceNotFound(_)));
@@ -859,6 +880,7 @@ async fn serial_bails() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -871,6 +893,7 @@ async fn serial_bails() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: Some(7),
@@ -880,7 +903,11 @@ async fn serial_bails() {
             },
         )
         .unwrap();
-    let out = ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    let out = ctx
+        .events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(out, Some(8)); // 短路值 = bail + e.value
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     // 短路后不再继续
@@ -889,6 +916,7 @@ async fn serial_bails() {
     ctx2.events()
         .on(
             &ctx2,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits2.clone(),
                 bail: Some(1),
@@ -901,6 +929,7 @@ async fn serial_bails() {
     ctx2.events()
         .on(
             &ctx2,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits2.clone(),
                 bail: None,
@@ -912,7 +941,7 @@ async fn serial_bails() {
         .unwrap();
     let out2 = ctx2
         .events()
-        .serial(&ctx2, &Ping { value: 0 })
+        .serial(&ctx2, &rutis::EventKey::of(), &Ping { value: 0 })
         .await
         .unwrap();
     assert_eq!(out2, Some(1));
@@ -962,6 +991,7 @@ async fn waterfall_veto_around() {
     ctx.events()
         .on_waterfall(
             &ctx,
+            &rutis::EventKey::of(),
             Wf {
                 name: "outer",
                 order: ord.clone(),
@@ -972,6 +1002,7 @@ async fn waterfall_veto_around() {
     ctx.events()
         .on_waterfall(
             &ctx,
+            &rutis::EventKey::of(),
             Wf {
                 name: "inner",
                 order: ord.clone(),
@@ -981,7 +1012,7 @@ async fn waterfall_veto_around() {
         .unwrap();
     let out = ctx
         .events()
-        .waterfall(&ctx, &Ping { value: 1 }, BaseTerm)
+        .waterfall(&ctx, &rutis::EventKey::of(), &Ping { value: 1 }, BaseTerm)
         .await
         .unwrap();
     assert_eq!(out, 21); // 最外层返回
@@ -993,6 +1024,7 @@ async fn waterfall_veto_around() {
     ctx2.events()
         .on_waterfall(
             &ctx2,
+            &rutis::EventKey::of(),
             Wf {
                 name: "outer",
                 order: ord2.clone(),
@@ -1003,6 +1035,7 @@ async fn waterfall_veto_around() {
     ctx2.events()
         .on_waterfall(
             &ctx2,
+            &rutis::EventKey::of(),
             Wf {
                 name: "inner",
                 order: ord2.clone(),
@@ -1012,7 +1045,7 @@ async fn waterfall_veto_around() {
         .unwrap();
     let out2 = ctx2
         .events()
-        .waterfall(&ctx2, &Ping { value: 1 }, BaseTerm)
+        .waterfall(&ctx2, &rutis::EventKey::of(), &Ping { value: 1 }, BaseTerm)
         .await
         .unwrap();
     assert_eq!(out2, 101);
@@ -1039,16 +1072,27 @@ async fn prepend_order() {
         }
     }
     ctx.events()
-        .on(&ctx, Named("first-registered", ord.clone()))
+        .on(
+            &ctx,
+            &rutis::EventKey::of(),
+            Named("first-registered", ord.clone()),
+        )
         .unwrap();
     ctx.events()
         .on_opt(
             &ctx,
+            &rutis::EventKey::of(),
             Named("prepended", ord.clone()),
-            rutis::EventOptions { prepend: true },
+            rutis::EventOptions {
+                prepend: true,
+                ..Default::default()
+            },
         )
         .unwrap();
-    ctx.events().serial(&ctx, &Ping { value: 0 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 0 })
+        .await
+        .unwrap();
     assert_eq!(*ord.lock().unwrap(), vec!["prepended", "first-registered"]);
 }
 
@@ -1059,6 +1103,7 @@ async fn once_once() {
     ctx.events()
         .once(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -1068,10 +1113,14 @@ async fn once_once() {
             },
         )
         .unwrap();
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     soon(done.notified()).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1); // 至多一次
 }
@@ -1085,6 +1134,7 @@ async fn once_keeps_position() {
     ctx.events()
         .once(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: Arc::new(AtomicUsize::new(0)),
                 bail: Some(1),
@@ -1097,6 +1147,7 @@ async fn once_keeps_position() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -1106,11 +1157,19 @@ async fn once_keeps_position() {
             },
         )
         .unwrap();
-    let out = ctx.events().serial(&ctx, &Ping { value: 0 }).await.unwrap();
+    let out = ctx
+        .events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 0 })
+        .await
+        .unwrap();
     assert_eq!(out, Some(1)); // once 的短路值先到(位置在前)
     assert_eq!(hits.load(Ordering::SeqCst), 0); // 后注册的未短路未调用
                                                 // 第二次:once 已消耗,轮到 regular
-    let out2 = ctx.events().serial(&ctx, &Ping { value: 0 }).await.unwrap();
+    let out2 = ctx
+        .events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 0 })
+        .await
+        .unwrap();
     assert_eq!(out2, None);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
@@ -1128,6 +1187,7 @@ async fn listener_unload_race() {
         Box::pin(async move {
             ctx.events().on(
                 ctx,
+                &rutis::EventKey::of(),
                 Rec {
                     hits,
                     bail: None,
@@ -1142,15 +1202,21 @@ async fn listener_unload_race() {
     (&view).await.expect("load");
     // 分发进行中(监听器等 gate):快照语义,本轮照常调用
     let ctx2 = ctx.clone();
-    let dispatch =
-        tokio::spawn(async move { ctx2.events().serial(&ctx2, &Ping { value: 1 }).await });
+    let dispatch = tokio::spawn(async move {
+        ctx2.events()
+            .serial(&ctx2, &rutis::EventKey::of(), &Ping { value: 1 })
+            .await
+    });
     tokio::time::sleep(Duration::from_millis(30)).await;
     view.dispose().await.unwrap(); // 与进行中分发竞争
     gate.notify_one(); // 放行
     dispatch.await.unwrap().unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     // 卸载后:不再分发
-    ctx.events().serial(&ctx, &Ping { value: 1 }).await.unwrap();
+    ctx.events()
+        .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 })
+        .await
+        .unwrap();
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
@@ -1863,6 +1929,7 @@ async fn apply_failure_rolls_back() {
             ctx.provide(LlmSvc { n: 1 })?;
             ctx.events().on(
                 ctx,
+                &rutis::EventKey::of(),
                 Rec {
                     hits: h,
                     bail: None,
@@ -1885,7 +1952,9 @@ async fn apply_failure_rolls_back() {
     // 服务占位已回滚:同键可再注册
     ctx.provide(LlmSvc { n: 2 }).unwrap();
     // 监听器已随回滚卸载:不再收事件
-    ctx.events().emit(&ctx, Arc::new(Ping { value: 1 }));
+    ctx.events()
+        .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
+        .expect("default event dispatch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     // 子插件已级联处置
@@ -2115,6 +2184,7 @@ async fn serial_register_order_adversarial() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             SlowBail {
                 value: 1,
                 delay_ms: 40,
@@ -2125,6 +2195,7 @@ async fn serial_register_order_adversarial() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             SlowBail {
                 value: 2,
                 delay_ms: 0,
@@ -2132,9 +2203,12 @@ async fn serial_register_order_adversarial() {
             },
         )
         .unwrap();
-    let out = soon(ctx.events().serial(&ctx, &Ping { value: 0 }))
-        .await
-        .unwrap();
+    let out = soon(
+        ctx.events()
+            .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 0 }),
+    )
+    .await
+    .unwrap();
     // 若按完成序,快的(2)会先短路;注册序语义必须返回慢者的 1
     assert_eq!(out, Some(1));
     assert_eq!(hits.load(Ordering::SeqCst), 1); // 后注册者未执行
@@ -2254,6 +2328,7 @@ async fn parallel_waits_all() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Delayed {
                 delay_ms: 0,
                 err: true,
@@ -2264,6 +2339,7 @@ async fn parallel_waits_all() {
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Delayed {
                 delay_ms: 60,
                 err: false,
@@ -2271,9 +2347,13 @@ async fn parallel_waits_all() {
             },
         )
         .unwrap();
-    let err = soon(ctx.events().parallel(&ctx, Arc::new(Ping { value: 0 })))
-        .await
-        .unwrap_err();
+    let err = soon(ctx.events().parallel(
+        &ctx,
+        &rutis::EventKey::of(),
+        Arc::new(Ping { value: 0 }),
+    ))
+    .await
+    .unwrap_err();
     assert!(matches!(err, CordisError::ServiceNotFound(_))); // 单错原样
     assert_eq!(hits.load(Ordering::SeqCst), 2); // 慢者也已全部完成
 }
@@ -2293,10 +2373,13 @@ async fn serial_panic_contained() {
     }
     let ctx = Ctx::root().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
-    ctx.events().on(&ctx, BoomL).unwrap();
+    ctx.events()
+        .on(&ctx, &rutis::EventKey::of(), BoomL)
+        .unwrap();
     ctx.events()
         .on(
             &ctx,
+            &rutis::EventKey::of(),
             Rec {
                 hits: hits.clone(),
                 bail: None,
@@ -2306,9 +2389,12 @@ async fn serial_panic_contained() {
             },
         )
         .unwrap();
-    let err = soon(ctx.events().serial(&ctx, &Ping { value: 1 }))
-        .await
-        .unwrap_err();
+    let err = soon(
+        ctx.events()
+            .serial(&ctx, &rutis::EventKey::of(), &Ping { value: 1 }),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, CordisError::PluginFailed(_)));
     assert_eq!(hits.load(Ordering::SeqCst), 0); // panic 后不再继续
 }

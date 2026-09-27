@@ -77,7 +77,8 @@ async fn old_context_still_notifies_non_instance_dispatch_observers() {
             count.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();
-    bus.emit(&old, Arc::new(Ping(1)));
+    bus.emit(&old, &rutis::EventKey::of(), Arc::new(Ping(1)))
+        .expect("default event dispatch");
     assert_eq!(seen.load(Ordering::SeqCst), 1);
     tokio::time::timeout(Duration::from_secs(2), view.dispose())
         .await
@@ -112,23 +113,29 @@ async fn all_modes_observe_before_listener_selection_even_when_empty() {
         })
         .unwrap();
 
-    bus.emit(&root, Arc::new(Ping(1)));
+    bus.emit(&root, &rutis::EventKey::of(), Arc::new(Ping(1)))
+        .expect("default event dispatch");
     assert_eq!(seen.lock().unwrap().len(), 1); // no business listener or task
 
-    let serial = bus.serial(&root, &Ping(2));
+    let serial = bus.serial(&root, &rutis::EventKey::of(), &Ping(2));
     assert_eq!(seen.lock().unwrap().len(), 1); // future not polled
     assert_eq!(serial.await.unwrap(), None);
     assert_eq!(seen.lock().unwrap().len(), 2);
 
-    let parallel = bus.parallel(&root, Arc::new(Ping(3)));
+    let parallel = bus.parallel(&root, &rutis::EventKey::of(), Arc::new(Ping(3)));
     assert_eq!(seen.lock().unwrap().len(), 2);
     parallel.await.unwrap();
 
-    let waterfall = bus.waterfall(&root, &Ping(4), Terminal);
+    let waterfall = bus.waterfall(&root, &rutis::EventKey::of(), &Ping(4), Terminal);
     assert_eq!(seen.lock().unwrap().len(), 3);
     assert_eq!(waterfall.await.unwrap(), 7);
 
-    bus.emit_keyed(&root, "dynamic", Arc::new(Ping(5)));
+    bus.emit(
+        &root,
+        &rutis::EventKey::dynamic("dynamic"),
+        Arc::new(Ping(5)),
+    )
+    .expect("default event dispatch");
     {
         let entries = seen.lock().unwrap();
         assert_eq!(entries.len(), 5);
@@ -165,12 +172,18 @@ async fn observer_can_register_listener_before_snapshot() {
     bus.observe_dispatch(&root, move |attempt| {
         if attempt.event.downcast_ref::<Ping>().unwrap().0 == 9 {
             bus_hook
-                .on::<Ping>(&root_hook, Count(count_hook.clone()))
+                .on::<Ping>(
+                    &root_hook,
+                    &rutis::EventKey::of(),
+                    Count(count_hook.clone()),
+                )
                 .unwrap();
         }
     })
     .unwrap();
-    bus.serial(&root, &Ping(9)).await.unwrap();
+    bus.serial(&root, &rutis::EventKey::of(), &Ping(9))
+        .await
+        .unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -191,12 +204,22 @@ async fn observer_scope_and_instance_admission_are_isolated() {
         })
         .unwrap();
     }
-    bus.emit(&a, Arc::new(Ping(1)));
-    bus.emit(&b, Arc::new(Ping(2)));
-    bus.emit_instance(&a, a.instance(), Arc::new(Ping(3)))
-        .unwrap();
+    bus.emit(&a, &rutis::EventKey::of(), Arc::new(Ping(1)))
+        .expect("default event dispatch");
+    bus.emit(&b, &rutis::EventKey::of(), Arc::new(Ping(2)))
+        .expect("default event dispatch");
+    bus.emit(
+        &a,
+        &rutis::EventKey::of().instance(a.instance()),
+        Arc::new(Ping(3)),
+    )
+    .unwrap();
     assert!(matches!(
-        bus.emit_instance(&b, a.instance(), Arc::new(Ping(4))),
+        bus.emit(
+            &b,
+            &rutis::EventKey::of().instance(a.instance()),
+            Arc::new(Ping(4))
+        ),
         Err(CordisError::InstanceOutOfScope { .. })
     ));
     assert_eq!(
@@ -211,7 +234,8 @@ async fn observer_scope_and_instance_admission_are_isolated() {
         ]
     );
     a_view.shutdown().await.unwrap();
-    bus.emit(&b, Arc::new(Ping(5)));
+    bus.emit(&b, &rutis::EventKey::of(), Arc::new(Ping(5)))
+        .expect("default event dispatch");
     assert_eq!(seen.lock().unwrap().last(), Some(&("b", 5)));
 }
 
@@ -230,8 +254,11 @@ async fn observer_panic_and_sink_panic_do_not_stop_dispatch() {
     bus.observe_dispatch(&root, |_| panic!("observer panic"))
         .unwrap();
     let reached = Arc::new(AtomicUsize::new(0));
-    bus.on(&root, Count(reached.clone())).unwrap();
-    bus.serial(&root, &Ping(1)).await.unwrap();
+    bus.on(&root, &rutis::EventKey::of(), Count(reached.clone()))
+        .unwrap();
+    bus.serial(&root, &rutis::EventKey::of(), &Ping(1))
+        .await
+        .unwrap();
     assert_eq!(failures.load(Ordering::SeqCst), 1);
     assert_eq!(reached.load(Ordering::SeqCst), 1);
 }
@@ -257,7 +284,11 @@ async fn shutdown_waits_for_selected_synchronous_observer() {
     let bus_emit = bus.clone();
     let ctx_emit = ctx.clone();
     let emit = tokio::task::spawn_blocking(move || {
-        bus_emit.emit_instance(&ctx_emit, ctx_emit.instance(), Arc::new(Ping(1)))
+        bus_emit.emit(
+            &ctx_emit,
+            &rutis::EventKey::of().instance(ctx_emit.instance()),
+            Arc::new(Ping(1)),
+        )
     });
     entered_rx.await.unwrap();
     let shutdown = view.shutdown();
@@ -295,7 +326,11 @@ async fn early_disposal_waits_for_in_flight_observer_and_prevents_new_calls() {
         .unwrap();
     let bus_emit = bus.clone();
     let root_emit = root.clone();
-    let emit = tokio::task::spawn_blocking(move || bus_emit.emit(&root_emit, Arc::new(Ping(1))));
+    let emit = tokio::task::spawn_blocking(move || {
+        bus_emit
+            .emit(&root_emit, &rutis::EventKey::of(), Arc::new(Ping(1)))
+            .expect("default event dispatch")
+    });
     entered_rx.await.unwrap();
     let disposal = observer.dispose();
     tokio::pin!(disposal);
@@ -307,7 +342,8 @@ async fn early_disposal_waits_for_in_flight_observer_and_prevents_new_calls() {
     release_tx.send(()).unwrap();
     emit.await.unwrap();
     disposal.await.unwrap();
-    bus.emit(&root, Arc::new(Ping(2)));
+    bus.emit(&root, &rutis::EventKey::of(), Arc::new(Ping(2)))
+        .expect("default event dispatch");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
@@ -320,7 +356,8 @@ async fn observer_reentry_observes_nested_dispatch_and_business_listener_runs() 
 
     // Register a business listener; it will be taken by the nested emit inside
     // the observer. The outer serial will find no hooks left.
-    bus.on(&root, Count(inner_hits.clone())).unwrap();
+    bus.on(&root, &rutis::EventKey::of(), Count(inner_hits.clone()))
+        .unwrap();
 
     {
         let attempts = attempts.clone();
@@ -330,7 +367,9 @@ async fn observer_reentry_observes_nested_dispatch_and_business_listener_runs() 
             let value = attempt.event.downcast_ref::<Ping>().unwrap().0;
             attempts.lock().unwrap().push(value);
             if value == 1 {
-                bus_obs.emit(&root_obs, Arc::new(Ping(2)));
+                bus_obs
+                    .emit(&root_obs, &rutis::EventKey::of(), Arc::new(Ping(2)))
+                    .expect("default event dispatch");
                 // Nested emit takes hooks and spawns a tail task synchronously
                 // before returning. The outer serial will see empty hooks.
             }
@@ -340,9 +379,12 @@ async fn observer_reentry_observes_nested_dispatch_and_business_listener_runs() 
 
     // Use serial for the outer dispatch; the observer runs during observation,
     // then serial finds no hooks and returns immediately.
-    let result = tokio::time::timeout(Duration::from_secs(5), bus.serial(&root, &Ping(1)))
-        .await
-        .expect("outer serial did not deadlock");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        bus.serial(&root, &rutis::EventKey::of(), &Ping(1)),
+    )
+    .await
+    .expect("outer serial did not deadlock");
     assert!(result.unwrap().is_none(), "outer serial had no hooks left");
 
     // Both outer (1) and nested (2) dispatch attempts were observed.

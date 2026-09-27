@@ -59,6 +59,7 @@ async fn dispatch_chain_does_not_fork_under_concurrent_emit() {
     root.events()
         .on(
             &root,
+            &rutis::EventKey::of(),
             ChainProbe {
                 in_flight: in_flight.clone(),
                 max_in_flight: max_in_flight.clone(),
@@ -71,7 +72,9 @@ async fn dispatch_chain_does_not_fork_under_concurrent_emit() {
         let root = root.clone();
         tokio::spawn(async move {
             for _ in 0..EMITS_PER_EMITTER {
-                root.events().emit(&root, Arc::new(ProbeEvent {}));
+                root.events()
+                    .emit(&root, &rutis::EventKey::of(), Arc::new(ProbeEvent {}))
+                    .expect("default event dispatch");
             }
         })
     };
@@ -79,7 +82,9 @@ async fn dispatch_chain_does_not_fork_under_concurrent_emit() {
         let root = root.clone();
         tokio::spawn(async move {
             for _ in 0..EMITS_PER_EMITTER {
-                root.events().emit(&root, Arc::new(ProbeEvent {}));
+                root.events()
+                    .emit(&root, &rutis::EventKey::of(), Arc::new(ProbeEvent {}))
+                    .expect("default event dispatch");
             }
         })
     };

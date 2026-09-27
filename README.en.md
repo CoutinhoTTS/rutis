@@ -31,7 +31,7 @@ When your application needs a plugin architecture — editors, bots, agent hosts
 ## 🚀 Getting started
 
 ```bash
-cargo add rutis@0.3
+cargo add rutis@0.4
 ```
 
 A provider, a consumer that declares a dependency, and a provider swap — full code at [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs) (`cargo run -p rutis --example quickstart`):
@@ -162,9 +162,12 @@ view.update(cfg_v2).await?;   // dry-run failure leaves everything untouched; su
 **Dynamic event names** — events whose names are only known at runtime (host events, script-registered channels): typed events + dynamic qualifiers inherit all four dispatch semantics and lifecycle cleanup for free:
 
 ```rust
-ctx.events().on_keyed::<HostEvent>(&ctx, "session/event", listener)?;
-ctx.events().emit_keyed(&ctx, name, Arc::new(event));
+let key = rutis::EventKey::<HostEvent>::dynamic(name);
+ctx.events().on(&ctx, &key, listener)?;
+ctx.events().emit(&ctx, &key, Arc::new(event))?;
 ```
+
+**Patterns and synchronous decisions** — `EventPattern::prefix("room/")` subscribes to dynamic channels and delivers the actual matching key. Events implementing `SyncEvent` can use `bail_sync` / `waterfall_sync`; the terminal can borrow caller-held state. See the [0.3 → 0.4 migration guide](docs/migration-0.3-to-0.4.md). Version 0.4.0 is not published yet.
 
 **API boundaries** — `require/require_as` are strict reads corresponding to Cordis's ordinary plugin service access. They check `injects()` along the fiber ancestry and distinguish undeclared, unavailable, out-of-scope, and inactive reads, retaining the call site. If a read is both out of scope and inactive, the instance boundary takes precedence; registration and instance dispatch define their own error order. `get/get_as` correspond to Cordis's explicit `ctx.get()` locator: they return `Option` without enforcing declarations. A service is normally hidden while its provider is inactive or the reader is unloading, except that the provider's subtree can read its own service during cleanup. Instance keys also have subtree visibility checks. The `Ctx` passed to `on` owns a listener; the callback's `Ctx` belongs to the emitter. Capture the registration `Ctx` when the callback must register resources for its own plugin. See the compiling [listener ownership example](crates/rutis/examples/listener_ctx_ownership.rs).
 
