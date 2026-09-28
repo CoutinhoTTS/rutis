@@ -8,7 +8,7 @@ base="$(mktemp -d /tmp/rutis-dylib-launcher.XXXXXX)"
 # collide with an immutable bundle restored from a previous build.
 bundle="${1:-$(bash tools/build-dylib-bundle.sh "$base/bundle" | tail -n 1)}"
 test -d "$bundle"
-test "$(cd /tmp && "$bundle/rutis-cli" --version)" = "rutis-cli 0.2.0"
+test "$(cd /tmp && "$bundle/rutis-cli" --version)" = "rutis-cli 0.5.0"
 env LD_LIBRARY_PATH=/tmp "$bundle/rutis-cli" --sdk-info > /dev/null
 
 mkdir -p "$base/hostile"

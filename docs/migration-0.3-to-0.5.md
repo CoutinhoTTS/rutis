@@ -1,6 +1,6 @@
-# rutis 0.3 → 0.4：事件键、模式订阅与同步调用
+# rutis 0.3 → 0.5：事件键、模式订阅与同步调用
 
-0.4.0 是本分支准备的下一个版本，尚未发布。它统一事件接口，增加模式订阅与同步决策点；服务的 `TypeKey`、依赖声明、现有服务拦截保持原接口。
+0.5.0 是本分支准备的下一个版本（0.4.0 从未单独发布，其内容并入 0.5.0）。它统一事件接口，增加模式订阅与同步决策点；服务的 `TypeKey`、依赖声明、现有服务拦截保持原接口。
 
 ## 把事件身份作为参数
 
@@ -17,7 +17,7 @@ bus.on(&ctx, &private, listener)?;
 bus.emit(&ctx, &named, Arc::new(event))?;
 ```
 
-| 0.3 | 0.4 |
+| 0.3 | 0.5 |
 | --- | --- |
 | `on(ctx, listener)` | `on(ctx, &EventKey::of(), listener)` |
 | `on_keyed(ctx, name, listener)` | `on(ctx, &EventKey::dynamic(name), listener)` |
@@ -94,7 +94,7 @@ bail 按注册 / prepend 顺序返回第一个 Some；waterfall 的 `SyncNext::c
 
 ## dylib SDK 与基准
 
-rutis 的破坏性 API 版本准备为 0.4.0；共享 SDK 版本准备为 0.2.0。SDK 身份随版本与锁内依赖变化，宿主和插件必须一起重编，不能把新产物当成旧 SDK 的替代文件。现有预执行和 pre-dlopen 校验保持原路径。
+rutis 的破坏性 API 版本为 0.5.0；共享 SDK 版本为 0.3.0。SDK 身份随版本与锁内依赖变化，宿主和插件必须一起重编，不能把新产物当成旧 SDK 的替代文件。现有预执行和 pre-dlopen 校验保持原路径。
 
 ```sh
 cargo bench -p rutis --bench events
