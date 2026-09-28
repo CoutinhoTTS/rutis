@@ -1,5 +1,7 @@
 # 协议插件设计：基于 rutis / Cordis 的跨语言对象与插件体系
 
+> 历史方案参考，不作为本分支的需求或实施依据。当前产品定义与范围见[协议插件需求](requirements-protocol-plugins.md)；下文的具体机制、路线与验收门槛均待重新评估。
+
 > 2026-09-27 重设计；替代本文件此前以 schema 方法调用为中心的方案。
 > 状态：设计提案，尚未实现。API、消息名与描述符均为草图，冻结门槛见 §16。
 > 源码基准：rutis main `446e58d`；需求 [#46](https://github.com/arcships/rutis/issues/46)、[#47](https://github.com/arcships/rutis/issues/47)、[#48](https://github.com/arcships/rutis/issues/48)。
