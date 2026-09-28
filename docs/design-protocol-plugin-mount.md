@@ -1,6 +1,6 @@
 # rutis / Cordis 跨进程挂载：组合设计
 
-依据：[需求](requirements-protocol-plugins.md)。原生基准：rutis `2e564e3`、Cordis `4.0.1`。本文定义目标方案；实现范围与阶段验收见[路线图](roadmap-native-plugin-mount.md)。框架扩展、共享版本页和新的接口提取器均尚未实现。
+依据：[需求](requirements-protocol-plugins.md)。原生基准：rutis `2e564e3`、Cordis `4.0.1`。本文定义目标方案；实现范围与阶段验收见[路线图](roadmap-native-plugin-mount.md)。共享版本页和新的接口提取器尚未实现；Cordis 仅使用现有公开入口，覆盖结论见 §8，不兼容项见 §9。
 
 **原插件在原框架中运行。接入时生成另一语言的类型和挂载入口；服务读取取得对象，后续操作固定指向该对象。原生依赖和 effect 决定启动、撤销与清理。**
 
@@ -141,27 +141,27 @@ JS async 函数的同步前缀在 invoke 时执行，返回的 Promise 已开始
 
 | 读取类型 | 选择 |
 | --- | --- |
-| 原生注册表中的稳定绑定 | 本地缓存代理；读取共享版本，未变则不做 IPC |
+| 原生注册表中的稳定绑定，且提交覆盖已证明 | 本地缓存代理；读取共享版本，未变则不做 IPC；Cordis 任意原生绑定目前不满足此前提 |
 | 首次读取或版本变化 | 向归属端解析一次，返回对象引用及解析时版本 |
 | 有动态 getter、外部状态检查或远端逐次拦截 | 每次执行原解析；版本计数不能推断任意函数的结果或跳过副作用 |
 | 对象方法 / 属性 | 固定指向已取得对象；对象属性的真实读写仍需通信，不缓存业务状态 |
 
-选择每个导出运行时一份共享版本页，先用全局版本使缓存失效，不建立逐对象同步系统。归属端在原生注册、换值、撤销及影响读取视图的提交前置为奇数，提交后以 release 发布新的偶数版本；这个提交窗口不得执行用户代码或 await。读取端 acquire 读到相同偶数版本才命中；否则走解析操作。解析响应与其版本必须来自同一已提交状态。版本不回绕复用，结束会话使缓存整体失效。
+满足提交覆盖的路径，每个导出运行时使用一份共享版本页，以全局版本使缓存失效，不建立逐对象同步系统。归属端在原生注册、换值、撤销及影响读取视图的提交前置为奇数，提交后以 release 发布新的偶数版本；这个提交窗口不得执行用户代码或 await。读取端 acquire 读到相同偶数版本才命中；否则走解析操作。解析响应与其版本必须来自同一已提交状态。版本不回绕复用，结束会话使缓存整体失效。
 
-Cordis 4.0.1 的提交覆盖表如下；P1 必须逐项做原生 / 缓存对照，不能只给 provide 加通知。
+Cordis 4.0.1 的提交覆盖审计如下。列出的内部写入位置是正确性依据，不是修改 Cordis 的任务；公开入口与运行验证见 §8。
 
-| 变化 | 具体位置 / 提交范围 | 窗口外保留的原行为 |
+| 变化 | 实际提交位置 | 公开入口的覆盖结论 |
 | --- | --- | --- |
-| 注册 / 撤销实现 | reflect.provide 中 store[key] 与提供者 fiber.store[name] 的登记；disposer 开头删除 store[key]，清理末尾再单独删除 fiber.store[name] | notify、消费者清理及 await 不在奇数窗口内 |
-| 原地换值 | reflect.set 中 impl.value 的赋值 | internal/set 的用户拦截在提交前执行 |
-| 提供者可用性 | fiber._updateState 最终 state 字段写入，尤其进入 / 离开 ACTIVE；root 初始化在首次发布前完成 | 先运行 callback / _getState 取得候选状态，再提交字段；internal/status 和 notify 在提交后运行 |
-| 注入读取快照 | fiber._reload 发布 this.store 快照、_unload 清空它，以及 provide 对本 fiber.store 的增删 | _store / check 的候选计算不代替已发布 store；check 函数和插件装配 / 清理在窗口外 |
-| isolate / Context 视图 | reflect.provide 首次建立 root isolate 标签；context.isolate / extend 的新视图先完成映射再分配新视图身份；已发布映射发生变更时同步失效 | 派生视图不复用父视图缓存；继承映射改变也须覆盖 |
-| 读取规则 | props 的 service / accessor 登记撤销、inject / shadow 视图及 internal/get 拦截变化影响缓存资格 | 任意 getter / check / 拦截的动态结果不由版本推断；不允许缓存跳过其调用 |
+| 注册 / 撤销实现 | reflect.provide 登记 store[key]、fiber.store[name]；disposer 先删前者，等待消费者清理后再删后者 | internal/service 在提交后通知，不能在写入前置奇数；不覆盖清理末尾的快照删除 |
+| 原地换值 | reflect.set 写 impl.value | 属性赋值经过 internal/set，可在 next 前后执行逻辑；直接 ctx.set / reflect.set 绕过钩子，且 next 还包含后续用户钩子，不能当成通用的无用户代码提交窗口 |
+| 提供者可用性 | fiber._updateState 写 state，尤其进入 / 离开 ACTIVE | internal/status 在写入后通知；callback 还可能启动 reload / unload，没有公开的提交前边界 |
+| 注入读取快照 | fiber._reload 发布 this.store、_unload 清空它，provide 增删本 fiber.store | 没有覆盖这些写入的公开前后钩子；internal/get 能拦截属性读取，不能补出快照提交边界 |
+| isolate / Context 视图 | provide 首建 root isolate 标签；isolate / extend 派生视图；公开映射的后续写入 | 适配器可为取得的视图区分身份；无法观察任意原生代码对已发布映射及其继承来源的所有修改 |
+| 读取规则 | props、inject / shadow 及读取拦截改变解析行为 | internal/get 覆盖插件服务属性；accessor 自己执行 getter。直接 get、root 读取等另有路径；不得跳过 getter / check / 拦截，也没有通用缓存资格变更通知 |
 
-_updateState 的 callback 可启动 _reload / _unload，因此**不能包住整个 _updateState 或 callback**。只围住无用户代码的实际发布操作；多个写者须串行化。公开可改写映射若能绕过提交接口，该路径不能启用缓存。对 rutis 同样逐项检查注册、换值、可用性、qualifier / isolate 和读取拦截的真实提交。
+结论：**现有 Cordis 公开入口不能为任意原生绑定提供完整的共享版本失效保证。** 对未覆盖路径使用原生逐次解析，并记录同步往返代价；“缓存命中零 IPC”的目标在这些路径上未满足。不能用提交后通知缩短窗口就宣称一致，也不通过替换方法或改写内部 store 补钩子。rutis 仍须独立核对注册、换值、可用性、qualifier / isolate 和读取拦截的真实提交。
 
-共享页只放失效元数据。原子 mmap 方案需要 Node 本地扩展负责映射和原子读取，现有 Worker 的 SharedArrayBuffer 不能直接代替跨进程共享页。P1 增加无需扩展的对照组后再选择一种实现，不同时维护两套生产后端：
+共享页只放失效元数据。原子 mmap 方案需要 Node 本地扩展负责映射和原子读取，现有 Worker 的 SharedArrayBuffer 不能直接代替跨进程共享页。P1 只对已证明提交覆盖的路径比较以下读取方式，再选择一种实现；缺少提交边界时不进入后端实现，不同时维护两套生产后端：
 
 | 对照 | 成本与成立条件 |
 | --- | --- |
@@ -262,7 +262,7 @@ FinalizationRegistry 只用于正常运行期间归还未显式释放的导入�
              一次原生分发，各调用一次
 ```
 
-原生接口须提供带作用域、once 资格和调用期持有的监听快照，并允许入口采用所需的原生分发算法。不把远端整条总线包装成一个监听，不双边重复广播，不复制第三套全局调度器。
+原生接口须提供带作用域、once 资格和调用期持有的监听快照，并允许入口采用所需的原生分发算法。不把远端整条总线包装成一个监听，不双边重复广播，不复制第三套全局调度器。此模型是验收要求：Cordis 的监听登记可拦截，但现有分发入口不能改道到 rutis 总线，故该归属组合当前做不到，见 §8 / §9；不能把图示视为已可实现的通用路由。
 
 | 入口 | 调用及等待 |
 | --- | --- |
@@ -278,7 +278,7 @@ FinalizationRegistry 只用于正常运行期间归还未显式释放的导入�
 
 注销撤掉后续资格，已开始分发按原快照收尾；once 只由登记来源的原生包装消费一次，不双重包装。同键重入检查仍归原框架。
 
-**同步成本：** 总线归 rutis 时，每次 Cordis 同步 emit / bail 至少需要一次主线程往返；其中每个 JS 监听还需反向调用，使同步前缀回到原线程执行。通信线程无法消除这段阻塞。总线归 Cordis 时 Rust 同步入口有对称代价。总线归属由连接固定，不按某次调用临时切换来隐藏成本。
+**同步成本：** 若事件入口能够路由，总线归 rutis 时，每次 Cordis 同步 emit / bail 至少需要一次主线程往返；其中每个 JS 监听还需反向调用，使同步前缀回到原线程执行。当前该路由缺失，即使具备入口也不能消除这段阻塞。总线归 Cordis 时 Rust 同步入口有对称代价。总线归属由连接固定，不按某次调用临时切换来隐藏成本。
 
 ## 6. 依赖与生命周期
 
@@ -321,7 +321,7 @@ Rust Audit -> 导出 / 导入 Audit -> Cordis Search
 | 子插件 | 留在原进程、原父 fiber 下运行；其公开注册通过同一观察入口投影，保留自己的作用域、依赖和代次 |
 | 父插件卸载 | 原框架清理真实子树；外层只撤销相应投影，不逐子插件创建进程或另排清理顺序 |
 
-外层的普通挂载 / 配置更新入口必须能转发原生 fiber 操作，并关联其完成结果。当前两端普通包装插件的 apply / effect 不足以保证这点；这是 §8 的生命周期接入要求，不以接收新 config 然后自写 restart 冒充完整 update。
+外层挂载的 apply / effect 本身不覆盖更新。Cordis ACTIVE 状态的 internal/update 可转发并返回原完成结果，不调用 next 可避免外层重复 restart；Pending update 不经过此钩子，配置沿原生激活流程处理，须单独验收。调用原生 fiber.update 时通过公开的 `await ctx.plugin(...)` 取得真实 fiber，不能把其 thenable 包装对象当成可任意写入的同一实例。这里只验证了钩子能力；跨进程更新、校验次数和完成关联仍由 P3 实现，不自写 restart 替代原行为。
 
 ### 6.4 故障
 
@@ -350,9 +350,7 @@ Rust Audit -> 导出 / 导入 Audit -> Cordis Search
 
 ## 8. 接入能力与修改边界
 
-协议、生成、序列化、对象表、共享页和进程管理均在外挂库。原框架只提供无法由现有公开入口实现的接入能力；本设计不授权直接修改第三方内核。
-
-下表定义所需能力，不预设取得能力的修改路线。当前测试基线是 @deepseek-ai/cordis 4.0.1；P1 先核实目标 Cordis 实现及其现有扩展入口。包的仓库地址不构成向该维护方提案的开发任务，外部提案也不是默认交付前置。
+协议、生成、序列化、对象表、共享页和进程管理均在外挂库。**Cordis 只使用现有公开入口；不提上游提案、不 fork、不 monkey patch，不安排修改 Cordis 的路线。** 公开入口覆盖不了的能力列入 §9，保留原需求及未满足项。
 
 | 能力 | 原生接口必须保证 |
 | --- | --- |
@@ -360,20 +358,27 @@ Rust Audit -> 导出 / 导入 Audit -> Cordis Search
 | 事件 | 路由指定键的登记、注销及分发；提供原生快照和分发算法入口；本地后端入口不得再次进入路由 |
 | 挂载生命周期 | 外层原生 update / restart 转发及完成关联；保留来源 fiber 钩子、原生子树和清理所有权 |
 
-| 归属 | 实施条件 | 未具备时的结果 |
+Cordis 覆盖审计基于[锁定的包](../interop/node/package-lock.json) `@deepseek-ai/cordis 4.0.1` 的 src/reflect.ts、src/events.ts、src/fiber.ts、src/context.ts 及实际发布入口 lib/index.js。[7 项原生验证](../interop/node/test/cordis-hooks.test.mjs)直接使用公开 API，不替换方法或写入框架内部表；它们证明入口能力与边界，不代表跨进程功能已经完成。
+
+| 能力 | 公开入口与依据 | 覆盖结论 |
 | --- | --- | --- |
-| rutis（本仓库） | 独立小改动、原生行为测试及评审；不把协议类型放进核心 | 相应读取 / 事件 / 更新能力不计完成；不能用当前 intercept_require_as 代替 get 覆盖或提交后观察 |
-| Cordis（第三方，当前测试基线为 @deepseek-ai/cordis） | 先在本仓库验证目标实现及现有扩展入口；确需额外框架能力时，单独列明缺口、最小改动及其依赖，评审后决定取得方式 | 现有方法切片可保留；未验证的完整入口接管不能发布为已支持 |
+| 属性读取 | ReflectService.handler.get 调用 internal/get waterfall；accessor 使用自身 getter | 可接入插件属性读取；accessor、root 和直接 ctx.get / reflect.get 不经过 internal/get。导入服务可用 provide 交给原生两种读取路径，不能把属性钩子当成全入口拦截 |
+| 换值 | handler.set 的 internal/set waterfall，最终 next 调用 reflect.set | 可包住属性赋值；直接 set 绕过钩子，next 内还可能有后续用户钩子。§4.1 的通用原子提交窗口未满足 |
+| 注册与可用性 | provide / notify 的 internal/service；_updateState 的 internal/status | 可观察提交后的注册 / 可用性变化；不能提供提交前的版本失效边界。注入快照和 isolate 等缺口见 §4.1 |
+| 监听登记 / 注销 | EventsService.on 用 internal/listener bail 的返回值替代登记；once 包装在调用监听前执行 disposer | 可逐监听接入，保留 options 和原 once 包装；替代登记须自行用所属 Context.effect 绑定注销，原 register 已被跳过。登记钩子不提供分发改道 |
+| 原生事件分发 | dispatch 调用 internal/dispatch 后仍从本地 _hooks 取监听，忽略观察者返回值；parallel 和 emit 均报告模式 emit | 不能用该钩子把原 emit / parallel / bail 等改道至 rutis 总线。观察转发不能替换返回值、等待策略或单一监听快照 |
+| update / 子插件 | ACTIVE fiber.update 返回 internal/update waterfall 结果；非 ACTIVE 分支在钩子前返回；子插件仍由原 registry / fiber 管理 | ACTIVE 更新可转发完成；Pending 走原生延后激活路径，不宣称钩子覆盖。完整更新与子插件注册投影待 P3 对照验收 |
 
-若选定实现无法提供必要的事件接入，其原生 emit / parallel / bail / waterfall 就无法统一路由到 rutis 的总线；全局逐监听顺序、跨端短路和 once / 过滤的组合语义不能保证。双边广播或订阅转发不能作为等价退路。依赖这些能力的挂载须在启动前报缺失能力。持续维护 fork / monkey patch 不是默认方案；若最终选择依赖维护方提供新接口，其接受和发布时间仍须单独记录，不能由本仓库进度代替。
+rutis 的接入能力单独评估：优先公开入口，确需核心扩展时另列最小差异、原生行为测试及评审，不把协议类型放进核心。当前 intercept_require_as 不等于 get 全覆盖或提交边界；本 PR 不修改 rutis 核心。依据：[Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)。两框架清理顺序的差别由适配器自己的组合 effect 处理，不重排原业务 effects。
 
-现有实现依据：[rutis Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)；已锁定 Cordis 包的 src/reflect.ts、src/events.ts、src/fiber.ts。rutis 逆序清理与 Cordis 并发 effects 的差别由适配器自己的组合 effect 处理，不重排原业务 effects。
+P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响场景，未知项保留待验证，不能先判不兼容。生成契约与应用连接已要求的缺失能力，在原插件启动前报告；动态行为不能靠静态类型穷举，运行时新发现的缺失能力须在对应注册 / 操作生效前明确失败。两者都不静默降级，也不计作完成任意插件目标。
 
 ## 9. 不能被适配器消除的约束
 
 | 组合 | 判定与处理 |
 | --- | --- |
-| 现有公开 API 完全不变，同时覆盖所有原生入口 | 无法成立；需要 §8 的明确接入能力 |
+| Cordis 原生事件入口分发到归 rutis 的单一总线 | §8 的 dispatch 控制流没有可替换入口；跨端全局顺序、短路、once / 过滤组合无法保证。依赖此连接的挂载启动前报告缺失能力，不用双广播替代，也不自动改总线归属。归 Cordis 的连接须独立验收，不能由此推断所有跨语言事件都做不到 |
+| Cordis 任意原生绑定使用零 IPC、无陈旧窗口的版本缓存 | 注册 / 可用性只有提交后通知，直接 set 等写入绕过钩子，§4.1 的覆盖不足；跨进程读者可能在写入后、版本更新前命中旧代理。逐次原生解析保留行为但承担 IPC，零 IPC 性能目标未满足；要求该缓存能力的挂载启动前报告缺失，不启用不可靠缓存 |
 | 原同步签名等待被自己阻塞的执行器 | 等待环；需要真正的异步边界，不能假称 Worker 或消息泵解决 |
 | 不同具体类型 / 事件契约无损替换 | 生成忠于来源的外语绑定；不兼容的既有接口明确诊断，不能默改类型或短路规则 |
 | 无提取工具链 / 匹配产物，仍首次生成完整 Rust API | 当前选定的 rustdoc 路线不能满足；安装成本必须明确 |
@@ -409,6 +414,6 @@ Rust Audit -> 导出 / 导入 Audit -> Cordis Search
 
 当前按名称编码的目标只定位一次挂载内已经捕获的对象，并非完整引用协议。新读取拿到新 B、运行期注册代次、引用计数、invoke / await 分离、反向回调、事件和包接入仍按路线图开发；不能把这次修复写成这些能力已经交付。
 
-验收必须同时包含原生结果 / 顺序 / 身份对照，以及 IPC 次数、吞吐、p50 / p95 / p99 和调用线程停顿。缓存命中路径须做到零 IPC；动态 getter 和同步远端事件必须单独展示成本。阶段用例通过后仍要运行 §7 全链路，不再用孤立方法测试代替完整兼容性。
+验收必须同时包含原生结果 / 顺序 / 身份对照，以及 IPC 次数、吞吐、p50 / p95 / p99 和调用线程停顿。启用的缓存命中路径须做到零 IPC；无法启用的路径记录未满足项。动态 getter 和同步远端事件必须单独展示成本。阶段用例通过后仍要运行 §7 全链路，不再用孤立方法测试代替完整兼容性。
 
 历史 [#66](https://github.com/arcships/rutis/issues/66)—[#70](https://github.com/arcships/rutis/issues/70) 只作为来源：其中仅异步事件、仅调用期回调、排除 waterfall / 流及人工接口的限制已被最新需求覆盖。PR 的关联不表示按旧范围验收。
