@@ -1969,6 +1969,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "native-mount-example"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-interop",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2844,6 +2854,18 @@ name = "rutis-greeter-fixture-v2"
 version = "2.0.0"
 dependencies = [
  "rutis-sdk",
+]
+
+[[package]]
+name = "rutis-interop"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

@@ -1,0 +1,14 @@
+{
+  "name": "@rutis/interop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-isolation=none test/*.test.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "tsx": "^4.20.0",
+    "typescript": "6.0.3"
+  }
+}
