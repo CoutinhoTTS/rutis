@@ -7,7 +7,7 @@
 | 阶段 | 交付物 | 必须通过的检查 | 依赖 / 当前状态 |
 | --- | --- | --- | --- |
 | P0 修正当前 PR | 两端先清理后排空；导出捕获对象；维持已有方法形状 | disposer 解除在途等待；换槽位不改旧对象；失活导出 Context 不妨碍独立对象 | 本轮实现并验证；仍是固定导出的方法切片 |
-| P1 接入可行性与成本 | rustdoc 类型提取原型、公开入口覆盖审计、rutis 最小事件接管接口原型；提交覆盖成立的路径才比较版本读取后端 | 按设计 §4.1 / §8 输出覆盖证据；事件按 Cordis 统一队列验证，rutis 核心扩展独立评审；成本独立记录 | Cordis 的 7 项入口检查与 3 项事件基准通过；跨进程对照、类型提取、rutis 原型与性能对照未完成。不修改 Cordis |
+| P1 接入可行性与成本 | rustdoc 类型提取原型、公开入口覆盖审计、rutis 最小事件接管接口原型；提交覆盖成立的路径才比较版本读取后端 | 按设计 §4.1 / §8 输出覆盖证据；事件按 Cordis 统一队列验证，rutis 核心扩展独立评审；成本独立记录 | 原生入口 / 事件基准、8 项跨进程监听对照及 4 项执行器实验通过，错误结构缺口已复现，见本节结果表。类型提取、rutis 接管原型与性能对照未完成 |
 | P2 一套调用与对象协议 | 版本握手、invoke / await、回调、属性、拥有 / 借用 / 弱引用、迭代与释放计数；可迁移 Rust 异步回调的后台执行器；本地代理再导出 | 受理先于 release、跨会话转交；安全后台推进与 Send 但依赖原运行时的反例；静态风险诊断、可证环返回 SyncWaitCycle；FnOnce / FnMut、借用 / 流取消 | 使用 P1 类型模型；不为每次调用新建线程，不把 Send 当成可迁移证明；不得先把事件做成另一套 RPC |
 | P3 原生服务与生命周期 | 实际注册观察、动态 / 可选依赖、isolate、撤销、更新、子插件、显式 close；提交覆盖成立的路径才启用缓存 | 新读 B / 旧 A；撤销后禁止新取得，但允许合法旧对象的收尾操作；跨方向依赖、同时卸载；无 GC 关闭 | 依赖 P1 已验证的服务 / 更新接入方式与 P2；Cordis 通用版本缓存不可交付，记录未满足项；不能沿用 P0 的 closing 全量拒绝 |
 | P4 原生事件组合 | Cordis 统一监听队列、逐个 Rust 监听代理、原生分发算法、once / 过滤 / next | emit / parallel 的返回与等待、同步抛错 / 异步拒绝、AggregateError 结构；bail Promise、短路、顺序、重入、注销；运行 §2 两方向组合 | 依赖 P1 的 rutis 核心接管入口及 P2 / P3；入口未交付时完整事件仍未满足。不改 Cordis，不用双广播冒充解决 |
@@ -31,7 +31,29 @@ P1 不要求先做完 P2—P5。先核实影响路线的公开入口；缺少提
 node --test interop/node/test/cordis-hooks.test.mjs
 ```
 
-7 项入口检查：属性与直接读取、属性与直接换值、监听替代及 once / effect 注销、ACTIVE update、真实 fiber 的 Pending update、分发观察、提交后通知。另有 3 项事件原生基准：emit / parallel 等待差异、同步抛错与嵌套错误汇总、Promise 短路与异步拒绝。跨进程代理尚未参与这些测试，完整对照仍待 P4；更新同样未交付。
+7 项入口检查：属性与直接读取、属性与直接换值、监听替代及 once / effect 注销、ACTIVE update、真实 fiber 的 Pending update、分发观察、提交后通知。另有 3 项事件原生基准：emit / parallel 等待差异、同步抛错与嵌套错误汇总、Promise 短路与异步拒绝。以下实验补充跨进程证据，未勾选完整组合验收。
+
+### 首轮验证结果（2026-09-28）
+
+| 场景 | 实测结果 | 证据与边界 |
+| --- | --- | --- |
+| Cordis 队列中的单个 Rust 监听代理 | 8 项与本地监听对照一致：混合 A/B/C 顺序、emit / bail、once 重入、过滤 / prepend / 注销、异步 emit / parallel / bail，以及错误汇总 | [跨进程事件测试](../interop/node/test/fixtures/event-mount.test.mjs)调用真实 Rust Counter 插件的生成方法；尚未接管原 rutis 监听登记，未验证 Rust 发起事件、serial / waterfall 或两框架事件规则的完整映射 |
+| Rust 同步等待 Node，Node 请求 Rust 异步回调 | 后台执行器新建的 timer / task 能完成，原 current_thread 保持同步等待 | [执行器实验](../crates/rutis-interop/tests/executor_probe.rs)使用真实 Node 进程和测试专用标量消息；不是生产回调协议 |
+| Send Future 持有原运行时 Handle / 已创建 timer | 后台执行器运行期间仍无法完成；仅恢复原运行时后，两者都完成 | 同一执行器实验中的两个反例，证实 Send 不等于运行时独立；不把超时当成 SyncWaitCycle 检测 |
+| Node 同步等待 Rust，Rust 请求立即 JS 回调 | JS 回调在原线程完成；已经排入队列的 timer / Promise 后续代码在同步返回后才执行 | 同一执行器实验与[同步消息泵夹具](../interop/node/test/fixtures/sync-callback-probe.mjs)；生产消息泵、静态风险诊断和 SyncWaitCycle 检测尚未实现 |
+| 远端 AggregateError 的内部结构 | **当前协议不兼容**：只保留 name / message，errors 与 cause 丢失 | [缺口复现](../crates/rutis-interop/tests/error_shape_probe.rs)。Cordis 能正确汇总收到的普通远端错误和本地嵌套错误，不等于远端嵌套错误也已保留；必须在 P2 补齐 |
+| 同名事件的短路规则 | 原 rutis 的 Some(false) 停止，原 Cordis 的 false 继续执行下一个监听 | [两框架原生对照](../crates/rutis-interop/tests/event_contract_probe.rs)；统一队列不能省略 Option / 原始值的契约转换 |
+| stable 首次提取 / 固定具体类型 / 无错误返回渠道 | 本机 rustdoc 1.98.1 拒绝所选 JSON 命令；原 Counter 与生成 Counter 不同类型、在 u32 返回口返回 Result 均触发 E0308 | 一次性编译探针；没有验证完整 rustdoc 类型提取，也不证明所有具体类型均无其他接入方式 |
+| 服务提交与关闭后引用 | 原有钩子测试确认提交后通知；原有进程测试确认断连 / dispose 后调用失败 | 没有新增共享缓存实现或跨进程失效窗口实验；完整对象有效期协议仍待 P2 / P3 |
+
+复现本轮已提交实验：
+
+```sh
+cargo test -p rutis-interop --test executor_probe --test error_shape_probe --test event_contract_probe -- --nocapture
+cargo test -p native-mount-example --test cordis_mount -- --nocapture
+```
+
+两个相关 crate 的测试通过（17 项 Rust 测试，其中跨进程套件运行 15 项 Node 测试），独立 Node 套件 13 项通过；对应 all-target Clippy、格式及 diff 检查通过。这里包括缺口复现测试，不能把测试全绿解释为完整兼容。
 
 ### P2 必须增加的协议用例
 

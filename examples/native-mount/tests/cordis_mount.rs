@@ -8,6 +8,7 @@ async fn cordis_mounts_the_original_rust_plugin() {
             "--test",
             "--test-isolation=none",
             "test/fixtures/rust-mount.test.mjs",
+            "test/fixtures/event-mount.test.mjs",
         ])
         .current_dir(node)
         .env("RUTIS_BINDINGS", concat!(env!("OUT_DIR"), "/rutis.mjs"))

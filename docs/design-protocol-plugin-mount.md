@@ -140,6 +140,8 @@ Rust 适配器提供独立推进的后台执行器，供可迁移的异步回调
 
 Send 只证明跨线程传递的内存安全，不证明运行时独立性。只把任务交给后台线程，或在新线程调用原 current_thread 的 Handle.block_on，都不能代替原 I/O / timer 驱动。生成器不能从 Send 推断“可透明迁移”；可由适配器确定的执行环境才登记为后台可执行，其余保留原归属并诊断已知冲突。[Rust Send](https://doc.rust-lang.org/std/marker/trait.Send.html)、[Tokio Handle::block_on](https://docs.rs/tokio/latest/tokio/runtime/struct.Handle.html#method.block_on)。
 
+[执行器实验](../crates/rutis-interop/tests/executor_probe.rs)已验证独立后台任务完成、原 Handle / timer 仍需原驱动，以及 Node 同步消息泵能执行立即回调但不能推进 timer / Promise continuation。实验采用测试专用消息，不代表生产回调协议或 SyncWaitCycle 检测已完成。
+
 ## 4. 服务读取、对象与释放
 
 ### 4.1 对象固定，稳定绑定用版本缓存
@@ -298,6 +300,8 @@ Cordis 的 internal/dispatch 把 emit 与 parallel 都标作 emit。监听代理
 | emit / parallel | 同一监听代理在两入口下保留同步前缀；emit 不等待 Promise，parallel 等全部监听完成；分别覆盖同步抛错和异步拒绝 |
 | 错误结构 | parallel 由 Cordis 生成一层 AggregateError；保留 errors 的登记顺序及嵌套错误，不在代理层再统一包一层；对照 name、message、cause、errors，stack 中允许存在跨进程帧差异 |
 | bail / once / 过滤 | bail 判断返回的 Promise 本身；跨端逐监听顺序、短路、once 重入、过滤及分发中注销仍须端到端对照，前两项验证不能替代这些检查 |
+
+[8 项监听对照](../interop/node/test/fixtures/event-mount.test.mjs)已让真实 Rust 插件的生成方法参与 Cordis 队列，验证上述部分返回、顺序与清理行为；尚未接管原 rutis 监听登记或 Rust 发起事件。当前只验证了普通远端错误参与本地汇总；[远端嵌套错误的复现](../crates/rutis-interop/tests/error_shape_probe.rs)确认现有协议会丢失 errors / cause，完整错误结构仍需 P2 实现。
 
 **同步成本：** Rust 同步入口访问 Cordis 队列需要往返，其中 Rust 监听还需要反向调用；Cordis 调用单个 Rust 同步监听同样阻塞本次分发线程。通信 Worker 不能消除这些成本。连接明确采用该队列，不在运行期静默改变事件规则或总线归属。
 
