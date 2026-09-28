@@ -7,6 +7,7 @@
 pub mod build;
 #[cfg(unix)]
 mod process;
+#[cfg(unix)]
 mod protocol;
 #[cfg(unix)]
 pub mod rpc;
