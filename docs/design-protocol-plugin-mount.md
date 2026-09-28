@@ -301,9 +301,9 @@ Cordis 的 internal/dispatch 把 emit 与 parallel 都标作 emit。监听代理
 | 错误结构 | parallel 由 Cordis 生成一层 AggregateError；保留 errors 的登记顺序及嵌套错误，不在代理层再统一包一层；对照 name、message、cause、errors，stack 中允许存在跨进程帧差异 |
 | bail / once / 过滤 | bail 判断返回的 Promise 本身；跨端逐监听顺序、短路、once 重入、过滤及分发中注销仍须端到端对照，前两项验证不能替代这些检查 |
 
-[8 项监听对照](../interop/node/test/fixtures/event-mount.test.mjs)已让真实 Rust 插件的生成方法参与 Cordis 队列。[rutis 队列原型](../crates/rutis/tests/event_queue.rs)另已覆盖原生登记和 Rust 发起的六种分发，但使用进程内测试队列；两组证据尚未连接成跨进程事件实现。[错误往返回归](../crates/rutis-interop/tests/error_shape_probe.rs)已验证远端嵌套 AggregateError 的成员顺序、cause、共享及循环引用经过 Rust 转发仍保留；自定义错误类仅保留错误字段，不还原其原型及任意附加成员。
+[8 项监听对照](../interop/node/test/fixtures/event-mount.test.mjs)已让真实 Rust 插件的生成方法参与 Cordis 队列。[rutis 队列原型](https://github.com/arcships/rutis/blob/3e934aa/crates/rutis/tests/event_queue.rs)另已覆盖原生登记和 Rust 发起的六种分发，但使用进程内测试队列；两组证据尚未连接成跨进程事件实现。[错误往返回归](../crates/rutis-interop/tests/error_shape_probe.rs)已验证远端嵌套 AggregateError 的成员顺序、cause、共享及循环引用经过 Rust 转发仍保留；自定义错误类仅保留错误字段，不还原其原型及任意附加成员。
 
-**同步成本：** Rust 同步入口访问 Cordis 队列需要往返，其中 Rust 监听还需要反向调用；Cordis 调用单个 Rust 同步监听同样阻塞本次分发线程。通信 Worker 不能消除这些成本。连接明确采用该队列，不在运行期静默改变事件规则或总线归属。
+**同步成本：** 原型的 register / select 均同步；真实 Cordis 队列会使 Rust 监听登记和所有分发模式的快照选择发生同步 IPC，包括异步 emit。Rust 监听还需反向调用，Cordis 调用 Rust 同步监听也阻塞分发线程。#74 尚须评估异步选择或有序本地副本对快照、once、注销及登记顺序的影响；当前不将原型视作性能可接受的完整方案。通信 Worker 不消除调用线程停顿。
 
 ## 6. 依赖与生命周期
 
@@ -394,19 +394,20 @@ Cordis 覆盖审计基于[锁定的包](../interop/node/package-lock.json) `@dee
 | 原生事件分发 | dispatch 调用 internal/dispatch 后仍从本地 _hooks 取监听，忽略观察者返回值；parallel 和 emit 均报告模式 emit | 不能改道至 rutis 总线。§5 改为验证 Cordis 持有队列、逐个登记 Rust 监听代理；等待及错误汇总交原生入口，不依靠观察标签区分模式 |
 | update / 子插件 | ACTIVE fiber.update 返回 internal/update waterfall 结果；非 ACTIVE 分支在钩子前返回；子插件仍由原 registry / fiber 管理 | ACTIVE 更新可转发完成；Pending 走原生延后激活路径，不宣称钩子覆盖。完整更新与子插件注册投影待 P3 对照验收 |
 
-rutis 的接入能力单独评估：优先公开入口，确需核心扩展时另列最小差异、原生行为测试及评审，不把协议类型放进核心。当前 intercept_require_as 不等于 get 全覆盖或提交边界；本 PR 现包含下述事件队列接入口原型，不改服务注册表或 fiber 清理顺序。依据：[Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)。
+rutis 的接入能力单独评估：优先公开入口，确需核心扩展时另列最小差异、原生行为测试及评审，不把协议类型放进核心。当前 intercept_require_as 不等于 get 全覆盖或提交边界；事件队列接入口已拆至独立草稿 [PR #74](https://github.com/arcships/rutis/pull/74)，内核范围和调度成本尚待确认；#73 不包含该内核修改。依据：[Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)。
 
 事件接入口只替换监听存储与快照选择，六种执行算法继续使用原 EventBus；不增加通信协议、进程管理或事件调度器。现有 observe_dispatch / subscriptions 仍仅用于观察。
 
 | 原型决策 | 接口及边界 |
 | --- | --- |
+| API 状态 | #74 中新接口及擦除续延均标为 experimental；完整跨进程验证后再决定稳定 API |
 | 安装 | `Ctx::root_with_event_queue` 在建根时注入 `EventQueue`；按事件 TypeId 选择其全部通道，避免同一个 pattern 分属两个队列。未接管类型走原路径。现有根上的监听迁移、包级自动安装未实现，不作为 P5 已完成能力 |
 | 登记 / 注销 | 队列取得独立 `EventRegistration` 并返回清理 Effect；登记失败不留 effect，登记跨卸载则回滚。适配器代码在框架锁外运行 |
 | 原生分发 | 队列返回有序登记快照；rutis 校验总线 / 类型 / 通道 / 回调族 / 重复 ID，再统一认领 once 和生命周期持有。原 emit 尾链、并行等待、Option 短路、借用 next 继续执行 |
 | 外部调用单个监听 | `registration.select` 取得绑定 Context / 键、仅可调用一次的 `EventListener`；四种回调族和借用续延均可调用。外部分发器负责其快照点、过滤及整次分发的重入规则，P4 必须验证分发中注销与跨端 next |
 | 清理 | 显式注销先关闭选取资格、执行队列清理，再排空其原生在途事件。整个 fiber 卸载仍先等受计数事件再跑 effects；回调若依赖同一 fiber 的 disposer，则形成原生等待环，见 §9 |
 
-原型与原生对照见 [11 项测试](../crates/rutis/tests/event_queue.rs)：六种分发、顺序 / once、pattern / 实例、未接管类型、外部逐监听调用、错误快照、登记回滚及清理。Cordis 队列的真实实现依赖 P2 协议，P4 完成双向组合后才算跨进程事件交付。
+原型与原生对照见 [11 项测试](https://github.com/arcships/rutis/blob/3e934aa/crates/rutis/tests/event_queue.rs)：六种分发、顺序 / once、pattern / 实例、未接管类型、外部逐监听调用、错误快照、登记回滚及清理。Cordis 队列的真实实现依赖 P2 协议，P4 完成双向组合后才算跨进程事件交付。
 
 P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响场景，未知项保留待验证，不能先判不兼容。生成契约与应用连接已要求的缺失能力，在原插件启动前报告；动态行为不能靠静态类型穷举，运行时新发现的缺失能力须在对应注册 / 操作生效前明确失败。两者都不静默降级，也不计作完成任意插件目标。
 
@@ -414,7 +415,7 @@ P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响�
 
 | 组合 | 判定与处理 |
 | --- | --- |
-| 两框架内核均不改，原生事件入口统一跨端分发 | Cordis 入口不能改道至 rutis；§5 选择 Cordis 持有队列并单独补 rutis 接管入口，明确放宽“rutis 核心也完全不改”的条件。扩展交付前，依赖完整跨端事件的挂载报告缺失能力；不以双广播或局部验证宣告完成 |
+| 两框架内核均不改，原生事件入口统一跨端分发 | Cordis 入口不能改道至 rutis；§5 的 Cordis 队列方案依赖 rutis 接管入口；是否放宽“rutis 核心也完全不改”仍由独立草稿 #74 评审确认。扩展获准及交付前，依赖完整跨端事件的挂载报告缺失能力；不以双广播或局部验证宣告完成 |
 | Cordis 任意原生绑定使用零 IPC、无陈旧窗口的版本缓存 | 注册 / 可用性只有提交后通知，直接 set 等写入绕过钩子，§4.1 的覆盖不足；跨进程读者可能在写入后、版本更新前命中旧代理。逐次原生解析保留行为但承担 IPC，零 IPC 性能目标未满足；要求该缓存能力的挂载启动前报告缺失，不启用不可靠缓存 |
 | 原同步签名必须等被自己阻塞的唯一执行器 | §3.3 的立即回调与可迁移 Rust 异步工作可以处理；仍依赖被阻塞 Node 线程或原 Rust 执行器的工作形成等待环，不能靠 Send 或通信 Worker 宣称解决 |
 | rutis 受计数事件等待同一 fiber 的 disposer | 原 fiber 在 effects 前等待同步、pattern 和实例事件；因此该组合原生也不能完成。队列接入口保留此顺序；显式注销的先清理后排空，不等于整个插件卸载已消除此环。适配器自己的 close 可先解除协议等待，不能代替原插件 disposer |
@@ -428,6 +429,7 @@ P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响�
 | --- | --- |
 | Node → Rust → JS 回调 | Node 同步等待 Rust，Rust 等回调的异步结果；回调的 timer / Promise 后续步骤需要被阻塞的 Node 主线程 |
 | Rust → JS → Rust 回调 | §3.3 条件满足时后台推进 Future；仍依赖被 recv 阻塞的原运行时 spawn / timer / 生命周期任务时形成等待环。Send 本身不能排除此情况 |
+| Rust 登记 / 异步 emit 的队列选择 | 原型同步 register / select 占用 worker；对端请求需要原执行器的异步回调会成环。关联消息泵仅解决同步回调，异步选择 / 有序副本的正式方案仍由 #74 验证 |
 | Tokio 多线程 | 只是增加可用 worker；嵌套或并发同步调用占满 worker 仍可饥饿，不能当作任意插件支持条件 |
 
 构建时对已知同步等待与执行器依赖冲突给出带接口位置的诊断；只有潜在风险时警告，不把 async 回调一律禁用，也不宣称静态分析能穷举任意业务等待。**运行时能判定的等待环返回 SyncWaitCycle，不进入无限等待。** 错误携带相关调用链及被阻塞的执行器类别，通过生成接口的错误通道返回，不关闭无关会话，也不回滚已经发生的业务副作用。P2 按下表实现：
@@ -443,7 +445,7 @@ P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响�
 
 调用链关联必须跟随异步任务和反向调用，不能在返回 Future 编号时丢失；同步栈退出时立即移除其阻塞标记，历史父子关联不等于仍在等待。所有拒绝路径释放该等待者的持有，但不提前释放仍在执行的原生调用 / 借用。要求无错误通道的既有签名无损呈现这些错误，仍属于下述类型边界。
 
-同步立即回调、只返回 Promise / Future 引用及可安全后台推进的 Rust 工作必须支持。非 Send 或依赖原执行环境的回调不能任意迁移；block_in_place 也不能通用支持 current_thread。当前方法切片没有反向回调，不能据其测试通过推断闭环已解决。[Node 线程通信](https://nodejs.org/api/worker_threads.html#worker_threadsreceivemessageonportport)、[libuv 循环规则](https://docs.libuv.org/en/v1.x/loop.html#c.uv_run)、[Tokio block_in_place](https://docs.rs/tokio/latest/tokio/task/fn.block_in_place.html)。
+同步立即回调、只返回 Promise / Future 引用及可安全后台推进的 Rust 工作必须支持。非 Send 或依赖原执行环境的回调不能任意迁移；block_in_place 也不能通用支持 current_thread。目前协议回归仅覆盖拥有回调及已知单会话执行器冲突，不能推断任意插件的闭环均已解决。[Node 线程通信](https://nodejs.org/api/worker_threads.html#worker_threadsreceivemessageonportport)、[libuv 循环规则](https://docs.libuv.org/en/v1.x/loop.html#c.uv_run)、[Tokio block_in_place](https://docs.rs/tokio/latest/tokio/task/fn.block_in_place.html)。
 
 生成 foreign::Cache 不要求伪装成另一 crate 的 OriginalCache；但若要替换已有具体类型，或给没有错误通道的签名增加通信失败且禁止形状变化，差异必须单独确认。拒绝用例不等于完成“任意插件”目标。
 

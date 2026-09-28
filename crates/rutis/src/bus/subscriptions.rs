@@ -38,8 +38,8 @@ pub struct EventSubscription {
 
 #[derive(Default)]
 pub(super) struct HookMetrics {
-    pub(super) selected: AtomicU64,
-    pub(super) invoked: AtomicU64,
+    selected: AtomicU64,
+    invoked: AtomicU64,
 }
 
 pub(super) struct PatternHook<C> {

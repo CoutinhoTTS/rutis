@@ -7,11 +7,11 @@
 | 阶段 | 交付物 | 必须通过的检查 | 依赖 / 当前状态 |
 | --- | --- | --- | --- |
 | P0 修正当前 PR | 两端先清理后排空；导出捕获对象；维持已有方法形状 | disposer 解除在途等待；换槽位不改旧对象；失活导出 Context 不妨碍独立对象 | 本轮实现并验证；仍是固定导出的方法切片 |
-| P1 接入可行性与成本 | rustdoc 类型提取原型、公开入口覆盖审计、rutis 最小事件接管接口原型；提交覆盖成立的路径才比较版本读取后端 | 按设计 §4.1 / §8 输出覆盖证据；事件按 Cordis 统一队列验证，rutis 核心扩展独立评审；成本独立记录 | 原生入口 / 事件基准、8 项跨进程监听对照、4 项执行器实验及 11 项 rutis 队列接入口测试通过。类型提取、性能对照未完成；原型尚未接到真实 Cordis 队列 |
+| P1 接入可行性与成本 | rustdoc 类型提取原型、公开入口覆盖审计、rutis 最小事件接管接口原型；提交覆盖成立的路径才比较版本读取后端 | 按设计 §4.1 / §8 输出覆盖证据；事件按 Cordis 统一队列验证，rutis 核心扩展独立评审；成本独立记录 | 原生入口 / 事件基准、8 项跨进程监听对照、4 项执行器实验及 11 项 rutis 队列接入口测试通过。类型提取、性能对照未完成；原型已移至独立草稿 [#74](https://github.com/arcships/rutis/pull/74)，内核范围 / 调度成本待确认，尚未接到真实 Cordis 队列 |
 | P2 一套调用与对象协议 | 版本握手、invoke / await、回调、属性、拥有 / 借用 / 弱引用、迭代与释放计数；可迁移 Rust 异步回调的后台执行器；本地代理再导出 | 受理先于 release、跨会话转交；安全后台推进与 Send 但依赖原运行时的反例；静态风险诊断、可证环返回 SyncWaitCycle；FnOnce / FnMut、借用 / 流取消 | 已接入 invoke / await、拥有函数 / Future、计数释放、双向消息泵、错误图和显式独立后台执行。自动回调绑定、通用对象 / 属性、借用、跨会话、完整握手及静态诊断未完成；不把 Send 当成可迁移证明 |
 | P3 原生服务与生命周期 | 实际注册观察、动态 / 可选依赖、isolate、撤销、更新、子插件、显式 close；提交覆盖成立的路径才启用缓存 | 新读 B / 旧 A；撤销后禁止新取得，但允许合法旧对象的收尾操作；跨方向依赖、同时卸载；无 GC 关闭 | 依赖 P1 已验证的服务 / 更新接入方式与 P2；Cordis 通用版本缓存不可交付，记录未满足项；不能沿用 P0 的 closing 全量拒绝 |
 | P4 原生事件组合 | Cordis 统一监听队列、逐个 Rust 监听代理、原生分发算法、once / 过滤 / next | emit / parallel 的返回与等待、同步抛错 / 异步拒绝、AggregateError 结构；bail Promise、短路、顺序、重入、注销；运行 §2 两方向组合 | 依赖 P1 的 rutis 核心接管入口及 P2 / P3；入口未交付时完整事件仍未满足。不改 Cordis，不用双广播冒充解决 |
-| P5 包级自动接入 | 清单配置、构建集成、产物缓存、应用清理接入和开发者用法文档 | 干净 stable 应用接入受测插件产物；源码接入的 nightly 依赖明确；无手工生成；完整双向场景及性能对照 | 类型提取依赖独立记录；阶段完成后才评估整体兼容范围 |
+| P5 包级自动接入 | 清单配置、构建集成、产物缓存、应用根创建 / 清理接入和开发者用法文档 | 干净 stable 应用接入受测插件产物；源码接入的 nightly 依赖明确；无手工生成；完整双向场景及性能对照 | 类型提取依赖独立记录；若采用 #74，现有应用须改用 root_with_event_queue 并预先给出接管范围。现有根迁移及自动安装未实现；不得计作无感接入 |
 
 P1 不要求先做完 P2—P5。先核实影响路线的公开入口；缺少提交边界的路径不继续开发共享版本后端。事件所需的 rutis 核心接管入口单独设计与验证，不能假定已经存在。没有 Cordis 上游提案、fork 或 monkey patch 任务。P1 的检查如下：
 
@@ -37,7 +37,7 @@ node --test interop/node/test/cordis-hooks.test.mjs
 
 | 场景 | 实测结果 | 证据与边界 |
 | --- | --- | --- |
-| rutis 原生监听登记与事件发送 | 队列接入口的 11 项测试通过：六种分发、动态键 / pattern / 实例、once、借用续延、回滚及清理；未接管类型仍走原路径 | [队列接入口测试](../crates/rutis/tests/event_queue.rs)使用进程内队列并与原生运行对照；包含可调用单个原监听的句柄。尚非 Cordis 跨进程队列，建根后迁移和包级自动安装未实现 |
+| rutis 原生监听登记与事件发送 | 队列接入口的 11 项测试通过：六种分发、动态键 / pattern / 实例、once、借用续延、回滚及清理；未接管类型仍走原路径 | [队列接入口测试](https://github.com/arcships/rutis/blob/3e934aa/crates/rutis/tests/event_queue.rs)使用进程内队列并与原生运行对照；包含可调用单个原监听的句柄。尚非 Cordis 跨进程队列，建根后迁移和包级自动安装未实现 |
 | 显式注销与整个 fiber 卸载 | 显式注销可由队列清理解除在途回调；整个 fiber 原生仍先等待受计数事件再执行 effects，原型保持一致 | 同一测试套件区分这两个入口；若受计数回调必须等同 fiber disposer，原生等待环仍存在，不能将显式注销测试扩大为插件卸载保证 |
 | Cordis 队列中的单个 Rust 监听代理 | 8 项与本地监听对照一致：混合 A/B/C 顺序、emit / bail、once 重入、过滤 / prepend / 注销、异步 emit / parallel / bail，以及错误汇总 | [跨进程事件测试](../interop/node/test/fixtures/event-mount.test.mjs)调用真实 Rust Counter 插件的生成方法；尚未接管原 rutis 监听登记，未验证 Rust 发起事件、serial / waterfall 或两框架事件规则的完整映射 |
 | Rust 同步等待 Node，Node 请求 Rust 异步回调 | 后台执行器新建的 timer / task 能完成，原 current_thread 保持同步等待 | [执行器实验](../crates/rutis-interop/tests/executor_probe.rs)使用真实 Node 进程和测试专用标量消息；不是生产回调协议 |
@@ -53,8 +53,9 @@ node --test interop/node/test/cordis-hooks.test.mjs
 ```sh
 cargo test -p rutis-interop --test executor_probe --test error_shape_probe --test event_contract_probe -- --nocapture
 cargo test -p native-mount-example --test cordis_mount -- --nocapture
-cargo test -p rutis --test event_queue -- --nocapture
 ```
+
+事件接入口测试在独立草稿 #74 分支运行；其 11 项原生对照不计入 #73 的测试数。同步 register / select 的异步 emit 成本及调度方案由该草稿单独评审。
 
 ### P2 当前验收
 
@@ -63,10 +64,10 @@ cargo test -p rutis --test event_queue -- --nocapture
 | 双向同步嵌套回调、保存后调用、同会话函数身份 | [8 项实际连接回归](../crates/rutis-interop/tests/rpc_callbacks.rs)；使用适配器回调 API，尚非生成的原始回调签名 |
 | invoke 不等待 Future、异步等待保持原执行器、已知环报错 | 同一套回归包括已排队 / 已开始的回调、立即完成 Future、Node timer / Promise；未覆盖多 worker 亲和和跨会话 |
 | 独立后台任务及关闭 | 每连接懒建一个执行器；新建 timer / task 可独立完成；关闭时取消待决任务，保留的引用明确失败；不自动迁移任意 Send Future |
-| 引用受理与释放交叉 | [Rust 协议测试](../crates/rutis-interop/src/rpc/tests.rs)、[Node 协议测试](../interop/node/test/peer.test.mjs)：受理后暂停业务再释放、旧 release 与新授予交叉、重复导入计数、只泵关联调用、编码失败回滚及版本不符 |
+| 引用受理与释放交叉 | [Rust 协议测试](../crates/rutis-interop/src/rpc/tests.rs)、[Node 协议测试](../interop/node/test/peer.test.mjs)：受理后暂停业务再释放、旧 release 与新授予交叉、重复导入计数、只泵关联调用、编码失败回滚、版本不符及关闭中断阻塞写入 |
 | 错误图 | 原生 JS → Rust → JS 对照；[Node 测试](../interop/node/test/errors.test.mjs)另覆盖原始抛出值、循环、构造器和属性名。函数 / symbol 错误成员明确不支持 |
 
-验证：`cargo test --workspace --offline` 为 432 项通过、2 项忽略；其中 11 项为新增协议 / 回调测试，反向套件仍有 15 项 Node 集成用例。`npm --prefix interop/node test` 为 20 项通过；相关 Clippy、格式、rustdoc 及 diff 检查通过。全仓库 Clippy 的既有告警见前轮记录，不扩展到无关修改。
+验证：`cargo test --workspace --offline` 拆分后为 422 项通过、2 项忽略；其中 12 项为新增协议 / 回调测试，反向套件仍有 15 项 Node 集成用例。`npm --prefix interop/node test` 为 20 项通过；相关 Clippy、格式、rustdoc 及 diff 检查通过。全仓库 Clippy 的既有告警见前轮记录，不扩展到无关修改。
 
 ### P2 必须增加的协议用例
 
