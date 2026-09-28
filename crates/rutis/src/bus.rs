@@ -470,7 +470,7 @@ impl EventBus {
 
     /// Register a listener visible only to the owning instance subtree.
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn on_instance<E: Event>(
@@ -521,7 +521,7 @@ impl EventBus {
     /// 注册带动态限定名的监听器(D33):同事件类型多通道互不串扰。
     /// name 与 `emit_keyed` 按字符串内容匹配。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn on_keyed<E: Event>(
@@ -541,7 +541,7 @@ impl EventBus {
 
     /// 注册带动态限定名的监听器(带选项)。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn on_keyed_opt<E: Event>(
@@ -556,7 +556,7 @@ impl EventBus {
 
     /// 注册带动态限定名的一次性监听器。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn once_keyed<E: Event>(
@@ -597,7 +597,7 @@ impl EventBus {
 
     /// 注册带动态限定名的 waterfall 监听器(D33)。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn on_waterfall_keyed<E: Event>(
@@ -825,7 +825,7 @@ impl EventBus {
 
     /// emit 的 keyed 通道(D33):同类型不同名互不串扰,同名共享尾链。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn emit_keyed<E: Event>(&self, ctx: &Ctx, name: impl Into<std::sync::Arc<str>>, e: Arc<E>) {
@@ -835,7 +835,7 @@ impl EventBus {
     /// Queue an event for one instance. A successful return means the event
     /// has been accepted; callback failures still go to the error sink.
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn emit_instance<E: Event>(
@@ -929,7 +929,7 @@ impl EventBus {
 
     /// parallel 的 keyed 通道(D33)。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub async fn parallel_keyed<E: Event>(
@@ -945,7 +945,7 @@ impl EventBus {
     /// Run instance listeners concurrently. The accepted dispatch continues
     /// to completion if the caller drops its waiting future.
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub async fn parallel_instance<E: Event>(
@@ -1030,7 +1030,7 @@ impl EventBus {
 
     /// serial 的 keyed 通道(D33)。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub async fn serial_keyed<E: Event>(
@@ -1045,7 +1045,7 @@ impl EventBus {
 
     /// Call one instance's listeners in registration order until one bails.
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub async fn serial_instance<E: Event>(
@@ -1107,7 +1107,7 @@ impl EventBus {
 
     /// waterfall 的 keyed 通道(D33)。
     #[deprecated(
-        since = "0.4.0",
+        since = "0.5.0",
         note = "use the corresponding method with EventKey instead"
     )]
     pub fn waterfall_keyed<'a, E: Event, T: Terminal<E> + 'a>(

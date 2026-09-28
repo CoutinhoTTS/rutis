@@ -232,7 +232,7 @@ library = "libgreeter.so"
 library_sha256 = "…"
 
 [sdk]
-version = "0.4.0"              # 人读
+version = "0.3.0"              # 人读
 id = "…"                       # L1,与 .so 内联常量相同
 artifact_sha256 = "…"          # L2
 

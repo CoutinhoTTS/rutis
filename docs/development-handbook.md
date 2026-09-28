@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-rutis = "0.3.0"
+rutis = "0.5.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 ```
 

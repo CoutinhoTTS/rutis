@@ -31,7 +31,7 @@ Cordis 核心范式的 Rust 惯用实现 · [English](README.en.md)
 ## 🚀 快速上手
 
 ```bash
-cargo add rutis@0.4
+cargo add rutis@0.5
 ```
 
 一个 provider、一个声明依赖的 consumer、一次换 provider——完整代码见 [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs)(`cargo run -p rutis --example quickstart`):
@@ -166,7 +166,7 @@ ctx.events().on(&ctx, &key, listener)?;
 ctx.events().emit(&ctx, &key, Arc::new(event))?;
 ```
 
-**模式与同步事件** —— `EventPattern::prefix("room/")` 可以订阅一组动态名字，监听器收到实际命中的键。需要当场决定时，事件实现 `SyncEvent`，使用 `bail_sync` / `waterfall_sync`；同步终点可借用调用方的局部变量或 MutexGuard。见 [0.3 → 0.4 迁移说明](docs/migration-0.3-to-0.4.md)。0.4.0 为待发布版本。
+**模式与同步事件** —— `EventPattern::prefix("room/")` 可以订阅一组动态名字，监听器收到实际命中的键。需要当场决定时，事件实现 `SyncEvent`，使用 `bail_sync` / `waterfall_sync`；同步终点可借用调用方的局部变量或 MutexGuard。见 [0.3 → 0.5 迁移说明](docs/migration-0.3-to-0.5.md)。
 
 **投递前观察** —— `ctx.events().observe_dispatch(&ctx, observer)` 在选择业务监听器前同步调用观察器，零监听器时也会调用。观察器只看注册 fiber 子树内的投递，随该 fiber 清理；`DispatchAttempt` 包含完整事件键、分发模式、发射方和借用的事件。它记录投递尝试，不提供拒绝投递的返回值。
 
@@ -210,7 +210,7 @@ cargo test                                    # 全量测试
 
 **Agent** — [agent 框架](docs/design-min-agent-2026-08-18.md) · [验证与 TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 
-**升级** — [0.3 → 0.4 迁移说明](docs/migration-0.3-to-0.4.md) · [0.1.0 → 0.2.0 迁移说明](docs/migration-0.1-to-0.2.md)
+**升级** — [0.3 → 0.5 迁移说明](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 迁移说明](docs/migration-0.1-to-0.2.md)
 
 ## License
 

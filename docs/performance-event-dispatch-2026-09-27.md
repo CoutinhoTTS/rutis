@@ -1,6 +1,6 @@
 # #62 / #63 事件派发性能样本
 
-日期：2026-09-27。实现分支：`feat/event-keys-and-sync-dispatch`，rutis 0.4.0；旧版基线为 main `603f8220b049c6ad26e82f258fd72f214b8575fe`（0.3.0）。
+日期：2026-09-27。实现分支：`feat/event-keys-and-sync-dispatch`，rutis 0.4.0（该开发版本最终以 0.5.0 发布）；旧版基线为 main `603f8220b049c6ad26e82f258fd72f214b8575fe`（0.3.0）。
 
 环境：Linux x86_64，Intel Core Ultra X7 358H，rustc 1.98.1，release 默认优化，Tokio 两个工作线程。以下样本将进程固定到 CPU 0；没有固定 CPU 频率，也没有统计置信区间，不能把几 ns 的差异当成跨机器的结论。
 

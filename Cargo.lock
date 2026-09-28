@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "aimux-llm"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "aimux-core",
  "aimux-providers",
@@ -2735,7 +2735,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-agent"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "aimux-core",
  "aimux-providers",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-cli"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "aimux-core",
  "aimux-providers",
@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-cordis"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-dsh"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "aimux-core",
  "aimux-llm",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-sdk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rutis",
  "serde_json",
