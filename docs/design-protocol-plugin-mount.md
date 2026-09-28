@@ -348,9 +348,11 @@ Rust Audit -> 导出 / 导入 Audit -> Cordis Search
 
 反向由 Cordis 提供依赖、挂载 rutis 插件，使用同一协议与所有权规则。
 
-## 8. 接入改动及上游依赖
+## 8. 接入能力与修改边界
 
 协议、生成、序列化、对象表、共享页和进程管理均在外挂库。原框架只提供无法由现有公开入口实现的接入能力；本设计不授权直接修改第三方内核。
+
+下表定义所需能力，不预设取得能力的修改路线。当前测试基线是 @deepseek-ai/cordis 4.0.1；P1 先核实目标 Cordis 实现及其现有扩展入口。包的仓库地址不构成向该维护方提案的开发任务，外部提案也不是默认交付前置。
 
 | 能力 | 原生接口必须保证 |
 | --- | --- |
@@ -361,9 +363,9 @@ Rust Audit -> 导出 / 导入 Audit -> Cordis Search
 | 归属 | 实施条件 | 未具备时的结果 |
 | --- | --- | --- |
 | rutis（本仓库） | 独立小改动、原生行为测试及评审；不把协议类型放进核心 | 相应读取 / 事件 / 更新能力不计完成；不能用当前 intercept_require_as 代替 get 覆盖或提交后观察 |
-| Cordis（第三方 @deepseek-ai/cordis） | 先完成基于 4.0.1 的接入验证和最小接口提案，再取得维护者接受及可依赖的发布版本；时间线不由本仓库控制 | 现有纯公开 API 的方法切片可保留；完整入口接管不能发布为已支持 |
+| Cordis（第三方，当前测试基线为 @deepseek-ai/cordis） | 先在本仓库验证目标实现及现有扩展入口；确需额外框架能力时，单独列明缺口、最小改动及其依赖，评审后决定取得方式 | 现有方法切片可保留；未验证的完整入口接管不能发布为已支持 |
 
-若 Cordis 不接受事件接口，则其原生 emit / parallel / bail / waterfall 无法统一路由到 rutis 的总线；全局逐监听顺序、跨端短路和 once / 过滤的组合语义不能保证。双边广播或订阅转发不能作为等价退路。依赖这些能力的挂载须在启动前报缺失能力。持续维护 fork / monkey patch 不是默认方案。
+若选定实现无法提供必要的事件接入，其原生 emit / parallel / bail / waterfall 就无法统一路由到 rutis 的总线；全局逐监听顺序、跨端短路和 once / 过滤的组合语义不能保证。双边广播或订阅转发不能作为等价退路。依赖这些能力的挂载须在启动前报缺失能力。持续维护 fork / monkey patch 不是默认方案；若最终选择依赖维护方提供新接口，其接受和发布时间仍须单独记录，不能由本仓库进度代替。
 
 现有实现依据：[rutis Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)；已锁定 Cordis 包的 src/reflect.ts、src/events.ts、src/fiber.ts。rutis 逆序清理与 Cordis 并发 effects 的差别由适配器自己的组合 effect 处理，不重排原业务 effects。
 
