@@ -1,6 +1,6 @@
 # rutis / Cordis 跨进程挂载设计
 
-状态：开发中。首个切片采用接入时生成绑定、通过公开 API 注册的外挂方案；已实现范围和运行方式见[原生挂载示例](../examples/native-mount/README.md)。完整兼容性待验证，尚无充分证据认定必须修改框架。
+状态：开发中。双向值方法挂载已采用接入时生成绑定、通过公开 API 注册的外挂方案；已实现范围和运行方式见[原生挂载示例](../examples/native-mount/README.md)。事件、对象及运行期依赖传播尚未实现；没有修改框架内核。
 
 依据：[需求](requirements-protocol-plugins.md)。核对基准：rutis `2e564e3`；项目使用的 `@deepseek-ai/cordis@4.0.1`。
 

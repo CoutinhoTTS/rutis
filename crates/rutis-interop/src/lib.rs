@@ -1,4 +1,4 @@
-//! Generated native bindings for cross-process Cordis plugins.
+//! Generated native bindings for cross-process Cordis and rutis plugins.
 //!
 //! The first implementation covers typed value methods. It is not yet a
 //! complete implementation of the plugin interoperability requirements.
@@ -6,6 +6,8 @@
 pub mod build;
 #[cfg(unix)]
 mod process;
+#[cfg(unix)]
+pub mod server;
 
 #[cfg(unix)]
 pub use process::Process;

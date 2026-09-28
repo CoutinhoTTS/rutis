@@ -7,4 +7,6 @@ fn main() {
         "../../interop/node",
     )
     .expect("generate Cordis bindings during the normal Cargo build");
+    rutis_interop::build::rutis_plugin("src/lib.rs", "native_mount_example", "../../interop/node")
+        .expect("generate rutis bindings during the normal Cargo build");
 }

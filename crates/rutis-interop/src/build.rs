@@ -2,6 +2,9 @@
 
 use std::path::Path;
 
+mod rust;
+pub use rust::rutis_plugin;
+
 pub fn cordis_plugin(
     plugin: impl AsRef<Path>,
     node_package: impl AsRef<Path>,

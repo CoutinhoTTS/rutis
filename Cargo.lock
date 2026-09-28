@@ -2860,9 +2860,12 @@ dependencies = [
 name = "rutis-interop"
 version = "0.1.0"
 dependencies = [
+ "proc-macro2",
+ "quote",
  "rutis",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

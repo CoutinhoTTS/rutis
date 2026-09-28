@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createConnection } from 'node:net'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
+import { encode } from './wire.mjs'
 
 const [socketPath, pluginPath] = process.argv.slice(2)
 const socket = createConnection(socketPath)
@@ -45,13 +46,6 @@ async function dispatch({ target, method, args }) {
   if (!Array.isArray(args)) throw new TypeError('method arguments must be an array')
   const service = exportContext[target]
   return await Reflect.apply(service[method], service, args)
-}
-
-function encode(value) {
-  return JSON.stringify(value, (_key, value) => {
-    if (typeof value === 'number' && !Number.isFinite(value)) throw new TypeError('non-finite numbers require a lossless binding')
-    return value
-  }) + '\n'
 }
 
 function respond(request) {
