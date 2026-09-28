@@ -96,8 +96,9 @@ where
                                 reply(&mut writer, request.id, mounted).await?;
                             }
                             "dispose" => {
-                                // Cleanup can release signals awaited by these calls. Starting
-                                // shutdown before draining also leaves the executor free to run it.
+                                // Ctx::shutdown() submits Intent::Shutdown immediately; polling
+                                // its returned future only joins completion. Keep this eager start
+                                // before draining: a disposer may release a signal these calls await.
                                 let cleanup = ctx.shutdown();
                                 while let Some(completed) = calls.join_next().await {
                                     let (id, result) = completed.map_err(transport)?;
