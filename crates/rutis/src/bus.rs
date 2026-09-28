@@ -1,4 +1,6 @@
+pub mod queue;
 mod subscriptions;
+use queue::QueueCallback;
 pub(crate) mod sync;
 pub use subscriptions::{EventSubscription, ListenerKind};
 use subscriptions::{HookMetrics, HookTable};
@@ -19,7 +21,7 @@ use crate::key::{EventKey, EventPattern, InstanceId, TypeKey};
 use crate::{BoxFuture, Disposer, Effect};
 
 /// waterfall 链上的擦除续延:调用下一个监听器,最终落到终态续延。
-pub(crate) struct ErasedNext<'a> {
+pub struct ErasedNext<'a> {
     chain: &'a [Arc<Hook<Arc<dyn ErasedWaterfallCall>>>],
     index: usize,
     ctx: &'a Ctx,
@@ -29,6 +31,27 @@ pub(crate) struct ErasedNext<'a> {
 }
 
 impl<'a> ErasedNext<'a> {
+    /// A borrowed, single-use continuation supplied by a queue adapter.
+    pub fn new(
+        ctx: &'a Ctx,
+        key: &'a TypeKey,
+        event: &'a DynEvent,
+        terminal: &'a mut (dyn ErasedTerminal + 'a),
+    ) -> Self {
+        Self {
+            chain: &[],
+            index: 0,
+            ctx,
+            key,
+            event,
+            terminal,
+        }
+    }
+
+    pub fn call(self) -> BoxFuture<'a, Result<ErasedValue, CordisError>> {
+        self.invoke()
+    }
+
     pub(crate) fn invoke(self) -> BoxFuture<'a, Result<ErasedValue, CordisError>> {
         if self.index < self.chain.len() {
             let ErasedNext {
@@ -85,7 +108,7 @@ pub(crate) trait ErasedWaterfallCall: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<ErasedValue, CordisError>>;
 }
 
-pub(crate) trait ErasedTerminal: Send {
+pub trait ErasedTerminal: Send {
     fn call<'a>(
         &'a mut self,
         ctx: &'a Ctx,
@@ -107,8 +130,9 @@ struct Hook<C> {
 struct HookMeta {
     id: u64,
     generation: u64,
-    metrics: Option<Box<HookMetrics>>,
+    metrics: Option<Arc<HookMetrics>>,
     owner: Weak<FiberInner>,
+    _flight: Option<Arc<EventFlight>>,
 }
 
 impl<C> std::ops::Deref for Hook<C> {
@@ -221,6 +245,7 @@ fn retain_hook<C>(list: &mut Vec<Arc<Hook<C>>>, hook: &Arc<Hook<C>>) {
 
 #[derive(Default)]
 struct BusInner {
+    queued: HashMap<u64, queue::EventRegistration>,
     /// 注册面键 = TypeKey(D33:限定名通道;非 keyed 注册 qualifier 为 None)。
     hooks: HookTable<Arc<dyn ErasedCall>>,
     wf_hooks: HookTable<Arc<dyn ErasedWaterfallCall>>,
@@ -241,6 +266,7 @@ struct BusInner {
 #[derive(Clone)]
 pub struct EventBus {
     inner: Arc<Mutex<BusInner>>,
+    queue: Option<Arc<dyn queue::EventQueue>>,
 }
 
 impl EventBus {
@@ -320,6 +346,7 @@ impl EventBus {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(BusInner::default())),
+            queue: None,
         }
     }
 
@@ -617,7 +644,7 @@ impl EventBus {
 
     // Keep every callback family on the same atomic effect registration path.
     #[allow(clippy::too_many_arguments)]
-    fn register_hook<C: Send + Sync + 'static>(
+    fn register_hook<C: QueueCallback>(
         &self,
         ctx: &Ctx,
         key: TypeKey,
@@ -650,6 +677,18 @@ impl EventBus {
             Some(prefixes) => format!("{label}: {} prefixes={prefixes:?}", key.describe()),
             None => format!("{label}: {}", key.describe()),
         };
+        if let Some(queue) = self.queue_for(&key) {
+            return self.register_queued(
+                queue.clone(),
+                ctx,
+                key,
+                prefixes,
+                call,
+                opts,
+                drain,
+                label,
+            );
+        }
         ctx.register_internal_effect_named(label, move |_, generation, _| {
             access_ctx.check_instance(&key)?;
             let hook = {
@@ -666,8 +705,9 @@ impl EventBus {
                     meta: Box::new(HookMeta {
                         id: inner.next_hook_id,
                         generation,
-                        metrics: pattern.then(|| Box::new(HookMetrics::default())),
+                        metrics: pattern.then(|| Arc::new(HookMetrics::default())),
                         owner,
+                        _flight: None,
                     }),
                 });
                 table(&mut inner).insert(key.clone(), prefixes, hook.clone());
@@ -749,6 +789,9 @@ impl EventBus {
         id: InstanceId,
         key: &TypeKey,
     ) -> Result<(Vec<Arc<Hook<Arc<dyn ErasedCall>>>>, EventFlight), CordisError> {
+        if let Some(hooks) = self.queue_snapshot(ctx, key) {
+            return hooks;
+        }
         let _admission = ctx.shared().admission.lock().unwrap();
         ctx.registration_preflight()?;
         self.ensure_instance_ctx(ctx, id)?;
@@ -766,17 +809,21 @@ impl EventBus {
     }
 
     #[inline]
-    fn take_named_hooks<C>(
+    fn take_named_hooks<C: QueueCallback>(
         &self,
         ctx: &Ctx,
         key: &TypeKey,
         table: fn(&mut BusInner) -> &mut HookTable<C>,
-    ) -> (Vec<Arc<Hook<C>>>, Option<Arc<EventFlight>>) {
+    ) -> Result<(Vec<Arc<Hook<C>>>, Option<Arc<EventFlight>>), CordisError> {
+        if let Some(hooks) = self.queue_snapshot(ctx, key) {
+            let (hooks, flight) = hooks?;
+            return Ok((hooks, Some(Arc::new(flight))));
+        }
         // Keep exact dispatch's existing fast path and snapshot contract.
         {
             let mut inner = self.inner.lock().unwrap();
             if !table(&mut inner).has_patterns(key) {
-                return (table(&mut inner).take(key, false), None);
+                return Ok((table(&mut inner).take(key, false), None));
             }
         }
         let _admission = ctx.shared().admission.lock().unwrap();
@@ -787,13 +834,13 @@ impl EventBus {
             .filter_map(|hook| hook.owner.upgrade())
             .collect();
         let flight = Arc::new(EventFlight::from_owners(owners));
-        (hooks, Some(flight))
+        Ok((hooks, Some(flight)))
     }
 
     /// Current exact and grouped prefix registrations, in registration order.
     pub fn subscriptions(&self) -> Vec<EventSubscription> {
+        let mut out = self.queued_subscriptions();
         let inner = self.inner.lock().unwrap();
-        let mut out = Vec::new();
         inner.hooks.diagnostics(ListenerKind::Async, &mut out);
         inner
             .wf_hooks
@@ -855,23 +902,31 @@ impl EventBus {
     ) -> Result<(), CordisError> {
         self.ensure_bus(ctx)?;
         self.observe_attempt(&key, DispatchMode::Emit, ctx, e.as_ref())?;
+        let queued = self
+            .queue_snapshot::<Arc<dyn ErasedCall>>(ctx, &key)
+            .transpose()?;
+        let routed = queued.is_some();
         let _admission = key
             .instance_id()
+            .filter(|_| queued.is_none())
             .map(|_| ctx.shared().admission.lock().unwrap());
-        if let Some(id) = key.instance_id() {
+        if let Some(id) = key.instance_id().filter(|_| !routed) {
             ctx.registration_preflight()?;
             self.ensure_instance_ctx(ctx, id)?;
         }
-        let (hooks, pattern_flight) = if key.instance_id().is_some() {
+        let (hooks, pattern_flight) = if let Some((hooks, flight)) = queued {
+            (hooks, Some(Arc::new(flight)))
+        } else if key.instance_id().is_some() {
             (self.take_hooks(&key), None)
         } else {
-            self.take_named_hooks(ctx, &key, |inner| &mut inner.hooks)
+            self.take_named_hooks(ctx, &key, |inner| &mut inner.hooks)?
         };
         if hooks.is_empty() {
             return Ok(()); // 不进链:无监听器不产生派发任务
         }
         let flight = key
             .instance_id()
+            .filter(|_| !routed)
             .map(|id| EventFlight::new(ctx, id, &hooks));
         let ctx2 = ctx.clone();
         let sink = ctx.error_sink();
@@ -969,7 +1024,7 @@ impl EventBus {
             let (hooks, flight) = self.take_instance_hooks(ctx, id, &key)?;
             (hooks, Some(Arc::new(flight)))
         } else {
-            self.take_named_hooks(ctx, &key, |inner| &mut inner.hooks)
+            self.take_named_hooks(ctx, &key, |inner| &mut inner.hooks)?
         };
         if hooks.is_empty() {
             return Ok(());
@@ -1069,7 +1124,7 @@ impl EventBus {
             let (hooks, flight) = self.take_instance_hooks(ctx, id, &key)?;
             (hooks, Some(Arc::new(flight)))
         } else {
-            self.take_named_hooks(ctx, &key, |inner| &mut inner.hooks)
+            self.take_named_hooks(ctx, &key, |inner| &mut inner.hooks)?
         };
         for hook in hooks {
             hook.record_call();
@@ -1131,7 +1186,12 @@ impl EventBus {
         Box::pin(async move {
             bus.ensure_bus(ctx)?;
             bus.observe_attempt(&key, DispatchMode::Waterfall, ctx, e)?;
-            let (chain, _flight) = if let Some(id) = key.instance_id() {
+            let queued = bus
+                .queue_snapshot::<Arc<dyn ErasedWaterfallCall>>(ctx, &key)
+                .transpose()?;
+            let (chain, _flight) = if let Some((chain, flight)) = queued {
+                (chain, Some(Arc::new(flight)))
+            } else if let Some(id) = key.instance_id() {
                 let _admission = ctx.shared().admission.lock().unwrap();
                 ctx.registration_preflight()?;
                 bus.ensure_instance_ctx(ctx, id)?;
@@ -1139,7 +1199,7 @@ impl EventBus {
                 let flight = EventFlight::new(ctx, id, &hooks);
                 (hooks, Some(Arc::new(flight)))
             } else {
-                bus.take_named_hooks(ctx, &key, |inner| &mut inner.wf_hooks)
+                bus.take_named_hooks(ctx, &key, |inner| &mut inner.wf_hooks)?
             };
             let mut terminal: Box<dyn ErasedTerminal + 'a> =
                 Box::new(TerminalAdapter(terminal, std::marker::PhantomData));

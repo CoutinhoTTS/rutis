@@ -288,10 +288,25 @@ impl Ctx {
 
     /// 注入构造 + 自定义 ErrorSink。
     pub fn root_with_sink(handle: Handle, sink: ErrorSink) -> Ctx {
+        Self::root_with_bus(handle, sink, EventBus::new())
+    }
+
+    /// Create an application with an external queue for selected event types.
+    /// Configure the queue before mounting plugins; it remains fixed for the
+    /// application's lifetime. Unhandled event types use the native bus.
+    pub fn root_with_event_queue(
+        handle: Handle,
+        sink: ErrorSink,
+        queue: Arc<dyn crate::EventQueue>,
+    ) -> Ctx {
+        Self::root_with_bus(handle, sink, EventBus::with_queue(queue))
+    }
+
+    fn root_with_bus(handle: Handle, sink: ErrorSink, bus: EventBus) -> Ctx {
         let shared = Arc::new(Shared {
             admission: Mutex::new(()),
             handle,
-            bus: EventBus::new(),
+            bus,
             registry: Registry::new(),
             interceptors: Arc::new(ServiceInterceptors::default()),
             error_sink: sink,
@@ -941,7 +956,15 @@ impl Ctx {
         label: impl Into<String>,
         f: impl FnOnce() -> Effect,
     ) -> Result<Disposer, CordisError> {
-        let record = self.register_effect_named(label.into(), f)?;
+        self.try_effect_named(label.into(), || Ok(f()))
+    }
+
+    pub(crate) fn try_effect_named(
+        &self,
+        label: String,
+        f: impl FnOnce() -> Result<Effect, CordisError>,
+    ) -> Result<Disposer, CordisError> {
+        let record = self.register_effect_named(label, f)?;
         let handle = self.handle().clone();
         Ok(Disposer::new(Box::new(move || {
             let record = record.clone();
@@ -1009,7 +1032,7 @@ impl Ctx {
     pub(crate) fn register_effect_named(
         &self,
         label: String,
-        f: impl FnOnce() -> Effect,
+        f: impl FnOnce() -> Result<Effect, CordisError>,
     ) -> Result<Arc<EffectRecord>, CordisError> {
         let fiber = self.0.fiber.upgrade();
         if self.0.shared.closing.load(Ordering::SeqCst)
@@ -1036,7 +1059,7 @@ impl Ctx {
         // factory 锁外执行;但"状态检查 + effects 入队"必须在同一临界区
         //(transition → effects 嵌套,锁序无反向):否则检查通过后驱动恰好
         // 卸载取走 effects,新记录漏掉本轮清理而泄漏(评审 P1)
-        let record = EffectRecord::new(f(), label, self.0.fiber.clone());
+        let record = EffectRecord::new(f()?, label, self.0.fiber.clone());
         let handle = self.handle().clone();
         {
             let tr = fiber.transition.lock().unwrap();

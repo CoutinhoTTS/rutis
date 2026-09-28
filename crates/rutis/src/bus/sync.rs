@@ -31,18 +31,38 @@ pub(crate) trait ErasedSyncWaterfallCall: Send + Sync + 'static {
         next: ErasedSyncNext<'a>,
     ) -> Result<ErasedValue, CordisError>;
 }
-pub(crate) trait ErasedSyncTerminal {
+pub trait ErasedSyncTerminal {
     fn call(&mut self, ctx: &Ctx, event: &DynEvent) -> Result<ErasedValue, CordisError>;
 }
 
-pub(crate) struct ErasedSyncNext<'a> {
+pub struct ErasedSyncNext<'a> {
     chain: &'a [Arc<Hook<Arc<dyn ErasedSyncWaterfallCall>>>],
     ctx: &'a Ctx,
     key: &'a TypeKey,
     event: &'a DynEvent,
     terminal: &'a mut (dyn ErasedSyncTerminal + 'a),
 }
-impl ErasedSyncNext<'_> {
+impl<'a> ErasedSyncNext<'a> {
+    /// A borrowed continuation; it can capture non-Send stack state.
+    pub fn new(
+        ctx: &'a Ctx,
+        key: &'a TypeKey,
+        event: &'a DynEvent,
+        terminal: &'a mut (dyn ErasedSyncTerminal + 'a),
+    ) -> Self {
+        Self {
+            chain: &[],
+            ctx,
+            key,
+            event,
+            terminal,
+        }
+    }
+
+    pub fn call(self) -> Result<ErasedValue, CordisError> {
+        self.invoke()
+    }
+
     pub(crate) fn invoke(self) -> Result<ErasedValue, CordisError> {
         let Self {
             chain,
@@ -73,7 +93,7 @@ impl ErasedSyncNext<'_> {
     }
 }
 
-fn user_call<T>(
+pub(super) fn user_call<T>(
     ctx: &Ctx,
     call: impl FnOnce() -> Result<T, CordisError>,
 ) -> Result<T, CordisError> {
@@ -235,12 +255,15 @@ impl EventBus {
         ctx.check_instance(key)
     }
 
-    fn sync_snapshot<C>(
+    fn sync_snapshot<C: super::queue::QueueCallback>(
         &self,
         ctx: &Ctx,
         key: &TypeKey,
         table: fn(&mut BusInner) -> &mut HookTable<C>,
     ) -> Result<(Vec<Arc<Hook<C>>>, EventFlight), CordisError> {
+        if let Some(hooks) = self.queue_snapshot(ctx, key) {
+            return hooks;
+        }
         let _admission = ctx.shared().admission.lock().unwrap();
         self.sync_preflight(ctx, key)?;
         let hooks = table(&mut self.inner.lock().unwrap()).take(key, true);

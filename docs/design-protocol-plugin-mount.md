@@ -301,7 +301,7 @@ Cordis 的 internal/dispatch 把 emit 与 parallel 都标作 emit。监听代理
 | 错误结构 | parallel 由 Cordis 生成一层 AggregateError；保留 errors 的登记顺序及嵌套错误，不在代理层再统一包一层；对照 name、message、cause、errors，stack 中允许存在跨进程帧差异 |
 | bail / once / 过滤 | bail 判断返回的 Promise 本身；跨端逐监听顺序、短路、once 重入、过滤及分发中注销仍须端到端对照，前两项验证不能替代这些检查 |
 
-[8 项监听对照](../interop/node/test/fixtures/event-mount.test.mjs)已让真实 Rust 插件的生成方法参与 Cordis 队列，验证上述部分返回、顺序与清理行为；尚未接管原 rutis 监听登记或 Rust 发起事件。当前只验证了普通远端错误参与本地汇总；[远端嵌套错误的复现](../crates/rutis-interop/tests/error_shape_probe.rs)确认现有协议会丢失 errors / cause，完整错误结构仍需 P2 实现。
+[8 项监听对照](../interop/node/test/fixtures/event-mount.test.mjs)已让真实 Rust 插件的生成方法参与 Cordis 队列。[rutis 队列原型](../crates/rutis/tests/event_queue.rs)另已覆盖原生登记和 Rust 发起的六种分发，但使用进程内测试队列；两组证据尚未连接成跨进程事件实现。当前只验证了普通远端错误参与本地汇总；[远端嵌套错误的复现](../crates/rutis-interop/tests/error_shape_probe.rs)确认现有协议会丢失 errors / cause，完整错误结构仍需 P2 实现。
 
 **同步成本：** Rust 同步入口访问 Cordis 队列需要往返，其中 Rust 监听还需要反向调用；Cordis 调用单个 Rust 同步监听同样阻塞本次分发线程。通信 Worker 不能消除这些成本。连接明确采用该队列，不在运行期静默改变事件规则或总线归属。
 
@@ -394,9 +394,19 @@ Cordis 覆盖审计基于[锁定的包](../interop/node/package-lock.json) `@dee
 | 原生事件分发 | dispatch 调用 internal/dispatch 后仍从本地 _hooks 取监听，忽略观察者返回值；parallel 和 emit 均报告模式 emit | 不能改道至 rutis 总线。§5 改为验证 Cordis 持有队列、逐个登记 Rust 监听代理；等待及错误汇总交原生入口，不依靠观察标签区分模式 |
 | update / 子插件 | ACTIVE fiber.update 返回 internal/update waterfall 结果；非 ACTIVE 分支在钩子前返回；子插件仍由原 registry / fiber 管理 | ACTIVE 更新可转发完成；Pending 走原生延后激活路径，不宣称钩子覆盖。完整更新与子插件注册投影待 P3 对照验收 |
 
-rutis 的接入能力单独评估：优先公开入口，确需核心扩展时另列最小差异、原生行为测试及评审，不把协议类型放进核心。当前 intercept_require_as 不等于 get 全覆盖或提交边界；本 PR 不修改 rutis 核心。依据：[Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)。两框架清理顺序的差别由适配器自己的组合 effect 处理，不重排原业务 effects。
+rutis 的接入能力单独评估：优先公开入口，确需核心扩展时另列最小差异、原生行为测试及评审，不把协议类型放进核心。当前 intercept_require_as 不等于 get 全覆盖或提交边界；本 PR 现包含下述事件队列接入口原型，不改服务注册表或 fiber 清理顺序。依据：[Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)。
 
-事件路线所需的 rutis 改动明确列为独立核心扩展：仅按键接管监听登记 / 注销和分发，保留未接管键的原路径；现有 observe_dispatch 不能取消分发，subscriptions 仅提供诊断信息。P1 给出最小接口差异及原生回归证据，P4 接入；不把通信协议、进程管理或第三套事件调度器放进核心。该扩展未交付前，原 Rust 插件的这些操作无法统一进入 Cordis 队列，完整事件要求保持未满足。
+事件接入口只替换监听存储与快照选择，六种执行算法继续使用原 EventBus；不增加通信协议、进程管理或事件调度器。现有 observe_dispatch / subscriptions 仍仅用于观察。
+
+| 原型决策 | 接口及边界 |
+| --- | --- |
+| 安装 | `Ctx::root_with_event_queue` 在建根时注入 `EventQueue`；按事件 TypeId 选择其全部通道，避免同一个 pattern 分属两个队列。未接管类型走原路径。现有根上的监听迁移、包级自动安装未实现，不作为 P5 已完成能力 |
+| 登记 / 注销 | 队列取得独立 `EventRegistration` 并返回清理 Effect；登记失败不留 effect，登记跨卸载则回滚。适配器代码在框架锁外运行 |
+| 原生分发 | 队列返回有序登记快照；rutis 校验总线 / 类型 / 通道 / 回调族 / 重复 ID，再统一认领 once 和生命周期持有。原 emit 尾链、并行等待、Option 短路、借用 next 继续执行 |
+| 外部调用单个监听 | `registration.select` 取得绑定 Context / 键、仅可调用一次的 `EventListener`；四种回调族和借用续延均可调用。外部分发器负责其快照点、过滤及整次分发的重入规则，P4 必须验证分发中注销与跨端 next |
+| 清理 | 显式注销先关闭选取资格、执行队列清理，再排空其原生在途事件。整个 fiber 卸载仍先等受计数事件再跑 effects；回调若依赖同一 fiber 的 disposer，则形成原生等待环，见 §9 |
+
+原型与原生对照见 [11 项测试](../crates/rutis/tests/event_queue.rs)：六种分发、顺序 / once、pattern / 实例、未接管类型、外部逐监听调用、错误快照、登记回滚及清理。Cordis 队列的真实实现依赖 P2 协议，P4 完成双向组合后才算跨进程事件交付。
 
 P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响场景，未知项保留待验证，不能先判不兼容。生成契约与应用连接已要求的缺失能力，在原插件启动前报告；动态行为不能靠静态类型穷举，运行时新发现的缺失能力须在对应注册 / 操作生效前明确失败。两者都不静默降级，也不计作完成任意插件目标。
 
@@ -407,6 +417,7 @@ P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响�
 | 两框架内核均不改，原生事件入口统一跨端分发 | Cordis 入口不能改道至 rutis；§5 选择 Cordis 持有队列并单独补 rutis 接管入口，明确放宽“rutis 核心也完全不改”的条件。扩展交付前，依赖完整跨端事件的挂载报告缺失能力；不以双广播或局部验证宣告完成 |
 | Cordis 任意原生绑定使用零 IPC、无陈旧窗口的版本缓存 | 注册 / 可用性只有提交后通知，直接 set 等写入绕过钩子，§4.1 的覆盖不足；跨进程读者可能在写入后、版本更新前命中旧代理。逐次原生解析保留行为但承担 IPC，零 IPC 性能目标未满足；要求该缓存能力的挂载启动前报告缺失，不启用不可靠缓存 |
 | 原同步签名必须等被自己阻塞的唯一执行器 | §3.3 的立即回调与可迁移 Rust 异步工作可以处理；仍依赖被阻塞 Node 线程或原 Rust 执行器的工作形成等待环，不能靠 Send 或通信 Worker 宣称解决 |
+| rutis 受计数事件等待同一 fiber 的 disposer | 原 fiber 在 effects 前等待同步、pattern 和实例事件；因此该组合原生也不能完成。队列接入口保留此顺序；显式注销的先清理后排空，不等于整个插件卸载已消除此环。适配器自己的 close 可先解除协议等待，不能代替原插件 disposer |
 | 不同具体类型 / 事件契约无损替换 | 生成忠于来源的外语绑定；不兼容的既有接口明确诊断，不能默改类型或短路规则 |
 | 无提取工具链 / 匹配产物，仍首次生成完整 Rust API | 当前选定的 rustdoc 路线不能满足；安装成本必须明确 |
 | 永久保留远端对象，同时确定结束其进程 | 不能同时保证；显式 close 是会话有效期的终点 |
