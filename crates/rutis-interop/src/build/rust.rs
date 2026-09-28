@@ -183,9 +183,11 @@ fn generate(
     let mut declarations = String::new();
     let mut provide = String::new();
     let mut context = String::new();
-    let mut require = String::new();
+    let mut fields = String::new();
+    let mut capture = String::new();
     let mut dependencies = Vec::new();
     for service in registrations.services {
+        let field = format!("service_{}", dependencies.len());
         let declaration = file
             .items
             .iter()
@@ -325,7 +327,7 @@ fn generate(
                     let args = args.as_array().ok_or_else(|| ::rutis_interop::Error::Value("expected argument array".into()))?;
                     if {wrong_arity} {{ return Err(::rutis_interop::Error::Value("wrong argument count".into())); }}
                     {decode}
-                    let service = self.0.require::<{crate_name}::{service}>().map_err(::rutis_interop::server::native_error)?;
+                    let service = &self.{field};
                     {returned}
                 }},"#));
                 let async_js = if sig.asyncness.is_some() {
@@ -383,23 +385,27 @@ fn generate(
         provide.push_str(&format!(
             "yield ctx.provide({key:?}, new {service}(process));\n"
         ));
-        require.push_str(&format!("ctx.require::<{crate_name}::{service}>().map_err(::rutis_interop::server::native_error)?;\n"));
+        fields.push_str(&format!(
+            "{field}: ::std::sync::Arc<{crate_name}::{service}>,\n"
+        ));
+        capture.push_str(&format!(
+            "{field}: ctx.require::<{crate_name}::{service}>()?,\n"
+        ));
         dependencies.push(format!("::rutis::TypeKey::of::<{crate_name}::{service}>()"));
     }
     let rust = format!(
         r#"
-    struct Exports(::rutis::Ctx);
+    struct Exports {{ {fields} }}
     struct Exporter {{
         dependencies: Vec<::rutis::TypeKey>,
-        scope: ::std::sync::Arc<::std::sync::Mutex<Option<::rutis::Ctx>>>,
+        exports: ::std::sync::Arc<::std::sync::Mutex<Option<Exports>>>,
     }}
     impl ::rutis::Plugin for Exporter {{
         fn name(&self) -> &str {{ "interop-export" }}
         fn injects(&self) -> &[::rutis::TypeKey] {{ &self.dependencies }}
         fn apply<'a>(&'a self, ctx: &'a ::rutis::Ctx) -> ::rutis::BoxFuture<'a, Result<::rutis::Effect, ::rutis::CordisError>> {{
             Box::pin(async move {{
-                {require}
-                *self.scope.lock().unwrap() = Some(ctx.clone());
+                *self.exports.lock().unwrap() = Some(Exports {{ {capture} }});
                 Ok(::rutis::Effect::Done)
             }})
         }}
@@ -411,17 +417,18 @@ fn generate(
             }} }})
         }}
     }}
-    async fn run() -> Result<(), ::rutis_interop::Error> {{
-        ::rutis_interop::server::serve(|ctx, config| async move {{
+    async fn mount(ctx: ::rutis::Ctx, config: ::rutis_interop::serde_json::Value) -> Result<Exports, ::rutis_interop::Error> {{
             {config_rust}
             let mounted = ctx.plugin({crate_name}::{plugin_name} {{ {} }});
             (&mounted).await.map_err(::rutis_interop::server::native_error)?;
-            let scope = ::std::sync::Arc::new(::std::sync::Mutex::new(None));
-            let exporter = ctx.plugin(Exporter {{ dependencies: vec![{}], scope: scope.clone() }});
+            let exports = ::std::sync::Arc::new(::std::sync::Mutex::new(None));
+            let exporter = ctx.plugin(Exporter {{ dependencies: vec![{}], exports: exports.clone() }});
             (&exporter).await.map_err(::rutis_interop::server::native_error)?;
-            let scope = scope.lock().unwrap().take().ok_or_else(|| ::rutis_interop::Error::Value("native service dependencies are unresolved".into()))?;
-            Ok(Exports(scope))
-        }}).await
+            let exports = exports.lock().unwrap().take().ok_or_else(|| ::rutis_interop::Error::Value("native service dependencies are unresolved".into()))?;
+            Ok(exports)
+    }}
+    async fn run() -> Result<(), ::rutis_interop::Error> {{
+        ::rutis_interop::server::serve(mount).await
     }}"#,
         config_fields.join(", "),
         dependencies.join(", ")

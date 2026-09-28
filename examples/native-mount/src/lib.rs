@@ -1,17 +1,22 @@
 //! An ordinary rutis plugin. It has no protocol types or adapter annotations.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
 
 pub struct Counter {
     value: Mutex<f64>,
+    stopped: tokio::sync::Notify,
+    waiting: AtomicBool,
 }
 
 impl Counter {
     fn new(initial: f64) -> Self {
         Self {
             value: Mutex::new(initial),
+            stopped: tokio::sync::Notify::new(),
+            waiting: AtomicBool::new(false),
         }
     }
 
@@ -37,6 +42,16 @@ impl Counter {
     pub fn fail(&self) -> Result<f64, std::io::Error> {
         Err(std::io::Error::other("counter refused operation"))
     }
+
+    pub async fn wait_for_dispose(&self) -> f64 {
+        self.waiting.store(true, Ordering::SeqCst);
+        self.stopped.notified().await;
+        self.current()
+    }
+
+    pub fn waiting(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst)
+    }
 }
 
 pub struct CounterPlugin {
@@ -60,7 +75,11 @@ impl Plugin for CounterPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide(Counter::new(self.initial))?;
-            Ok(Effect::Done)
+            let counter = ctx.get::<Counter>().unwrap();
+            Ok(Effect::Disposer(Box::new(move || {
+                counter.stopped.notify_one();
+                Ok(())
+            })))
         })
     }
 }

@@ -11,6 +11,28 @@ const { plugin } = await import(pathToFileURL(process.env.RUTIS_BINDINGS).href)
 const executable = process.env.RUTIS_EXECUTABLE
 const original = plugin(executable)
 
+test('Rust disposal releases an in-flight call before waiting for it', async () => {
+  const peer = await Process.launch(executable, { initial: 7 })
+  let timeout
+  try {
+    const pending = peer.callAsync('counter', 'wait_for_dispose', [])
+    void pending.catch(() => {})
+    const completed = (async () => {
+      while (!peer.call('counter', 'waiting', [])) await delay(1)
+      await peer.dispose()
+      assert.equal(await pending, 7)
+    })()
+    await Promise.race([completed, new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('disposer did not release the pending call')), 2000)
+    })])
+  } catch (error) {
+    // This test owns the child; also bound the lifetime of a regressed server.
+    try { process.kill(peer.pid, 'SIGKILL') } catch {}
+    await peer.dispose().catch(() => {})
+    throw error
+  } finally { clearTimeout(timeout) }
+})
+
 test('generated declarations augment the real Cordis Context with native method shapes', async () => {
   const temporary = await mkdtemp(fileURLToPath(new URL('./types-', import.meta.url)))
   try {

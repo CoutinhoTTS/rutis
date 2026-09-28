@@ -96,12 +96,14 @@ where
                                 reply(&mut writer, request.id, mounted).await?;
                             }
                             "dispose" => {
-                                // Native consumers finish while the original services remain alive.
+                                // Cleanup can release signals awaited by these calls. Starting
+                                // shutdown before draining also leaves the executor free to run it.
+                                let cleanup = ctx.shutdown();
                                 while let Some(completed) = calls.join_next().await {
                                     let (id, result) = completed.map_err(transport)?;
                                     reply(&mut writer, id, result).await?;
                                 }
-                                let disposed = ctx.shutdown().await.map(|()| Value::Null).map_err(native_error);
+                                let disposed = cleanup.await.map(|()| Value::Null).map_err(native_error);
                                 reply(&mut writer, request.id, disposed).await?;
                                 return Ok(());
                             }
@@ -118,8 +120,9 @@ where
             }
         }
     }.await;
+    let cleanup = ctx.shutdown();
     calls.shutdown().await;
-    let cleanup = ctx.shutdown().await.map_err(native_error);
+    let cleanup = cleanup.await.map_err(native_error);
     writer.shutdown().await.map_err(transport)?;
     result.and(cleanup)
 }

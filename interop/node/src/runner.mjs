@@ -9,14 +9,17 @@ const socket = createConnection(socketPath)
 const ctx = new Context()
 let pluginFiber
 let exporterFiber
-let exportContext
+let services
 let methods = new Map()
 let closing = false
 const active = new Set()
+let disposing
 
-async function dispose() {
-  if (exporterFiber) await exporterFiber.dispose()
-  if (pluginFiber) await pluginFiber.dispose()
+function dispose() {
+  return disposing ??= (async () => {
+    if (exporterFiber) await exporterFiber.dispose()
+    if (pluginFiber) await pluginFiber.dispose()
+  })()
 }
 
 async function dispatch({ target, method, args }) {
@@ -30,21 +33,24 @@ async function dispatch({ target, method, args }) {
     methods = new Map(Object.entries(args.services).map(([name, methods]) => [name, new Set(methods)]))
     exporterFiber = ctx.plugin({
       name: 'interop-export', inject: [...methods.keys()],
-      apply(scope) { exportContext = scope },
+      apply(scope) {
+        // This mount exports these objects, even if their service slots change.
+        services ??= new Map([...methods.keys()].map(name => [name, scope[name]]))
+      },
     })
     await exporterFiber.await()
-    if (!exportContext) throw new Error('declared services are unavailable')
+    if (!services) throw new Error('declared services are unavailable')
     return null
   }
   if (target === '' && method === 'dispose') {
     closing = true
-    await Promise.allSettled([...active])
-    await dispose()
+    // A disposer may supply the signal that an earlier call is awaiting.
+    await Promise.all([dispose(), Promise.allSettled([...active])])
     return null
   }
   if (!methods.get(target)?.has(method)) throw new Error(`unknown service method ${target}.${method}`)
   if (!Array.isArray(args)) throw new TypeError('method arguments must be an array')
-  const service = exportContext[target]
+  const service = services.get(target)
   return await Reflect.apply(service[method], service, args)
 }
 
@@ -70,5 +76,5 @@ lines.on('line', line => {
 socket.on('error', error => { console.error(error.message); process.exitCode = 1 })
 socket.on('close', () => {
   closing = true
-  void Promise.allSettled([...active]).then(dispose).catch(error => { console.error(error); process.exitCode = 1 })
+  void Promise.all([dispose(), Promise.allSettled([...active])]).catch(error => { console.error(error); process.exitCode = 1 })
 })
