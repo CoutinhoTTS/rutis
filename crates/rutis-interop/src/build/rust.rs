@@ -101,6 +101,14 @@ fn generate(
     node_package: &Path,
 ) -> Result<(String, String, String)> {
     let file = syn::parse_file(source)?;
+    for item in &file.items {
+        if matches!(item, Item::Mod(_) | Item::Macro(_)) {
+            return Err(unsupported(
+                item,
+                "module and macro expansion are required before discovering this interface",
+            ));
+        }
+    }
     let implementations: Vec<_> = file
         .items
         .iter()
@@ -311,7 +319,7 @@ fn generate(
                 let returned = if output_ts == "void" {
                     format!("{invoke}; Ok(::rutis_interop::serde_json::Value::Null)")
                 } else {
-                    format!("let result = {invoke}; {} ::rutis_interop::serde_json::to_value(result).map_err(|error| ::rutis_interop::Error::Value(error.to_string()))", validate("result", &output_ts))
+                    format!("let result: {} = {invoke}; {} ::rutis_interop::serde_json::to_value(result).map_err(|error| ::rutis_interop::Error::Value(error.to_string()))", output.to_token_stream(), validate("result", &output_ts))
                 };
                 arms.push_str(&format!(r#"({key:?}, {rust_name:?}) => {{
                     let args = args.as_array().ok_or_else(|| ::rutis_interop::Error::Value("expected argument array".into()))?;
@@ -512,5 +520,12 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("macro-expanded"));
+        for hidden in ["mod extra;", "more_service_methods!();"] {
+            let source = format!("{PLUGIN}\n{hidden}");
+            assert!(generate(&source, "fixture", Path::new("/node"))
+                .unwrap_err()
+                .to_string()
+                .contains("expansion"));
+        }
     }
 }
