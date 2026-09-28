@@ -1,11 +1,15 @@
 //! Generated native bindings for cross-process Cordis and rutis plugins.
 //!
-//! The first implementation covers typed value methods. It is not yet a
-//! complete implementation of the plugin interoperability requirements.
+//! Generated bindings cover typed value methods; the shared RPC layer also
+//! supports owned callbacks and async results. Automatic callback bindings and
+//! complete plugin interoperability remain under development.
 
 pub mod build;
 #[cfg(unix)]
 mod process;
+mod protocol;
+#[cfg(unix)]
+pub mod rpc;
 #[cfg(unix)]
 pub mod server;
 
@@ -19,7 +23,13 @@ pub enum Error {
     #[error("{0}")]
     Transport(String),
     #[error("{name}: {message}")]
-    Remote { name: String, message: String },
+    Remote {
+        name: String,
+        message: String,
+        graph: Option<serde_json::Value>,
+    },
+    #[error("synchronous wait cycle: {0}")]
+    SyncWaitCycle(String),
     #[error("invalid binding value: {0}")]
     Value(String),
 }

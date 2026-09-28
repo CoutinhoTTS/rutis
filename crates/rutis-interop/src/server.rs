@@ -1,129 +1,111 @@
-//! Executes generated dispatch against an ordinary, local rutis context.
-
-use std::future::Future;
-use std::sync::Arc;
-
-use rutis::{BoxFuture, Ctx};
-use serde::Deserialize;
-use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::task::JoinSet;
-
+//! Runs generated dispatch against an ordinary local rutis context.
+use crate::rpc::{self, Connection, Reply, Value as RpcValue};
 use crate::Error;
+use rutis::Ctx;
+use serde_json::Value;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub trait Dispatch: Send + Sync + 'static {
-    fn call<'a>(
-        &'a self,
-        target: &'a str,
-        method: &'a str,
-        args: Value,
-    ) -> BoxFuture<'a, Result<Value, Error>>;
+    fn invoke(&self, target: &str, method: &str, args: RpcValue) -> Reply;
 }
 
 pub fn native_error(error: impl std::fmt::Display) -> Error {
     Error::Remote {
         name: "RustError".into(),
         message: error.to_string(),
+        graph: None,
     }
 }
-
 fn transport(error: impl std::fmt::Display) -> Error {
     Error::Transport(error.to_string())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    id: u64,
-    target: String,
-    method: String,
-    args: Value,
+struct Root<F, D> {
+    ctx: Ctx,
+    factory: Mutex<Option<F>>,
+    exports: Arc<Mutex<Option<Arc<D>>>>,
+    closing: AtomicBool,
 }
-
-async fn reply(
-    writer: &mut OwnedWriteHalf,
-    id: u64,
-    result: Result<Value, Error>,
-) -> Result<(), Error> {
-    let mut frame = match result {
-        Ok(value) => json!({"id": id, "status": "ok", "value": value}),
-        Err(Error::Remote { name, message }) => json!({"id": id, "status": "error", "name": name, "message": message}),
-        Err(error) => json!({"id": id, "status": "error", "name": "BindingError", "message": error.to_string()}),
-    }.to_string();
-    frame.push('\n');
-    writer.write_all(frame.as_bytes()).await.map_err(transport)
+impl<F, Fut, D> rpc::Dispatch for Root<F, D>
+where
+    F: FnOnce(Ctx, Value) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<D, Error>> + Send + 'static,
+    D: Dispatch,
+{
+    fn invoke(&self, peer: &Connection, target: &str, method: &str, args: RpcValue) -> Reply {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(Error::Value("plugin is closing".into()));
+        }
+        if target.is_empty() {
+            match method {
+                "mount" => {
+                    let factory = self
+                        .factory
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .ok_or_else(|| Error::Value("already mounted".into()))?;
+                    let ctx = self.ctx.clone();
+                    let exports = self.exports.clone();
+                    let config = args.json()?["config"].clone();
+                    Ok(RpcValue::control_future(async move {
+                        let value = factory(ctx, config).await?;
+                        *exports.lock().unwrap() = Some(Arc::new(value));
+                        Ok(Value::Null.into())
+                    }))
+                }
+                "dispose" => {
+                    self.closing.store(true, Ordering::SeqCst);
+                    let cleanup = self.ctx.shutdown();
+                    let peer = peer.clone();
+                    Ok(RpcValue::control_future(async move {
+                        let result = cleanup.await.map_err(native_error);
+                        peer.drain().await;
+                        result?;
+                        Ok(Value::Null.into())
+                    }))
+                }
+                _ => Err(Error::Value("unknown control method".into())),
+            }
+        } else {
+            let exports = self
+                .exports
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| Error::Value("plugin is not mounted".into()))?;
+            exports.invoke(target, method, args)
+        }
+    }
 }
 
 pub async fn serve<F, Fut, D>(mount: F) -> Result<(), Error>
 where
-    F: FnOnce(Ctx, Value) -> Fut,
-    Fut: Future<Output = Result<D, Error>>,
+    F: FnOnce(Ctx, Value) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<D, Error>> + Send + 'static,
     D: Dispatch,
 {
     let socket = std::env::args_os()
         .nth(1)
-        .ok_or_else(|| Error::Transport("missing IPC socket".into()))?;
+        .ok_or_else(|| transport("missing IPC socket"))?;
     let stream = tokio::net::UnixStream::connect(socket)
         .await
+        .map_err(transport)?
+        .into_std()
         .map_err(transport)?;
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
     let ctx = Ctx::root().map_err(native_error)?;
-    let mut factory = Some(mount);
-    let mut exports: Option<Arc<D>> = None;
-    let mut calls = JoinSet::new();
-    let result = async {
-        loop {
-            tokio::select! {
-                completed = calls.join_next(), if !calls.is_empty() => {
-                    let (id, result) = completed.unwrap().map_err(transport)?;
-                    reply(&mut writer, id, result).await?;
-                }
-                line = lines.next_line() => {
-                    let Some(line) = line.map_err(transport)? else { return Ok(()); };
-                    let request: Request = serde_json::from_str(&line).map_err(transport)?;
-                    if request.target.is_empty() {
-                        match request.method.as_str() {
-                            "mount" => {
-                                let mounted = match factory.take() {
-                                    Some(factory) => factory(ctx.clone(), request.args["config"].clone()).await.map(|value| {
-                                        exports = Some(Arc::new(value));
-                                        Value::Null
-                                    }),
-                                    None => Err(Error::Value("already mounted".into())),
-                                };
-                                reply(&mut writer, request.id, mounted).await?;
-                            }
-                            "dispose" => {
-                                // Ctx::shutdown() submits Intent::Shutdown immediately; polling
-                                // its returned future only joins completion. Keep this eager start
-                                // before draining: a disposer may release a signal these calls await.
-                                let cleanup = ctx.shutdown();
-                                while let Some(completed) = calls.join_next().await {
-                                    let (id, result) = completed.map_err(transport)?;
-                                    reply(&mut writer, id, result).await?;
-                                }
-                                let disposed = cleanup.await.map(|()| Value::Null).map_err(native_error);
-                                reply(&mut writer, request.id, disposed).await?;
-                                return Ok(());
-                            }
-                            _ => reply(&mut writer, request.id, Err(Error::Value("unknown control method".into()))).await?,
-                        }
-                    } else if let Some(exports) = exports.clone() {
-                        calls.spawn(async move {
-                            (request.id, exports.call(&request.target, &request.method, request.args).await)
-                        });
-                    } else {
-                        reply(&mut writer, request.id, Err(Error::Value("plugin is not mounted".into()))).await?;
-                    }
-                }
-            }
-        }
-    }.await;
-    let cleanup = ctx.shutdown();
-    calls.shutdown().await;
-    let cleanup = cleanup.await.map_err(native_error);
-    writer.shutdown().await.map_err(transport)?;
-    result.and(cleanup)
+    let peer = Connection::connect(
+        stream,
+        Arc::new(Root {
+            ctx: ctx.clone(),
+            factory: Mutex::new(Some(mount)),
+            exports: Arc::new(Mutex::new(None)),
+            closing: AtomicBool::new(false),
+        }),
+    )?;
+    peer.ready().await?;
+    peer.closed().await;
+    ctx.shutdown().await.map_err(native_error)
 }

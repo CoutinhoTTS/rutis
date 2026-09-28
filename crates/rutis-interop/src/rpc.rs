@@ -1,0 +1,1151 @@
+//! One ordered, bidirectional connection for invocation, await and owned references.
+//! Socket readers admit frames and pin references; they never execute plugin code.
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::future::Future;
+use std::io::{BufRead, BufReader, Write};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{mpsc, Arc, Mutex, Weak};
+use std::task::{Context, Poll, Waker};
+use std::thread::ThreadId;
+
+use rutis::BoxFuture;
+use serde_json::Value as Json;
+use tokio::runtime::{Handle, RuntimeFlavor};
+use tokio::sync::{oneshot, watch, Notify};
+
+use crate::protocol::{Frame, Kind, WireValue, VERSION};
+use crate::Error;
+
+pub type Reply = Result<Value, Error>;
+type Callback = dyn Fn(Value) -> Reply + Send + Sync;
+
+/// The current value slice supports JSON data, owned functions and async results.
+/// `invoke` returns a Future reference; only `wait`/`wait_async` await it.
+#[derive(Clone, Debug)]
+pub enum Value {
+    Undefined,
+    Data(Json),
+    List(Vec<Value>),
+    Reference(Reference),
+}
+impl Value {
+    pub fn list(self) -> Result<Vec<Value>, Error> {
+        match self {
+            Self::List(values) => Ok(values),
+            Self::Data(Json::Array(values)) => Ok(values.into_iter().map(Self::Data).collect()),
+            _ => Err(Error::Value("expected argument array".into())),
+        }
+    }
+    pub fn json(self) -> Result<Json, Error> {
+        match self {
+            Self::Undefined => Ok(Json::Null),
+            Self::Data(value) => Ok(value),
+            Self::List(values) => values
+                .into_iter()
+                .map(Self::json)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Json::Array),
+            Self::Reference(_) => Err(Error::Value("expected data, received a reference".into())),
+        }
+    }
+    pub fn reference(self) -> Result<Reference, Error> {
+        match self {
+            Self::Reference(value) => Ok(value),
+            _ => Err(Error::Value("expected a reference".into())),
+        }
+    }
+    pub fn future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
+        Self::future_inner(future, true)
+    }
+    pub(crate) fn control_future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
+        Self::future_inner(future, false)
+    }
+    fn future_inner(future: impl Future<Output = Reply> + Send + 'static, business: bool) -> Self {
+        Self::future_on(future, business, Executor::current())
+    }
+    fn future_on(
+        future: impl Future<Output = Reply> + Send + 'static,
+        business: bool,
+        executor: Executor,
+    ) -> Self {
+        Self::Reference(Reference(ReferenceInner::Local(Arc::new(Object {
+            executor,
+            business,
+            origin: current_path(),
+            body: Body::Future(AsyncResult {
+                future: Mutex::new(FutureState {
+                    pending: Some(Box::pin(future)),
+                    task: None,
+                }),
+                result: watch::channel(None).0,
+            }),
+        }))))
+    }
+    /// The closure runs on its captured runtime, or on the originating sync
+    /// caller's thread when that caller is pumping this invocation chain.
+    pub fn callback(callback: impl Fn(Value) -> Reply + Send + Sync + 'static) -> Self {
+        Self::Reference(Reference(ReferenceInner::Local(Arc::new(Object {
+            executor: Executor::current(),
+            business: true,
+            origin: current_path(),
+            body: Body::Function(Arc::new(callback)),
+        }))))
+    }
+}
+impl From<Json> for Value {
+    fn from(value: Json) -> Self {
+        Self::Data(value)
+    }
+}
+
+#[derive(Clone)]
+pub struct Reference(ReferenceInner);
+impl std::fmt::Debug for Reference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reference")
+            .field("future", &self.is_future())
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Clone)]
+enum ReferenceInner {
+    Local(Arc<Object>),
+    Remote(Arc<Import>),
+}
+impl Reference {
+    pub fn is_future(&self) -> bool {
+        match &self.0 {
+            ReferenceInner::Local(object) => object.kind() == Kind::Future,
+            ReferenceInner::Remote(import) => import.kind == Kind::Future,
+        }
+    }
+    pub fn call(&self, args: Value) -> Reply {
+        match &self.0 {
+            ReferenceInner::Local(object) => object.call(args),
+            ReferenceInner::Remote(import) => import
+                .connection()?
+                .request_sync(Operation::Call(import.id, args)),
+        }
+    }
+    pub async fn call_async(&self, args: Value) -> Reply {
+        match &self.0 {
+            ReferenceInner::Local(object) => object.call(args),
+            ReferenceInner::Remote(import) => {
+                import
+                    .connection()?
+                    .request_async(Operation::Call(import.id, args))
+                    .await
+            }
+        }
+    }
+    pub async fn wait_async(&self) -> Reply {
+        match &self.0 {
+            ReferenceInner::Local(object) => object.wait(false, current_path()).await,
+            ReferenceInner::Remote(import) => {
+                import
+                    .connection()?
+                    .request_async(Operation::Await(import.id, import.origin.clone()))
+                    .await
+            }
+        }
+    }
+    pub fn wait(&self) -> Reply {
+        match &self.0 {
+            ReferenceInner::Remote(import) => import
+                .connection()?
+                .request_sync(Operation::Await(import.id, import.origin.clone())),
+            ReferenceInner::Local(_) => {
+                Err(Error::Value("local future requires wait_async".into()))
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Executor {
+    handle: Handle,
+    thread: ThreadId,
+}
+impl Executor {
+    fn current() -> Self {
+        Self {
+            handle: Handle::current(),
+            thread: std::thread::current().id(),
+        }
+    }
+    fn blocked_here(&self) -> bool {
+        self.handle.runtime_flavor() == RuntimeFlavor::CurrentThread
+            && self.thread == std::thread::current().id()
+    }
+}
+/// Lazily started once per connection. Closing drops the stop sender; the
+/// runtime cancels its tasks without blocking the caller or joining itself.
+struct Background {
+    executor: Executor,
+    _stop: oneshot::Sender<()>,
+}
+impl Background {
+    fn start() -> Result<Self, Error> {
+        let (ready, started) = mpsc::sync_channel(1);
+        let (stop, stopped) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("rutis-interop-async".into())
+            .spawn(move || {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => {
+                        let _ = ready.send(Ok(Executor {
+                            handle: runtime.handle().clone(),
+                            thread: std::thread::current().id(),
+                        }));
+                        runtime.block_on(async {
+                            let _ = stopped.await;
+                        });
+                        runtime.shutdown_background();
+                    }
+                    Err(error) => {
+                        let _ = ready.send(Err(transport(error)));
+                    }
+                }
+            })
+            .map_err(transport)?;
+        Ok(Self {
+            executor: started.recv().map_err(transport)??,
+            _stop: stop,
+        })
+    }
+}
+struct Object {
+    executor: Executor,
+    body: Body,
+    business: bool,
+    origin: Vec<String>,
+}
+enum Body {
+    Function(Arc<Callback>),
+    Future(AsyncResult),
+}
+struct AsyncResult {
+    future: Mutex<FutureState>,
+    result: watch::Sender<Option<Reply>>,
+}
+struct FutureState {
+    pending: Option<BoxFuture<'static, Reply>>,
+    task: Option<tokio::task::AbortHandle>,
+}
+impl Drop for AsyncResult {
+    fn drop(&mut self) {
+        if let Some(task) = self.future.get_mut().unwrap().task.take() {
+            task.abort();
+        }
+    }
+}
+fn poll_future(future: &mut BoxFuture<'static, Reply>, cx: &mut Context<'_>) -> Poll<Reply> {
+    catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx)))
+        .unwrap_or_else(|panic| Poll::Ready(Err(panic_error(panic))))
+}
+impl Object {
+    fn kind(&self) -> Kind {
+        match self.body {
+            Body::Function(_) => Kind::Function,
+            Body::Future(_) => Kind::Future,
+        }
+    }
+    fn call(&self, args: Value) -> Reply {
+        match &self.body {
+            Body::Function(callback) => protected(|| callback(args)),
+            _ => Err(Error::Value("reference is not callable".into())),
+        }
+    }
+    fn ready_on_blocked_executor(&self) -> Reply {
+        let Body::Future(state) = &self.body else {
+            return Err(Error::Value("reference is not awaitable".into()));
+        };
+        if let Some(result) = state.result.borrow().clone() {
+            return result;
+        }
+        let pending = state.future.lock().unwrap().pending.take();
+        if let Some(mut future) = pending {
+            let _entered = self.executor.handle.enter();
+            let waker = Waker::noop();
+            match poll_future(&mut future, &mut Context::from_waker(waker)) {
+                Poll::Ready(result) => {
+                    state.result.send_replace(Some(result.clone()));
+                    return result;
+                }
+                Poll::Pending => {
+                    let result = state.result.clone();
+                    let task =
+                        self.executor
+                            .handle
+                            .spawn(ASYNC_PATH.scope(current_path(), async move {
+                                let reply =
+                                    std::future::poll_fn(|cx| poll_future(&mut future, cx)).await;
+                                result.send_replace(Some(reply));
+                            }));
+                    state.future.lock().unwrap().task = Some(task.abort_handle());
+                }
+            }
+        }
+        Err(Error::SyncWaitCycle(
+            format!("await needs the Rust current_thread executor occupied by its parent synchronous call; origin: {:?}", self.origin),
+        ))
+    }
+    async fn wait(self: &Arc<Self>, _sync: bool, path: Vec<String>) -> Reply {
+        let Body::Future(state) = &self.body else {
+            return Err(Error::Value("reference is not awaitable".into()));
+        };
+        {
+            let mut pending = state.future.lock().unwrap();
+            if let Some(mut future) = pending.pending.take() {
+                let result = state.result.clone();
+                let task = self
+                    .executor
+                    .handle
+                    .spawn(ASYNC_PATH.scope(path, async move {
+                        let reply = std::future::poll_fn(|cx| poll_future(&mut future, cx)).await;
+                        result.send_replace(Some(reply));
+                    }));
+                pending.task = Some(task.abort_handle());
+            }
+        }
+        let mut result = state.result.subscribe();
+        loop {
+            if let Some(result) = result.borrow().clone() {
+                return result;
+            }
+            result
+                .changed()
+                .await
+                .map_err(|_| Error::Transport("future executor stopped".into()))?;
+        }
+    }
+}
+
+fn protected(call: impl FnOnce() -> Reply) -> Reply {
+    catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|panic| Err(panic_error(panic)))
+}
+fn panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
+    match panic.downcast::<Error>() {
+        Ok(error) => *error,
+        Err(panic) => crate::server::native_error(
+            panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "native callback panicked".into()),
+        ),
+    }
+}
+tokio::task_local! { static ASYNC_PATH: Vec<String>; }
+thread_local! { static SYNC_PATH: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; }
+fn current_path() -> Vec<String> {
+    SYNC_PATH
+        .with(|p| p.borrow().clone())
+        .or_else(|| ASYNC_PATH.try_with(Clone::clone).ok())
+        .unwrap_or_default()
+}
+struct PathGuard(Option<Vec<String>>);
+impl PathGuard {
+    fn enter(path: Vec<String>) -> Self {
+        Self(SYNC_PATH.with(|p| p.replace(Some(path))))
+    }
+}
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        SYNC_PATH.with(|p| p.replace(self.0.take()));
+    }
+}
+
+struct Import {
+    peer: Weak<Peer>,
+    id: u64,
+    kind: Kind,
+    grants: Mutex<u64>,
+    origin: Vec<String>,
+}
+impl Import {
+    fn connection(&self) -> Result<Connection, Error> {
+        self.peer
+            .upgrade()
+            .map(Connection)
+            .ok_or_else(|| Error::Transport("session closed".into()))
+    }
+}
+impl Drop for Import {
+    fn drop(&mut self) {
+        if let Some(peer) = self.peer.upgrade() {
+            {
+                let mut imports = peer.imports.lock().unwrap();
+                if imports
+                    .get(&self.id)
+                    .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
+                {
+                    imports.remove(&self.id);
+                }
+            }
+            let _ = Connection(peer).write(Frame::Release {
+                reference: self.id,
+                count: *self.grants.get_mut().unwrap(),
+            });
+        }
+    }
+}
+struct Export {
+    object: Arc<Object>,
+    grants: u64,
+}
+#[derive(Default)]
+struct Exports {
+    next: u64,
+    entries: HashMap<u64, Export>,
+    identities: HashMap<usize, u64>,
+}
+enum Waiting {
+    Sync {
+        sender: mpsc::Sender<Message>,
+        origins: Vec<String>,
+    },
+    Async(oneshot::Sender<Reply>),
+}
+enum Message {
+    Reply(Reply),
+    Invoke(Incoming),
+}
+enum Operation {
+    Invoke(String, String, Value),
+    Call(u64, Value),
+    Await(u64, Vec<String>),
+}
+enum Accepted {
+    Invoke(String, String, Value),
+    Call(Arc<Object>, Value),
+    Await(Arc<Object>),
+}
+struct Awaiting {
+    object: Arc<Object>,
+    path: Vec<String>,
+    _cancel: oneshot::Sender<()>,
+}
+struct Incoming {
+    id: String,
+    path: Vec<String>,
+    call: Accepted,
+    _flight: Option<Flight>,
+}
+#[derive(Default)]
+struct Calls {
+    next: u64,
+    waiting: HashMap<String, Waiting>,
+    incoming: HashMap<String, Incoming>,
+    awaiting: HashMap<String, Awaiting>,
+    received: u64,
+    closed: Option<Error>,
+}
+struct Activity {
+    count: Mutex<usize>,
+    changed: Notify,
+}
+struct Flight(Arc<Activity>);
+impl Drop for Flight {
+    fn drop(&mut self) {
+        *self.0.count.lock().unwrap() -= 1;
+        self.0.changed.notify_waiters();
+    }
+}
+
+pub trait Dispatch: Send + Sync + 'static {
+    fn invoke(&self, peer: &Connection, target: &str, method: &str, args: Value) -> Reply;
+}
+struct Peer {
+    writer: Mutex<UnixStream>,
+    calls: Mutex<Calls>,
+    exports: Mutex<Exports>,
+    imports: Mutex<HashMap<u64, Weak<Import>>>,
+    executor: Handle,
+    background: Mutex<Option<Background>>,
+    dispatch: Arc<dyn Dispatch>,
+    ready: watch::Sender<Option<Result<(), Error>>>,
+    ended: watch::Sender<bool>,
+    activity: Arc<Activity>,
+}
+impl Drop for Peer {
+    fn drop(&mut self) {
+        let _ = self.writer.get_mut().unwrap().shutdown(Shutdown::Both);
+    }
+}
+
+#[derive(Clone)]
+pub struct Connection(Arc<Peer>);
+impl Connection {
+    pub fn connect(stream: UnixStream, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
+        stream.set_nonblocking(false).map_err(transport)?;
+        let reader = stream.try_clone().map_err(transport)?;
+        let peer = Self(Arc::new(Peer {
+            writer: Mutex::new(stream),
+            calls: Mutex::new(Calls::default()),
+            exports: Mutex::new(Exports::default()),
+            imports: Mutex::new(HashMap::new()),
+            executor: Handle::current(),
+            background: Mutex::new(None),
+            dispatch,
+            ready: watch::channel(None).0,
+            ended: watch::channel(false).0,
+            activity: Arc::new(Activity {
+                count: Mutex::new(0),
+                changed: Notify::new(),
+            }),
+        }));
+        let weak = Arc::downgrade(&peer.0);
+        std::thread::Builder::new()
+            .name("rutis-interop-reader".into())
+            .spawn(move || {
+                let result: Result<(), Error> = (|| {
+                    for line in BufReader::new(reader).lines() {
+                        let line = line.map_err(transport)?;
+                        let Some(peer) = weak.upgrade().map(Self) else {
+                            return Ok(());
+                        };
+                        peer.receive(serde_json::from_str(&line).map_err(transport)?)?;
+                    }
+                    Err(Error::Transport("peer disconnected".into()))
+                })();
+                if let (Err(error), Some(peer)) = (result, weak.upgrade()) {
+                    Self(peer).close(error);
+                }
+            })
+            .map_err(transport)?;
+        peer.write(Frame::Hello { version: VERSION })?;
+        Ok(peer)
+    }
+    pub async fn ready(&self) -> Result<(), Error> {
+        let mut ready = self.0.ready.subscribe();
+        loop {
+            if let Some(result) = ready.borrow().clone() {
+                return result;
+            }
+            ready.changed().await.map_err(transport)?;
+        }
+    }
+    pub async fn closed(&self) {
+        let mut ended = self.0.ended.subscribe();
+        while !*ended.borrow() {
+            if ended.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+    pub fn close(&self, error: Error) {
+        let (waiting, incoming, awaiting) = {
+            let mut calls = self.0.calls.lock().unwrap();
+            if calls.closed.is_some() {
+                return;
+            }
+            calls.closed = Some(error.clone());
+            (
+                std::mem::take(&mut calls.waiting),
+                std::mem::take(&mut calls.incoming),
+                std::mem::take(&mut calls.awaiting),
+            )
+        };
+        let exports = std::mem::take(&mut *self.0.exports.lock().unwrap());
+        self.0.imports.lock().unwrap().clear();
+        let _ = self.0.writer.lock().unwrap().shutdown(Shutdown::Both);
+        self.0.ready.send_if_modified(|ready| {
+            if ready.is_none() {
+                *ready = Some(Err(error.clone()));
+                true
+            } else {
+                false
+            }
+        });
+        self.0.ended.send_replace(true);
+        for call in waiting.into_values() {
+            finish(call, Err(error.clone()));
+        }
+        drop(exports);
+        drop(incoming);
+        drop(awaiting);
+        self.0.background.lock().unwrap().take();
+    }
+    /// Create an owned async result on this connection's shared executor.
+    ///
+    /// Adapter code must establish that the factory and Future can progress
+    /// independently of the caller's executor: `Send` alone is insufficient.
+    /// Create timers/tasks inside the factory, not on the caller's runtime.
+    /// Arbitrary captured runtime handles or lifecycle tasks are not migrated.
+    pub fn independent_future<F, Fut>(&self, factory: F) -> Result<Value, Error>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Reply> + Send + 'static,
+    {
+        let mut background = self.0.background.lock().unwrap();
+        if let Some(error) = &self.0.calls.lock().unwrap().closed {
+            return Err(error.clone());
+        }
+        if background.is_none() {
+            *background = Some(Background::start()?);
+        }
+        let executor = background.as_ref().unwrap().executor.clone();
+        Ok(Value::future_on(
+            async move { factory().await },
+            true,
+            executor,
+        ))
+    }
+    pub fn invoke(&self, target: &str, method: &str, args: Value) -> Reply {
+        self.request_sync(Operation::Invoke(target.into(), method.into(), args))
+    }
+    pub async fn invoke_async(&self, target: &str, method: &str, args: Value) -> Reply {
+        self.request_async(Operation::Invoke(target.into(), method.into(), args))
+            .await
+    }
+    pub async fn drain(&self) {
+        loop {
+            let changed = self.0.activity.changed.notified();
+            if *self.0.activity.count.lock().unwrap() == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+    fn write(&self, frame: Frame) -> Result<(), Error> {
+        let result = {
+            let mut writer = self.0.writer.lock().unwrap();
+            self.write_locked(&mut writer, frame)
+        };
+        if let Err(error) = &result {
+            self.close(error.clone());
+        }
+        result
+    }
+    fn write_locked(&self, writer: &mut UnixStream, frame: Frame) -> Result<(), Error> {
+        if let Some(error) = &self.0.calls.lock().unwrap().closed {
+            return Err(error.clone());
+        }
+        let mut bytes = serde_json::to_vec(&frame).map_err(transport)?;
+        bytes.push(b'\n');
+        writer.write_all(&bytes).map_err(transport)
+    }
+    fn send(&self, call: Operation, mut waiting: Waiting) -> Result<String, Error> {
+        let mut writer = self.0.writer.lock().unwrap();
+        if !matches!(*self.0.ready.borrow(), Some(Ok(()))) {
+            return Err(Error::Transport("protocol handshake incomplete".into()));
+        }
+        let id = {
+            let mut calls = self.0.calls.lock().unwrap();
+            if let Some(error) = &calls.closed {
+                return Err(error.clone());
+            }
+            calls.next = calls
+                .next
+                .checked_add(1)
+                .ok_or_else(|| transport("call identifiers exhausted"))?;
+            format!("rust:{}", calls.next)
+        };
+        let mut path = current_path();
+        if let Operation::Await(_, origin) = &call {
+            if let Waiting::Sync { origins, .. } = &mut waiting {
+                *origins = origin.clone();
+            }
+            for ancestor in origin {
+                if !path.contains(ancestor) {
+                    path.push(ancestor.clone());
+                }
+            }
+        }
+        let frame = match &call {
+            Operation::Invoke(target, method, args) => Frame::Invoke {
+                id: id.clone(),
+                path,
+                target: target.clone(),
+                method: method.clone(),
+                args: self.encode(args)?,
+            },
+            Operation::Call(reference, args) => Frame::Call {
+                id: id.clone(),
+                path,
+                reference: *reference,
+                args: self.encode(args)?,
+            },
+            Operation::Await(reference, _) => Frame::Await {
+                id: id.clone(),
+                path,
+                reference: *reference,
+            },
+        };
+        let mut blocked = Vec::new();
+        {
+            let mut calls = self.0.calls.lock().unwrap();
+            if let Waiting::Sync { sender, origins } = &waiting {
+                for (id, awaiting) in &calls.awaiting {
+                    if awaiting.object.executor.blocked_here()
+                        && origins.iter().any(|origin| awaiting.path.contains(origin))
+                    {
+                        blocked.push((id.clone(), awaiting.object.clone()));
+                    }
+                }
+                // Claim queued work atomically with registering this waiter.
+                // A runtime task may already be scheduled, but has not begun.
+                let mut related: Vec<_> = calls
+                    .incoming
+                    .iter()
+                    .filter(|(_, incoming)| {
+                        incoming.path.contains(&id)
+                            || origins.iter().any(|origin| incoming.path.contains(origin))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                related.sort_by_key(|id| id.strip_prefix("node:").unwrap().parse::<u64>().unwrap());
+                for id in related {
+                    let incoming = calls.incoming.remove(&id).unwrap();
+                    sender.send(Message::Invoke(incoming)).map_err(transport)?;
+                }
+            }
+            calls.waiting.insert(id.clone(), waiting);
+        }
+        let result = self.write_locked(&mut writer, frame);
+        drop(writer);
+        if let Err(error) = result {
+            self.close(error.clone());
+            return Err(error);
+        }
+        for (id, object) in blocked {
+            self.finish_await(id, object.ready_on_blocked_executor());
+        }
+        Ok(id)
+    }
+    fn request_sync(&self, call: Operation) -> Reply {
+        let (sender, receiver) = mpsc::channel();
+        self.send(
+            call,
+            Waiting::Sync {
+                sender,
+                origins: Vec::new(),
+            },
+        )?;
+        loop {
+            match receiver.recv().map_err(transport)? {
+                Message::Reply(result) => return result,
+                Message::Invoke(incoming) => self.execute(incoming, true),
+            }
+        }
+    }
+    async fn request_async(&self, call: Operation) -> Reply {
+        let (sender, receiver) = oneshot::channel();
+        self.send(call, Waiting::Async(sender))?;
+        receiver.await.map_err(transport)?
+    }
+    fn encode(&self, value: &Value) -> Result<WireValue, Error> {
+        let mut grants = Vec::new();
+        let result = self.encode_inner(value, &mut grants);
+        if result.is_err() {
+            let mut exports = self.0.exports.lock().unwrap();
+            for id in grants {
+                let entry = exports.entries.get_mut(&id).unwrap();
+                entry.grants -= 1;
+                if entry.grants == 0 {
+                    let entry = exports.entries.remove(&id).unwrap();
+                    exports
+                        .identities
+                        .remove(&(Arc::as_ptr(&entry.object) as usize));
+                }
+            }
+        }
+        result
+    }
+    fn encode_inner(&self, value: &Value, grants: &mut Vec<u64>) -> Result<WireValue, Error> {
+        Ok(match value {
+            Value::Undefined => WireValue::Undefined,
+            Value::Data(value) => WireValue::Data(value.clone()),
+            Value::List(values) => WireValue::List(
+                values
+                    .iter()
+                    .map(|value| self.encode_inner(value, grants))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Value::Reference(Reference(ReferenceInner::Remote(import))) => {
+                if !Weak::ptr_eq(&import.peer, &Arc::downgrade(&self.0)) {
+                    return Err(Error::Value(
+                        "cross-session reference forwarding is not implemented".into(),
+                    ));
+                }
+                WireValue::Reference {
+                    id: import.id,
+                    kind: import.kind,
+                    home: true,
+                    origin: import.origin.clone(),
+                }
+            }
+            Value::Reference(Reference(ReferenceInner::Local(object))) => {
+                let mut exports = self.0.exports.lock().unwrap();
+                let identity = Arc::as_ptr(object) as usize;
+                let id = match exports.identities.get(&identity) {
+                    Some(id) => *id,
+                    None => {
+                        exports.next = exports
+                            .next
+                            .checked_add(1)
+                            .filter(|n| *n <= 9_007_199_254_740_991)
+                            .ok_or_else(|| transport("reference identifiers exhausted"))?;
+                        let id = exports.next;
+                        exports.entries.insert(
+                            id,
+                            Export {
+                                object: object.clone(),
+                                grants: 0,
+                            },
+                        );
+                        exports.identities.insert(identity, id);
+                        id
+                    }
+                };
+                let export = exports.entries.get_mut(&id).unwrap();
+                export.grants = export
+                    .grants
+                    .checked_add(1)
+                    .ok_or_else(|| transport("reference grant overflow"))?;
+                grants.push(id);
+                WireValue::Reference {
+                    id,
+                    kind: object.kind(),
+                    home: false,
+                    origin: object.origin.clone(),
+                }
+            }
+        })
+    }
+    fn decode(&self, value: WireValue) -> Reply {
+        Ok(match value {
+            WireValue::Undefined => Value::Undefined,
+            WireValue::Data(value) => Value::Data(value),
+            WireValue::List(values) => Value::List(
+                values
+                    .into_iter()
+                    .map(|value| self.decode(value))
+                    .collect::<Result<_, _>>()?,
+            ),
+            WireValue::Reference {
+                id,
+                home: true,
+                kind,
+                origin: _,
+            } => {
+                let object = self.export(id)?;
+                if object.kind() != kind {
+                    return Err(transport("reference kind mismatch"));
+                }
+                Value::Reference(Reference(ReferenceInner::Local(object)))
+            }
+            WireValue::Reference {
+                id,
+                home: false,
+                kind,
+                origin,
+            } => {
+                if id == 0 || id > 9_007_199_254_740_991 {
+                    return Err(transport("invalid reference identity"));
+                }
+                let mut imports = self.0.imports.lock().unwrap();
+                let import = match imports.get(&id).and_then(Weak::upgrade) {
+                    Some(import) => {
+                        if import.kind != kind || import.origin != origin {
+                            return Err(transport("reference kind mismatch"));
+                        }
+                        let mut grants = import.grants.lock().unwrap();
+                        *grants = grants
+                            .checked_add(1)
+                            .ok_or_else(|| transport("import grant overflow"))?;
+                        drop(grants);
+                        import
+                    }
+                    None => {
+                        let import = Arc::new(Import {
+                            peer: Arc::downgrade(&self.0),
+                            id,
+                            kind,
+                            grants: Mutex::new(1),
+                            origin,
+                        });
+                        imports.insert(id, Arc::downgrade(&import));
+                        import
+                    }
+                };
+                Value::Reference(Reference(ReferenceInner::Remote(import)))
+            }
+        })
+    }
+    fn export(&self, id: u64) -> Result<Arc<Object>, Error> {
+        self.0
+            .exports
+            .lock()
+            .unwrap()
+            .entries
+            .get(&id)
+            .map(|e| e.object.clone())
+            .ok_or_else(|| transport("unknown or released reference"))
+    }
+    fn receive(&self, frame: Frame) -> Result<(), Error> {
+        if let Frame::Hello { version } = frame {
+            if version != VERSION || self.0.ready.borrow().is_some() {
+                return Err(transport("incompatible or duplicate protocol handshake"));
+            }
+            self.0.ready.send_replace(Some(Ok(())));
+            return Ok(());
+        }
+        if !matches!(*self.0.ready.borrow(), Some(Ok(()))) {
+            return Err(transport("request before protocol handshake"));
+        }
+        let (id, mut path, call) = match frame {
+            Frame::Return { id, value } => {
+                let value = self.decode(value)?;
+                let waiting = self
+                    .0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .waiting
+                    .remove(&id)
+                    .ok_or_else(|| transport("response for unknown call"))?;
+                finish(waiting, Ok(value));
+                return Ok(());
+            }
+            Frame::Throw { id, error } => {
+                let waiting = self
+                    .0
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .waiting
+                    .remove(&id)
+                    .ok_or_else(|| transport("response for unknown call"))?;
+                finish(waiting, Err(error.into()));
+                return Ok(());
+            }
+            Frame::Release { reference, count } => {
+                let removed = {
+                    let mut exports = self.0.exports.lock().unwrap();
+                    let entry = exports
+                        .entries
+                        .get_mut(&reference)
+                        .ok_or_else(|| transport("release of unknown reference"))?;
+                    if count == 0 || count > entry.grants {
+                        return Err(transport("invalid reference release count"));
+                    }
+                    entry.grants -= count;
+                    if entry.grants == 0 {
+                        let entry = exports.entries.remove(&reference).unwrap();
+                        exports
+                            .identities
+                            .remove(&(Arc::as_ptr(&entry.object) as usize));
+                        Some(entry)
+                    } else {
+                        None
+                    }
+                };
+                drop(removed);
+                return Ok(());
+            }
+            Frame::Invoke {
+                id,
+                path,
+                target,
+                method,
+                args,
+            } => (
+                id,
+                path,
+                Accepted::Invoke(target, method, self.decode(args)?),
+            ),
+            Frame::Call {
+                id,
+                path,
+                reference,
+                args,
+            } => (
+                id,
+                path,
+                Accepted::Call(self.export(reference)?, self.decode(args)?),
+            ),
+            Frame::Await {
+                id,
+                path,
+                reference,
+            } => (id, path, Accepted::Await(self.export(reference)?)),
+            Frame::Hello { .. } => unreachable!(),
+        };
+        if !id.starts_with("node:") || path.contains(&id) {
+            return Err(transport("invalid invocation identity/path"));
+        }
+        path.push(id.clone());
+        let business = match &call {
+            Accepted::Invoke(target, _, _) => !target.is_empty(),
+            Accepted::Call(object, _) | Accepted::Await(object) => object.business,
+        };
+        let flight = business.then(|| {
+            *self.0.activity.count.lock().unwrap() += 1;
+            Flight(self.0.activity.clone())
+        });
+        let incoming = Incoming {
+            id,
+            path,
+            call,
+            _flight: flight,
+        };
+        let handle = match &incoming.call {
+            Accepted::Call(object, _) | Accepted::Await(object) => object.executor.handle.clone(),
+            _ => self.0.executor.clone(),
+        };
+        let queued = {
+            let mut calls = self.0.calls.lock().unwrap();
+            let sequence = incoming
+                .id
+                .strip_prefix("node:")
+                .and_then(|n| n.parse::<u64>().ok())
+                .filter(|n| *n > calls.received && *n <= 9_007_199_254_740_991)
+                .ok_or_else(|| transport("invalid or repeated invocation identity"))?;
+            calls.received = sequence;
+            let waiter = incoming
+                .path
+                .iter()
+                .rev()
+                .find_map(|id| match calls.waiting.get(id) {
+                    Some(Waiting::Sync { sender, .. }) => Some(sender.clone()),
+                    _ => None,
+                })
+                .or_else(|| {
+                    calls.waiting.values().find_map(|waiting| match waiting {
+                        Waiting::Sync { sender, origins }
+                            if origins.iter().any(|id| incoming.path.contains(id)) =>
+                        {
+                            Some(sender.clone())
+                        }
+                        _ => None,
+                    })
+                });
+            if let Some(waiter) = waiter {
+                waiter.send(Message::Invoke(incoming)).map_err(transport)?;
+                None
+            } else {
+                let id = incoming.id.clone();
+                calls.incoming.insert(id.clone(), incoming);
+                Some(id)
+            }
+        };
+        if let Some(id) = queued {
+            let peer = self.clone();
+            handle.spawn(async move {
+                let incoming = peer.0.calls.lock().unwrap().incoming.remove(&id);
+                if let Some(incoming) = incoming {
+                    peer.execute(incoming, false);
+                }
+            });
+        }
+        Ok(())
+    }
+    fn execute(&self, incoming: Incoming, sync: bool) {
+        let Incoming {
+            id,
+            path,
+            call,
+            _flight,
+        } = incoming;
+        let _path = PathGuard::enter(path.clone());
+        match call {
+            Accepted::Await(object) => {
+                // Check on the pumping thread before handing the async waiter
+                // to the executor that might itself be blocked by this stack.
+                if sync && object.executor.blocked_here() {
+                    self.respond(id, object.ready_on_blocked_executor());
+                    drop(_flight);
+                    return;
+                }
+                let (cancel, cancelled) = oneshot::channel();
+                {
+                    let mut calls = self.0.calls.lock().unwrap();
+                    if calls.closed.is_some() {
+                        return;
+                    }
+                    calls.awaiting.insert(
+                        id.clone(),
+                        Awaiting {
+                            object: object.clone(),
+                            path: path.clone(),
+                            _cancel: cancel,
+                        },
+                    );
+                }
+                let peer = self.clone();
+                object
+                    .executor
+                    .handle
+                    .clone()
+                    .spawn(ASYNC_PATH.scope(path.clone(), async move {
+                        tokio::select! {
+                            result = object.wait(false, path) => peer.finish_await(id, result),
+                            _ = cancelled => {},
+                        }
+                        drop(_flight);
+                    }));
+            }
+            Accepted::Call(object, args) => {
+                self.respond(id, object.call(args));
+                drop(_flight);
+            }
+            Accepted::Invoke(target, method, args) => {
+                let result = protected(|| self.0.dispatch.invoke(self, &target, &method, args));
+                self.respond(id, result);
+                drop(_flight);
+            }
+        }
+    }
+    fn finish_await(&self, id: String, result: Reply) {
+        let awaiting = self.0.calls.lock().unwrap().awaiting.remove(&id);
+        if awaiting.is_some() {
+            self.respond(id, result);
+        }
+    }
+    fn respond(&self, id: String, result: Reply) {
+        let result = {
+            let mut writer = self.0.writer.lock().unwrap();
+            let frame = match &result {
+                Ok(value) => match self.encode(value) {
+                    Ok(value) => Frame::Return { id, value },
+                    Err(error) => Frame::Throw {
+                        id,
+                        error: error.into(),
+                    },
+                },
+                Err(error) => Frame::Throw {
+                    id,
+                    error: error.clone().into(),
+                },
+            };
+            self.write_locked(&mut writer, frame)
+        };
+        if let Err(error) = result {
+            self.close(error);
+        }
+    }
+}
+fn finish(waiting: Waiting, result: Reply) {
+    match waiting {
+        Waiting::Sync { sender, .. } => {
+            let _ = sender.send(Message::Reply(result));
+        }
+        Waiting::Async(sender) => {
+            let _ = sender.send(result);
+        }
+    }
+}
+fn transport(error: impl std::fmt::Display) -> Error {
+    Error::Transport(error.to_string())
+}
+
+#[cfg(test)]
+mod tests;

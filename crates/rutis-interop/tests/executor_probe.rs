@@ -1,4 +1,6 @@
 //! Scheduling probes, not the production callback protocol or deadlock detector.
+//! Fixed sleeps illustrate lack of progress only; they are not production cycle
+//! detection or precise timing assertions. See rpc_callbacks.rs for protocol tests.
 
 use std::future::Future;
 use std::io::{BufRead, BufReader, Write};

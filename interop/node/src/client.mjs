@@ -1,39 +1,47 @@
 import { Worker, MessageChannel, receiveMessageOnPort } from 'node:worker_threads'
-import { encode } from './wire.mjs'
+import { Peer } from './peer.mjs'
 
-// The worker owns I/O only. Values are returned on the calling JS thread.
 export class Process {
   #port
   #signal = new Int32Array(new SharedArrayBuffer(4))
-  #pending = new Map()
-  #next = 0
-  #closed
   #worker
   #exited
-  #ready
-  #resolveReady
-  #rejectReady
+  #peer
 
-  constructor(executable) {
-    this.#ready = new Promise((resolve, reject) => { this.#resolveReady = resolve; this.#rejectReady = reject })
+  constructor(executable, { socketPath, dispatch } = {}) {
     const { port1, port2 } = new MessageChannel()
     this.#port = port1
+    this.#peer = new Peer({
+      send: frame => this.#port.postMessage({ frame }),
+      abort: () => this.#port.postMessage({ abort: true }),
+      dispatch: dispatch ?? (() => { throw new Error('application has no exported service target') }),
+      pump: done => {
+        const sequence = Atomics.load(this.#signal, 0)
+        let packet
+        while ((packet = receiveMessageOnPort(this.#port))) this.#receive(packet.message)
+        if (!done()) Atomics.wait(this.#signal, 0, sequence)
+      },
+    })
     this.#port.on('message', message => this.#receive(message))
     this.#worker = new Worker(new URL('./io-worker.mjs', import.meta.url), {
-      workerData: { executable, port: port2, signal: this.#signal }, transferList: [port2],
+      workerData: { executable, socketPath, port: port2, signal: this.#signal }, transferList: [port2],
     })
-    this.#worker.on('error', error => this.#close(error))
+    this.#worker.on('error', error => this.#peer.close(error))
     this.#exited = new Promise(resolve => this.#worker.once('exit', code => {
-      this.#close(new Error(`Rust communication worker exited (${code})`))
+      this.#peer.close(new Error(`communication worker exited (${code})`))
       this.#port.close()
       resolve(code)
     }))
   }
-
+  #receive(message) {
+    if (message?.ready) { this.pid = message.pid; this.#peer.start(); return }
+    if (message?.closed) { this.#peer.close(new Error(message.closed)); return }
+    this.#peer.receive(message)
+  }
   static async launch(executable, config) {
     const process = new Process(executable)
     try {
-      await process.#ready
+      await process.#peer.ready
       await process.callAsync('', 'mount', { config })
       return process
     } catch (error) {
@@ -42,59 +50,22 @@ export class Process {
       throw error
     }
   }
-
-  #close(error) {
-    if (this.#closed) return
-    this.#closed = error
-    this.#rejectReady(error)
-    for (const pending of this.#pending.values()) pending.finish(undefined, error)
-    this.#pending.clear()
+  static async connect(socketPath, dispatch) {
+    const process = new Process(undefined, { socketPath, dispatch })
+    try { await process.#peer.ready; return process }
+    catch (error) { process.#port.postMessage({ abort: true }); await process.#exited; throw error }
   }
-
-  #receive(message) {
-    if (message?.ready) { this.pid = message.pid; this.#resolveReady(); return }
-    if (message?.closed) { this.#close(new Error(message.closed)); return }
-    const pending = this.#pending.get(message?.id)
-    if (!pending || !['ok', 'error'].includes(message.status)) {
-      this.#close(new Error('invalid response from Rust process'))
-      this.#port.postMessage({ abort: true })
-      return
-    }
-    this.#pending.delete(message.id)
-    const error = message.status === 'error' ? Object.assign(new Error(message.message), { name: message.name }) : undefined
-    pending.finish(message.value, error)
-  }
-
-  #send(target, method, args, finish) {
-    if (this.#closed) throw this.#closed
-    const id = ++this.#next
-    if (!Number.isSafeInteger(id)) throw new Error('call identifiers exhausted')
-    const frame = encode({ id, target, method, args })
-    this.#pending.set(id, { finish })
-    this.#port.postMessage({ frame, dispose: target === '' && method === 'dispose' })
-  }
-
-  call(target, method, args) {
-    let done = false, value, error
-    this.#send(target, method, args, (result, failure) => { done = true; value = result; error = failure })
-    while (!done) {
-      const sequence = Atomics.load(this.#signal, 0)
-      let packet
-      while ((packet = receiveMessageOnPort(this.#port))) this.#receive(packet.message)
-      if (!done) Atomics.wait(this.#signal, 0, sequence)
-    }
-    if (error) throw error
-    return value
-  }
-
-  callAsync(target, method, args) {
-    return new Promise((resolve, reject) => this.#send(target, method, args, (value, error) => error ? reject(error) : resolve(value)))
-  }
-
+  call(target, method, args) { return this.#peer.invoke(target, method, args) }
+  callAsync(target, method, args) { return this.#peer.invokeAsync(target, method, args) }
+  release(value) { this.#peer.release(value) }
+  drain() { return this.#peer.drain() }
+  closed() { return this.#exited }
   async dispose() {
+    this.#port.postMessage({ dispose: true })
     try { await this.callAsync('', 'dispose', null) }
     finally {
-      this.#close(new Error('plugin has been disposed'))
+      this.#peer.close(new Error('plugin has been disposed'))
+      this.#port.postMessage({ end: true })
       await this.#exited
     }
   }

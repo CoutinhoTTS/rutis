@@ -271,7 +271,7 @@ fn generate(
                     let js = camel(&name.to_string());
                     let ty = ts_type(&arg.ty)?;
                     decode.push_str(&format!(
-                        "let {name}: {} = ::rutis_interop::decode(args[{}].clone())?; {}\n",
+                        "let {name}: {} = ::rutis_interop::decode(args[{}].clone().json()?)?; {}\n",
                         arg.ty.to_token_stream(),
                         args_rust.len(),
                         validate(&name.to_string(), &ty)
@@ -319,15 +319,20 @@ fn generate(
                 };
                 let invoke = format!("service.{rust_name}({}){wait}{error}", args_rust.join(", "));
                 let returned = if output_ts == "void" {
-                    format!("{invoke}; Ok(::rutis_interop::serde_json::Value::Null)")
+                    format!("{invoke}; Ok(::rutis_interop::rpc::Value::Undefined)")
                 } else {
-                    format!("let result: {} = {invoke}; {} ::rutis_interop::serde_json::to_value(result).map_err(|error| ::rutis_interop::Error::Value(error.to_string()))", output.to_token_stream(), validate("result", &output_ts))
+                    format!("let result: {} = {invoke}; {} ::rutis_interop::serde_json::to_value(result).map(::rutis_interop::rpc::Value::from).map_err(|error| ::rutis_interop::Error::Value(error.to_string()))", output.to_token_stream(), validate("result", &output_ts))
+                };
+                let returned = if sig.asyncness.is_some() {
+                    format!("Ok(::rutis_interop::rpc::Value::future(async move {{ {returned} }}))")
+                } else {
+                    returned
                 };
                 arms.push_str(&format!(r#"({key:?}, {rust_name:?}) => {{
-                    let args = args.as_array().ok_or_else(|| ::rutis_interop::Error::Value("expected argument array".into()))?;
+                    let args = args.list()?;
                     if {wrong_arity} {{ return Err(::rutis_interop::Error::Value("wrong argument count".into())); }}
                     {decode}
-                    let service = &self.{field};
+                    let service = self.{field}.clone();
                     {returned}
                 }},"#));
                 let async_js = if sig.asyncness.is_some() {
@@ -411,10 +416,10 @@ fn generate(
         }}
     }}
     impl ::rutis_interop::server::Dispatch for Exports {{
-        fn call<'a>(&'a self, target: &'a str, method: &'a str, args: ::rutis_interop::serde_json::Value) -> ::rutis::BoxFuture<'a, Result<::rutis_interop::serde_json::Value, ::rutis_interop::Error>> {{
-            Box::pin(async move {{ match (target, method) {{ {arms}
+        fn invoke(&self, target: &str, method: &str, args: ::rutis_interop::rpc::Value) -> ::rutis_interop::rpc::Reply {{
+            match (target, method) {{ {arms}
                 _ => Err(::rutis_interop::Error::Value("unknown service method".into()))
-            }} }})
+            }}
         }}
     }}
     async fn mount(ctx: ::rutis::Ctx, config: ::rutis_interop::serde_json::Value) -> Result<Exports, ::rutis_interop::Error> {{

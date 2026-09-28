@@ -140,7 +140,7 @@ Rust 适配器提供独立推进的后台执行器，供可迁移的异步回调
 
 Send 只证明跨线程传递的内存安全，不证明运行时独立性。只把任务交给后台线程，或在新线程调用原 current_thread 的 Handle.block_on，都不能代替原 I/O / timer 驱动。生成器不能从 Send 推断“可透明迁移”；可由适配器确定的执行环境才登记为后台可执行，其余保留原归属并诊断已知冲突。[Rust Send](https://doc.rust-lang.org/std/marker/trait.Send.html)、[Tokio Handle::block_on](https://docs.rs/tokio/latest/tokio/runtime/struct.Handle.html#method.block_on)。
 
-[执行器实验](../crates/rutis-interop/tests/executor_probe.rs)已验证独立后台任务完成、原 Handle / timer 仍需原驱动，以及 Node 同步消息泵能执行立即回调但不能推进 timer / Promise continuation。实验采用测试专用消息，不代表生产回调协议或 SyncWaitCycle 检测已完成。
+[执行器实验](../crates/rutis-interop/tests/executor_probe.rs)保留原 Handle / timer 的反例；固定延时只作演示。正式 [RPC 回归](../crates/rutis-interop/tests/rpc_callbacks.rs)现覆盖双向同步回调、独立后台执行、已知 current_thread / Node 等待环及显式关闭。后台入口要求适配器明确确认执行环境独立；自动回调绑定、借用和跨会话环仍未实现。
 
 ## 4. 服务读取、对象与释放
 
@@ -301,7 +301,7 @@ Cordis 的 internal/dispatch 把 emit 与 parallel 都标作 emit。监听代理
 | 错误结构 | parallel 由 Cordis 生成一层 AggregateError；保留 errors 的登记顺序及嵌套错误，不在代理层再统一包一层；对照 name、message、cause、errors，stack 中允许存在跨进程帧差异 |
 | bail / once / 过滤 | bail 判断返回的 Promise 本身；跨端逐监听顺序、短路、once 重入、过滤及分发中注销仍须端到端对照，前两项验证不能替代这些检查 |
 
-[8 项监听对照](../interop/node/test/fixtures/event-mount.test.mjs)已让真实 Rust 插件的生成方法参与 Cordis 队列。[rutis 队列原型](../crates/rutis/tests/event_queue.rs)另已覆盖原生登记和 Rust 发起的六种分发，但使用进程内测试队列；两组证据尚未连接成跨进程事件实现。当前只验证了普通远端错误参与本地汇总；[远端嵌套错误的复现](../crates/rutis-interop/tests/error_shape_probe.rs)确认现有协议会丢失 errors / cause，完整错误结构仍需 P2 实现。
+[8 项监听对照](../interop/node/test/fixtures/event-mount.test.mjs)已让真实 Rust 插件的生成方法参与 Cordis 队列。[rutis 队列原型](../crates/rutis/tests/event_queue.rs)另已覆盖原生登记和 Rust 发起的六种分发，但使用进程内测试队列；两组证据尚未连接成跨进程事件实现。[错误往返回归](../crates/rutis-interop/tests/error_shape_probe.rs)已验证远端嵌套 AggregateError 的成员顺序、cause、共享及循环引用经过 Rust 转发仍保留；自定义错误类仅保留错误字段，不还原其原型及任意附加成员。
 
 **同步成本：** Rust 同步入口访问 Cordis 队列需要往返，其中 Rust 监听还需要反向调用；Cordis 调用单个 Rust 同步监听同样阻塞本次分发线程。通信 Worker 不能消除这些成本。连接明确采用该队列，不在运行期静默改变事件规则或总线归属。
 
@@ -451,7 +451,16 @@ P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响�
 
 [PR #73](https://github.com/arcships/rutis/pull/73) 是[双向值方法切片](../examples/native-mount/README.md)。本轮修正为：导出时捕获真实对象，方法调用不重新查槽位；两端先启动原生清理，再等待在途调用。回归覆盖“disposer 解除等待”、旧代理不跟随换值，以及 Rust 导出 Context 关闭后的独立对象。
 
-当前按名称编码的目标只定位一次挂载内已经捕获的对象，并非完整引用协议。新读取拿到新 B、运行期注册代次、引用计数、invoke / await 分离、反向回调、事件和包接入仍按路线图开发；不能把这次修复写成这些能力已经交付。
+P2 已接入同一双向连接：invoke 返回普通值或 Future / Promise 引用，await 单独等待；拥有的函数 / 异步结果采用计数授予及 release，接收先解码持有再排队。同步消息泵只处理关联调用；等待开始时也检查已排队回调和已经运行的异步等待，避免切换等待窗口丢失关联。错误使用图传输，不重复包装 AggregateError。
+
+| 已交付边界 | 仍待实现 |
+| --- | --- |
+| 固定协议 version=1，挂载前核对 | §2.4 的 minor、能力及契约摘要检查 |
+| JSON 值、拥有的函数 / Future、同会话代理复用 | 通用对象 / 属性、自动回调类型绑定、借用 / FnMut / FnOnce、弱引用、迭代及跨会话转交 |
+| 原 current_thread / Node 可证环报错；每连接共享独立后台执行器 | 构建风险诊断、自动确认后台可执行环境、多 worker 亲和与跨会话等待图 |
+| 显式关闭取消后台异步任务并使远端引用失效；不等待 JS GC | 原生不让出的同步任务无法强制取消；完整生命周期和独立对象有效期属于 P3 |
+
+生成的服务方法仍定位挂载时捕获的对象；新读取取得新 B、动态注册代次 / 依赖、原生事件接线及包接入按路线图继续。拥有回调的协议测试不等于原始插件回调接口已自动接入。
 
 验收必须同时包含原生结果 / 顺序 / 身份对照，以及 IPC 次数、吞吐、p50 / p95 / p99 和调用线程停顿。启用的缓存命中路径须做到零 IPC；无法启用的路径记录未满足项。动态 getter 和同步远端事件必须单独展示成本。阶段用例通过后仍要运行 §7 全链路，不再用孤立方法测试代替完整兼容性。
 

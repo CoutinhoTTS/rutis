@@ -20,7 +20,11 @@ async fn captured_object_survives_the_export_context_shutdown() {
     ctx.shutdown().await.unwrap();
     // The original Counter owns its value independently of its Context.
     assert_eq!(
-        exports.call("counter", "current", json!([])).await.unwrap(),
+        exports
+            .invoke("counter", "current", json!([]).into())
+            .unwrap()
+            .json()
+            .unwrap(),
         json!(7.0)
     );
 }
