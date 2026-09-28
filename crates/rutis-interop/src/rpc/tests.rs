@@ -213,3 +213,21 @@ async fn handshake_and_release_count_fail_closed() {
     assert!(peer.0.exports.lock().unwrap().entries.is_empty());
     assert!(peer.invoke("", "test", Value::Undefined).is_err());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_close_interrupts_a_writer_whose_peer_stopped_reading() {
+    let (peer, mut remote) = pair();
+    send(&mut remote, Frame::Hello { version: VERSION });
+    peer.ready().await.unwrap();
+    let (entered, blocked) = mpsc::channel();
+    let writing = peer.clone();
+    let writer = std::thread::spawn(move || {
+        let mut stream = writing.0.writer.lock().unwrap();
+        entered.send(()).unwrap();
+        stream.write_all(&vec![0; 8 * 1024 * 1024])
+    });
+    blocked.recv().unwrap();
+    peer.close(Error::Transport("explicit close".into()));
+    assert!(writer.join().unwrap().is_err());
+    peer.closed().await;
+}

@@ -464,6 +464,7 @@ pub trait Dispatch: Send + Sync + 'static {
 }
 struct Peer {
     writer: Mutex<UnixStream>,
+    closer: UnixStream,
     calls: Mutex<Calls>,
     exports: Mutex<Exports>,
     imports: Mutex<HashMap<u64, Weak<Import>>>,
@@ -487,6 +488,7 @@ impl Connection {
         stream.set_nonblocking(false).map_err(transport)?;
         let reader = stream.try_clone().map_err(transport)?;
         let peer = Self(Arc::new(Peer {
+            closer: stream.try_clone().map_err(transport)?,
             writer: Mutex::new(stream),
             calls: Mutex::new(Calls::default()),
             exports: Mutex::new(Exports::default()),
@@ -541,6 +543,11 @@ impl Connection {
         }
     }
     pub fn close(&self, error: Error) {
+        // Interrupt a blocked write before taking the writer lock. Serialize
+        // table teardown with encoding/sending so no export can be added after
+        // teardown and no partial encoding rollback races the cleared table.
+        let _ = self.0.closer.shutdown(Shutdown::Both);
+        let writer = self.0.writer.lock().unwrap();
         let (waiting, incoming, awaiting) = {
             let mut calls = self.0.calls.lock().unwrap();
             if calls.closed.is_some() {
@@ -555,7 +562,7 @@ impl Connection {
         };
         let exports = std::mem::take(&mut *self.0.exports.lock().unwrap());
         self.0.imports.lock().unwrap().clear();
-        let _ = self.0.writer.lock().unwrap().shutdown(Shutdown::Both);
+        drop(writer);
         self.0.ready.send_if_modified(|ready| {
             if ready.is_none() {
                 *ready = Some(Err(error.clone()));
@@ -747,7 +754,9 @@ impl Connection {
         if result.is_err() {
             let mut exports = self.0.exports.lock().unwrap();
             for id in grants {
-                let entry = exports.entries.get_mut(&id).unwrap();
+                let Some(entry) = exports.entries.get_mut(&id) else {
+                    continue;
+                };
                 entry.grants -= 1;
                 if entry.grants == 0 {
                     let entry = exports.entries.remove(&id).unwrap();
@@ -891,6 +900,9 @@ impl Connection {
             .ok_or_else(|| transport("unknown or released reference"))
     }
     fn receive(&self, frame: Frame) -> Result<(), Error> {
+        if let Some(error) = &self.0.calls.lock().unwrap().closed {
+            return Err(error.clone());
+        }
         if let Frame::Hello { version } = frame {
             if version != VERSION || self.0.ready.borrow().is_some() {
                 return Err(transport("incompatible or duplicate protocol handshake"));
@@ -1001,8 +1013,11 @@ impl Connection {
             Accepted::Call(object, _) | Accepted::Await(object) => object.executor.handle.clone(),
             _ => self.0.executor.clone(),
         };
-        let queued = {
+        let delivery = {
             let mut calls = self.0.calls.lock().unwrap();
+            if let Some(error) = &calls.closed {
+                return Err(error.clone());
+            }
             let sequence = incoming
                 .id
                 .strip_prefix("node:")
@@ -1029,15 +1044,14 @@ impl Connection {
                     })
                 });
             if let Some(waiter) = waiter {
-                waiter.send(Message::Invoke(incoming)).map_err(transport)?;
-                None
+                Ok((waiter, incoming))
             } else {
                 let id = incoming.id.clone();
                 calls.incoming.insert(id.clone(), incoming);
-                Some(id)
+                Err(id)
             }
         };
-        if let Some(id) = queued {
+        if let Err(id) = delivery {
             let peer = self.clone();
             handle.spawn(async move {
                 let incoming = peer.0.calls.lock().unwrap().incoming.remove(&id);
@@ -1045,10 +1059,17 @@ impl Connection {
                     peer.execute(incoming, false);
                 }
             });
+        } else if let Ok((waiter, incoming)) = delivery {
+            // A dropped receiver may release imported arguments. Do not run
+            // their destructors (and protocol writes) under the calls lock.
+            waiter.send(Message::Invoke(incoming)).map_err(transport)?;
         }
         Ok(())
     }
     fn execute(&self, incoming: Incoming, sync: bool) {
+        if self.0.calls.lock().unwrap().closed.is_some() {
+            return;
+        }
         let Incoming {
             id,
             path,
