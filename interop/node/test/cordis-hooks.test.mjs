@@ -150,6 +150,102 @@ test('internal/dispatch cannot replace native dispatch or its result and conflat
   assert.equal(localCalls, 3)
 })
 
+// Native baselines for future cross-process listener comparisons. These do
+// not claim to exercise a transport or the proposed Rust event entrypoint.
+test('native emit returns after synchronous prefixes while parallel waits for the same listeners', async t => {
+  const root = new Context()
+  t.after(() => root.fiber.dispose())
+  const started = []
+  const completed = []
+  const releases = []
+  for (const name of ['A', 'B']) {
+    root.on('audit', () => {
+      started.push(name)
+      return new Promise(resolve => releases.push(() => {
+        completed.push(name)
+        resolve()
+      }))
+    })
+  }
+  assert.equal(root.emit('audit'), undefined)
+  assert.deepEqual(started, ['A', 'B'])
+  assert.deepEqual(completed, [])
+  releases.splice(0).forEach(release => release())
+  started.length = 0
+  completed.length = 0
+
+  let settled = false
+  const pending = root.parallel('audit').then(() => { settled = true })
+  assert.deepEqual(started, ['A', 'B'])
+  releases[1]()
+  await Promise.resolve()
+  assert.equal(settled, false)
+  assert.deepEqual(completed, ['B'])
+  releases[0]()
+  await pending
+  assert.equal(settled, true)
+  assert.deepEqual(completed, ['B', 'A'])
+})
+
+test('native emit stops on a synchronous throw while parallel preserves ordered nested errors', async t => {
+  const root = new Context()
+  t.after(() => root.fiber.dispose())
+  const cause = new Error('original cause')
+  const first = new Error('sync failure', { cause })
+  const nested = new AggregateError([new TypeError('inner failure')], 'nested', { cause })
+  const calls = []
+  let rejectSecond
+  root.on('audit', () => { calls.push('A'); throw first })
+  root.on('audit', () => {
+    calls.push('B')
+    return new Promise((resolve, reject) => { rejectSecond = reject })
+  })
+  root.on('audit', () => { calls.push('C') })
+
+  assert.throws(() => root.emit('audit'), error => error === first)
+  assert.deepEqual(calls, ['A'])
+  calls.length = 0
+  const pending = root.parallel('audit')
+  assert.deepEqual(calls, ['A', 'B', 'C'])
+  rejectSecond(nested)
+  await assert.rejects(pending, error => {
+    assert.ok(error instanceof AggregateError)
+    assert.equal(error.name, 'AggregateError')
+    assert.equal(error.message, '')
+    assert.equal(error.cause, undefined)
+    assert.deepEqual(error.errors, [first, nested])
+    assert.equal(error.errors[0], first)
+    assert.equal(error.errors[1], nested)
+    assert.equal(error.errors[0].cause, cause)
+    assert.equal(error.errors[1].errors[0].name, 'TypeError')
+    assert.equal(error.errors[1].cause, cause)
+    return true
+  })
+})
+
+test('native bail returns a Promise itself and emit does not turn its rejection into a synchronous throw', async t => {
+  const root = new Context()
+  t.after(() => root.fiber.dispose())
+  const failure = new Error('async failure')
+  const result = Promise.reject(failure)
+  // Observe the original rejection ourselves; native emit does not await it.
+  const observed = assert.rejects(result, error => error === failure)
+  let laterCalls = 0
+  root.on('audit', () => result)
+  root.on('audit', () => { laterCalls++ })
+  assert.equal(root.bail('audit'), result)
+  assert.equal(laterCalls, 0)
+  assert.equal(root.emit('audit'), undefined)
+  assert.equal(laterCalls, 1)
+  await observed
+  await assert.rejects(root.parallel('audit'), error => {
+    assert.ok(error instanceof AggregateError)
+    assert.deepEqual(error.errors, [failure])
+    return true
+  })
+  assert.equal(laterCalls, 2)
+})
+
 test('service and status notifications observe already committed registration and availability', async t => {
   const root = new Context()
   t.after(() => root.fiber.dispose())

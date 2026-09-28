@@ -122,9 +122,23 @@ JS async 函数的同步前缀在 invoke 时执行，返回的 Promise 已开始
 
 接收前台必须在处理下一帧前，同步完成当前帧的协议校验、引用解码、导入计数和本地持有登记，再把带持有的调用状态排入业务队列。这里不执行用户反序列化或回调，也不能 await。后续 release 可以先于业务任务完成，却不能先于它取得持有。Node 在对象所属线程的有序消息泵完成此步骤，I/O Worker 不越过它独立处理 release；Rust 的引用表使用同样的受理顺序。异步完成独立匹配只适用于已经取得持有的任务。
 
-通信线程只收发。同步等待器只执行当前调用链所需的反向操作；控制消息仍可处理。JS 闭包留在所属线程，Rust 回调保留原执行器及借用约束。调用业务前释放全部会话锁和引用表锁；无关业务不因等待而任意重入。
+通信线程只收发。同步等待器只执行当前调用链所需的反向操作；控制消息仍可处理。JS 闭包留在所属线程；Rust 同步回调及有执行器亲和性的异步工作保留原环境，满足 §3.3 条件的异步工作交适配器后台执行器。调用业务前释放全部会话锁和引用表锁；无关业务不因等待而任意重入。
 
 **消息泵不等于事件循环 / Tokio 调度器。** 两端的同步等待都占用调用线程；§9 定义无法透明处理的调度环，不能把通信 Worker 或多线程运行时当成通用解法。
+
+### 3.3 Rust 后台执行与 Node 同步等待
+
+Rust 适配器提供独立推进的后台执行器，供可迁移的异步回调运行；不改变原插件源码或同步 / 异步签名。调用者可以保持同步等待，后台任务完成后经原调用链返回结果。执行器由适配器运行时持有并统一清理，不为每次调用新建线程或运行时。
+
+| 情况 | 执行规则 |
+| --- | --- |
+| 两端普通同步回调 | 在所属线程的同步消息泵执行；允许嵌套反向调用，不要求改为异步 |
+| Rust 可迁移的异步回调 | Future 与跨线程传递的结果满足 Send，持有和借用期安全，且执行器及资源归属允许后台推进时，交后台执行器；普通 spawn 还要求 'static，不能延长借用来凑类型 |
+| Rust 已绑定原运行时的工作 | 保存的 Handle、已创建的 timer / I/O、原运行时任务或生命周期等待仍可能依赖被阻塞线程；即使 Future 是 Send，也不自动迁移或承诺能完成 |
+| Node 回调返回 Promise | invoke 返回 Promise 引用，不强行等待；同步前缀仍在原线程执行 |
+| Node 同步栈必须等本线程后续异步工作 | 通信 Worker 不能推进该线程的 timer / Promise continuation；已知等待环按 §9 报 SyncWaitCycle，不嵌套运行 Node 事件循环 |
+
+Send 只证明跨线程传递的内存安全，不证明运行时独立性。只把任务交给后台线程，或在新线程调用原 current_thread 的 Handle.block_on，都不能代替原 I/O / timer 驱动。生成器不能从 Send 推断“可透明迁移”；可由适配器确定的执行环境才登记为后台可执行，其余保留原归属并诊断已知冲突。[Rust Send](https://doc.rust-lang.org/std/marker/trait.Send.html)、[Tokio Handle::block_on](https://docs.rs/tokio/latest/tokio/runtime/struct.Handle.html#method.block_on)。
 
 ## 4. 服务读取、对象与释放
 
@@ -250,19 +264,18 @@ FinalizationRegistry 只用于正常运行期间归还未显式释放的导入�
 
 ## 5. 事件路由
 
-每个连接的事件键及作用域选择一个真实原生总线拥有监听顺序，另一端的监听逐个登记进去，effect 仍归原注册插件。并发登记以拥有方提交为序，prepend、过滤和 once 保留原规则。
+采用 **Cordis 持有跨端事件的统一监听队列**：Rust 监听逐个注册为代理，effect 仍归原注册插件。并发登记以 Cordis 提交为序，prepend、过滤和 once 保留原规则。该路线不修改 Cordis，但需要 rutis 核心增加按键接管监听登记与事件分发的能力；将其列为独立最小变更，P1 验证、P4 接入，缺口未补齐前事件仍做不全。
 
 ```text
-原监听 A 登记 -- 完成
-远端 B 登记  -- invoke 登记一个监听代理 -- 完成
-原监听 C 登记 -- 完成
-                    |
-                 [ A, B, C ]
-                    |
-             一次原生分发，各调用一次
+JS 监听 A -------\
+Rust 监听 B 代理 --+--> Cordis [ A, B, C ]
+JS 监听 C -------/            |
+                       原生 Cordis 分发
+                              |
+                       B 单独跨进程调用
 ```
 
-原生接口须提供带作用域、once 资格和调用期持有的监听快照，并允许入口采用所需的原生分发算法。不把远端整条总线包装成一个监听，不双边重复广播，不复制第三套全局调度器。此模型是验收要求：Cordis 的监听登记可拦截，但现有分发入口不能改道到 rutis 总线，故该归属组合当前做不到，见 §8 / §9；不能把图示视为已可实现的通用路由。
+Cordis 原生入口继续使用原生快照、过滤及分发算法。Rust 侧要按键接入登记、注销和分发，并保留自身排队、同步性及返回规则；不能用观察通知代替接管，也不把整条远端总线包装成一个监听。以下是待验收的行为，不表示现有两个内核已能全部接入。
 
 | 入口 | 调用及等待 |
 | --- | --- |
@@ -278,7 +291,15 @@ FinalizationRegistry 只用于正常运行期间归还未显式释放的导入�
 
 注销撤掉后续资格，已开始分发按原快照收尾；once 只由登记来源的原生包装消费一次，不双重包装。同键重入检查仍归原框架。
 
-**同步成本：** 若事件入口能够路由，总线归 rutis 时，每次 Cordis 同步 emit / bail 至少需要一次主线程往返；其中每个 JS 监听还需反向调用，使同步前缀回到原线程执行。当前该路由缺失，即使具备入口也不能消除这段阻塞。总线归 Cordis 时 Rust 同步入口有对称代价。总线归属由连接固定，不按某次调用临时切换来隐藏成本。
+Cordis 的 internal/dispatch 把 emit 与 parallel 都标作 emit。监听代理**不根据这个标签猜测等待策略**：普通函数执行 invoke，原同步异常当场抛出，普通值直接返回，异步结果返回 Promise；由原生 emit 忽略结果、parallel 等待并汇总。不能把所有代理声明成 async，否则同步异常会变成 rejected Promise，emit 的停止位置也会改变。
+
+| 对照项目 | 验收要求 |
+| --- | --- |
+| emit / parallel | 同一监听代理在两入口下保留同步前缀；emit 不等待 Promise，parallel 等全部监听完成；分别覆盖同步抛错和异步拒绝 |
+| 错误结构 | parallel 由 Cordis 生成一层 AggregateError；保留 errors 的登记顺序及嵌套错误，不在代理层再统一包一层；对照 name、message、cause、errors，stack 中允许存在跨进程帧差异 |
+| bail / once / 过滤 | bail 判断返回的 Promise 本身；跨端逐监听顺序、短路、once 重入、过滤及分发中注销仍须端到端对照，前两项验证不能替代这些检查 |
+
+**同步成本：** Rust 同步入口访问 Cordis 队列需要往返，其中 Rust 监听还需要反向调用；Cordis 调用单个 Rust 同步监听同样阻塞本次分发线程。通信 Worker 不能消除这些成本。连接明确采用该队列，不在运行期静默改变事件规则或总线归属。
 
 ## 6. 依赖与生命周期
 
@@ -358,7 +379,7 @@ Rust Audit -> 导出 / 导入 Audit -> Cordis Search
 | 事件 | 路由指定键的登记、注销及分发；提供原生快照和分发算法入口；本地后端入口不得再次进入路由 |
 | 挂载生命周期 | 外层原生 update / restart 转发及完成关联；保留来源 fiber 钩子、原生子树和清理所有权 |
 
-Cordis 覆盖审计基于[锁定的包](../interop/node/package-lock.json) `@deepseek-ai/cordis 4.0.1` 的 src/reflect.ts、src/events.ts、src/fiber.ts、src/context.ts 及实际发布入口 lib/index.js。[7 项原生验证](../interop/node/test/cordis-hooks.test.mjs)直接使用公开 API，不替换方法或写入框架内部表；它们证明入口能力与边界，不代表跨进程功能已经完成。
+Cordis 覆盖审计基于[锁定的包](../interop/node/package-lock.json) `@deepseek-ai/cordis 4.0.1` 的 src/reflect.ts、src/events.ts、src/fiber.ts、src/context.ts 及实际发布入口 lib/index.js。[原生验证](../interop/node/test/cordis-hooks.test.mjs)包含 7 项入口检查与 3 项事件行为基准，直接使用公开 API，不替换方法或写入框架内部表；跨进程代理还须用相同场景对照，不能由这些测试宣告功能完成。
 
 | 能力 | 公开入口与依据 | 覆盖结论 |
 | --- | --- | --- |
@@ -366,10 +387,12 @@ Cordis 覆盖审计基于[锁定的包](../interop/node/package-lock.json) `@dee
 | 换值 | handler.set 的 internal/set waterfall，最终 next 调用 reflect.set | 可包住属性赋值；直接 set 绕过钩子，next 内还可能有后续用户钩子。§4.1 的通用原子提交窗口未满足 |
 | 注册与可用性 | provide / notify 的 internal/service；_updateState 的 internal/status | 可观察提交后的注册 / 可用性变化；不能提供提交前的版本失效边界。注入快照和 isolate 等缺口见 §4.1 |
 | 监听登记 / 注销 | EventsService.on 用 internal/listener bail 的返回值替代登记；once 包装在调用监听前执行 disposer | 可逐监听接入，保留 options 和原 once 包装；替代登记须自行用所属 Context.effect 绑定注销，原 register 已被跳过。登记钩子不提供分发改道 |
-| 原生事件分发 | dispatch 调用 internal/dispatch 后仍从本地 _hooks 取监听，忽略观察者返回值；parallel 和 emit 均报告模式 emit | 不能用该钩子把原 emit / parallel / bail 等改道至 rutis 总线。观察转发不能替换返回值、等待策略或单一监听快照 |
+| 原生事件分发 | dispatch 调用 internal/dispatch 后仍从本地 _hooks 取监听，忽略观察者返回值；parallel 和 emit 均报告模式 emit | 不能改道至 rutis 总线。§5 改为验证 Cordis 持有队列、逐个登记 Rust 监听代理；等待及错误汇总交原生入口，不依靠观察标签区分模式 |
 | update / 子插件 | ACTIVE fiber.update 返回 internal/update waterfall 结果；非 ACTIVE 分支在钩子前返回；子插件仍由原 registry / fiber 管理 | ACTIVE 更新可转发完成；Pending 走原生延后激活路径，不宣称钩子覆盖。完整更新与子插件注册投影待 P3 对照验收 |
 
 rutis 的接入能力单独评估：优先公开入口，确需核心扩展时另列最小差异、原生行为测试及评审，不把协议类型放进核心。当前 intercept_require_as 不等于 get 全覆盖或提交边界；本 PR 不修改 rutis 核心。依据：[Context](../crates/rutis/src/ctx.rs)、[注册表](../crates/rutis/src/registry.rs)、[事件](../crates/rutis/src/bus.rs)、[fiber](../crates/rutis/src/fiber.rs)。两框架清理顺序的差别由适配器自己的组合 effect 处理，不重排原业务 effects。
+
+事件路线所需的 rutis 改动明确列为独立核心扩展：仅按键接管监听登记 / 注销和分发，保留未接管键的原路径；现有 observe_dispatch 不能取消分发，subscriptions 仅提供诊断信息。P1 给出最小接口差异及原生回归证据，P4 接入；不把通信协议、进程管理或第三套事件调度器放进核心。该扩展未交付前，原 Rust 插件的这些操作无法统一进入 Cordis 队列，完整事件要求保持未满足。
 
 P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响场景，未知项保留待验证，不能先判不兼容。生成契约与应用连接已要求的缺失能力，在原插件启动前报告；动态行为不能靠静态类型穷举，运行时新发现的缺失能力须在对应注册 / 操作生效前明确失败。两者都不静默降级，也不计作完成任意插件目标。
 
@@ -377,34 +400,35 @@ P1 输出逐项“可覆盖 / 部分覆盖 / 做不到”的证据及受影响�
 
 | 组合 | 判定与处理 |
 | --- | --- |
-| Cordis 原生事件入口分发到归 rutis 的单一总线 | §8 的 dispatch 控制流没有可替换入口；跨端全局顺序、短路、once / 过滤组合无法保证。依赖此连接的挂载启动前报告缺失能力，不用双广播替代，也不自动改总线归属。归 Cordis 的连接须独立验收，不能由此推断所有跨语言事件都做不到 |
+| 两框架内核均不改，原生事件入口统一跨端分发 | Cordis 入口不能改道至 rutis；§5 选择 Cordis 持有队列并单独补 rutis 接管入口，明确放宽“rutis 核心也完全不改”的条件。扩展交付前，依赖完整跨端事件的挂载报告缺失能力；不以双广播或局部验证宣告完成 |
 | Cordis 任意原生绑定使用零 IPC、无陈旧窗口的版本缓存 | 注册 / 可用性只有提交后通知，直接 set 等写入绕过钩子，§4.1 的覆盖不足；跨进程读者可能在写入后、版本更新前命中旧代理。逐次原生解析保留行为但承担 IPC，零 IPC 性能目标未满足；要求该缓存能力的挂载启动前报告缺失，不启用不可靠缓存 |
-| 原同步签名等待被自己阻塞的执行器 | 等待环；需要真正的异步边界，不能假称 Worker 或消息泵解决 |
+| 原同步签名必须等被自己阻塞的唯一执行器 | §3.3 的立即回调与可迁移 Rust 异步工作可以处理；仍依赖被阻塞 Node 线程或原 Rust 执行器的工作形成等待环，不能靠 Send 或通信 Worker 宣称解决 |
 | 不同具体类型 / 事件契约无损替换 | 生成忠于来源的外语绑定；不兼容的既有接口明确诊断，不能默改类型或短路规则 |
 | 无提取工具链 / 匹配产物，仍首次生成完整 Rust API | 当前选定的 rustdoc 路线不能满足；安装成本必须明确 |
 | 永久保留远端对象，同时确定结束其进程 | 不能同时保证；显式 close 是会话有效期的终点 |
 
 两端调度冲突必须分别验收：
 
-| 调用方向 | 具体等待环 |
+| 调用方向 | 执行选择与剩余等待环 |
 | --- | --- |
 | Node → Rust → JS 回调 | Node 同步等待 Rust，Rust 等回调的异步结果；回调的 timer / Promise 后续步骤需要被阻塞的 Node 主线程 |
-| Rust → JS → Rust 回调 | Process::call 在 Tokio worker 上 recv；JS 等回调结果；Rust 回调依赖该运行时的 spawn / timer / 生命周期任务；current_thread 无线程推进 |
+| Rust → JS → Rust 回调 | §3.3 条件满足时后台推进 Future；仍依赖被 recv 阻塞的原运行时 spawn / timer / 生命周期任务时形成等待环。Send 本身不能排除此情况 |
 | Tokio 多线程 | 只是增加可用 worker；嵌套或并发同步调用占满 worker 仍可饥饿，不能当作任意插件支持条件 |
 
-**能判定的等待环返回 SyncWaitCycle，不进入无限等待。** 错误携带相关调用链及被阻塞的执行器类别，通过生成接口的错误通道返回，不关闭无关会话，也不回滚已经发生的业务副作用。P2 按下表实现：
+构建时对已知同步等待与执行器依赖冲突给出带接口位置的诊断；只有潜在风险时警告，不把 async 回调一律禁用，也不宣称静态分析能穷举任意业务等待。**运行时能判定的等待环返回 SyncWaitCycle，不进入无限等待。** 错误携带相关调用链及被阻塞的执行器类别，通过生成接口的错误通道返回，不关闭无关会话，也不回滚已经发生的业务副作用。P2 按下表实现：
 
 | 判定点 | 检测与结果 |
 | --- | --- |
 | 同步等待入口 | 记录当前线程、Node / Tokio 执行器归属及 current_thread / 多 worker 类别。若操作已明确需要同一个被同步栈占用的执行器推进，在等待前报错；不因使用 current_thread 就拒绝所有同步 IPC |
 | invoke / 反向回调 | 普通同步回调可由当前调用链消息泵执行；只创建或返回异步结果引用同样允许。不能仅凭参数里有 async 回调就拒绝 |
+| Rust 异步调度 | 校验 §3.3 的 Send、持有期和已知执行环境条件，允许安全后台推进；记录实际依赖的执行器，不把“移到后台”当作删除原运行时依赖边 |
 | await 受理 | 未完成结果需要的唯一执行器已被本链同步等待占住，立即返回 SyncWaitCycle；例如 JS 等 Rust 回调 Future，而该 Future 需要被 recv 阻塞的 current_thread，反向 Node timer 情形相同。已经完成的结果不需推进执行器 |
 | 嵌套 / 跨会话转发 | 将父子调用、同步等待及已知执行器依赖关联；新增等待边形成可证环时拒绝该次等待，错误沿原链传回。检查包括本地把会话 B 调用转发给会话 A 的边 |
 | 多 worker 或业务内部等待 | 只对能证明的线程亲和等待或已知依赖环报 SyncWaitCycle；worker 数量不能证明没有饥饿。未暴露的业务锁 / 私有等待无法普遍检测，保留调用方的取消与期限，不能把超时冒充完整死锁检测 |
 
 调用链关联必须跟随异步任务和反向调用，不能在返回 Future 编号时丢失；同步栈退出时立即移除其阻塞标记，历史父子关联不等于仍在等待。所有拒绝路径释放该等待者的持有，但不提前释放仍在执行的原生调用 / 借用。要求无错误通道的既有签名无损呈现这些错误，仍属于下述类型边界。
 
-同步立即回调与创建后返回的 Promise / Future 本身不必形成上述等待环；它们仍须实现。把回调搬到另一运行时会改变执行环境，block_in_place 也不能通用支持 current_thread。当前方法切片没有反向回调，不能据其测试通过推断闭环已解决。[Node 线程通信](https://nodejs.org/api/worker_threads.html#worker_threadsreceivemessageonportport)、[libuv 循环规则](https://docs.libuv.org/en/v1.x/loop.html#c.uv_run)、[Tokio block_in_place](https://docs.rs/tokio/latest/tokio/task/fn.block_in_place.html)。
+同步立即回调、只返回 Promise / Future 引用及可安全后台推进的 Rust 工作必须支持。非 Send 或依赖原执行环境的回调不能任意迁移；block_in_place 也不能通用支持 current_thread。当前方法切片没有反向回调，不能据其测试通过推断闭环已解决。[Node 线程通信](https://nodejs.org/api/worker_threads.html#worker_threadsreceivemessageonportport)、[libuv 循环规则](https://docs.libuv.org/en/v1.x/loop.html#c.uv_run)、[Tokio block_in_place](https://docs.rs/tokio/latest/tokio/task/fn.block_in_place.html)。
 
 生成 foreign::Cache 不要求伪装成另一 crate 的 OriginalCache；但若要替换已有具体类型，或给没有错误通道的签名增加通信失败且禁止形状变化，差异必须单独确认。拒绝用例不等于完成“任意插件”目标。
 
