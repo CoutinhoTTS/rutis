@@ -962,6 +962,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-baseline"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-interop",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

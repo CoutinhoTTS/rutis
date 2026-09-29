@@ -5,9 +5,21 @@ use std::path::Path;
 mod rust;
 pub use rust::rutis_plugin;
 
+/// Generate Rust bindings for a Cordis plugin into `OUT_DIR/cordis.rs`.
 pub fn cordis_plugin(
     plugin: impl AsRef<Path>,
     node_package: impl AsRef<Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cordis_module(plugin, node_package, "cordis")
+}
+
+/// Generate Rust bindings for a Cordis plugin into `OUT_DIR/{module}.rs`.
+/// `plugin` is either a TypeScript source file or an installed package
+/// directory, which is analysed through its declared `types`.
+pub fn cordis_module(
+    plugin: impl AsRef<Path>,
+    node_package: impl AsRef<Path>,
+    module: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let plugin = plugin.as_ref().canonicalize()?;
     let node_package = node_package.as_ref().canonicalize()?;
@@ -34,12 +46,17 @@ pub fn cordis_plugin(
     struct Generated {
         rust: String,
         inputs: Vec<String>,
+        diagnostics: Vec<String>,
     }
     let generated: Generated = serde_json::from_slice(&output.stdout)?;
     for input in generated.inputs {
         println!("cargo:rerun-if-changed={input}");
     }
+    // Members that cannot be bound yet are listed, not silently dropped.
+    for diagnostic in generated.diagnostics {
+        println!("cargo:warning={diagnostic}");
+    }
     let output_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
-    std::fs::write(output_dir.join("cordis.rs"), generated.rust)?;
+    std::fs::write(output_dir.join(format!("{module}.rs")), generated.rust)?;
     Ok(())
 }

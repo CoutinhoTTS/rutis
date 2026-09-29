@@ -1,143 +1,453 @@
 import ts from 'typescript'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const keywords = new Set('as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while'.split(' '))
 function ident(name) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || ['self', 'Self', 'super', 'crate'].includes(name)) {
-    throw new Error(`cannot represent identifier ${JSON.stringify(name)} in Rust`)
+    throw new Unsupported(`cannot represent identifier ${JSON.stringify(name)} in Rust`)
   }
   return keywords.has(name) ? `r#${name}` : name
 }
-const snake = name => name.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)
+const snake = name => name.replace(/[A-Z]/g, (letter, index) => (index ? '_' : '') + letter.toLowerCase()).replace(/[^A-Za-z0-9_]/g, '_')
+const pascal = name => name.replace(/(^|[^A-Za-z0-9])([a-z])/g, (_, __, letter) => letter.toUpperCase()).replace(/[^A-Za-z0-9]/g, '')
 const literal = value => JSON.stringify(value)
 
-export function generate(pluginFile, nodePackage) {
-  const program = ts.createProgram([pluginFile], {
+/** A member or type the bindings cannot represent yet; reported, not fatal. */
+class Unsupported extends Error {}
+
+// Where the plugin is described and loaded. A TypeScript source file is
+// analysed directly; a package directory is analysed through its declared
+// `types` and loaded through its runtime entry.
+function locate(pluginPath) {
+  if (existsSync(pluginPath) && statSync(pluginPath).isDirectory()) {
+    const manifest = JSON.parse(readFileSync(join(pluginPath, 'package.json'), 'utf8'))
+    const root = manifest.exports?.['.'] ?? manifest.exports
+    const types = manifest.types ?? manifest.typings ?? root?.types
+    const entry = (typeof root === 'string' ? root : root?.import ?? root?.default) ?? manifest.main ?? 'index.js'
+    if (!types) throw new Error(`${pluginPath}: package declares no types`)
+    return { analysed: resolve(pluginPath, types), entry: resolve(pluginPath, entry), packageDir: resolve(pluginPath) }
+  }
+  return { analysed: pluginPath, entry: pluginPath, packageDir: dirname(pluginPath) }
+}
+
+export function generate(pluginPath, nodePackage) {
+  const { analysed, entry, packageDir } = locate(pluginPath)
+  const program = ts.createProgram([analysed], {
     target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
     strict: true, skipLibCheck: true, noEmit: true,
   })
-  const diagnostics = ts.getPreEmitDiagnostics(program)
-  if (diagnostics.length) {
-    throw new Error(ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+  const errors = ts.getPreEmitDiagnostics(program).filter(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
+  if (errors.length) {
+    throw new Error(ts.formatDiagnosticsWithColorAndContext(errors, {
       getCanonicalFileName: value => value, getCurrentDirectory: () => process.cwd(), getNewLine: () => '\n',
     }))
   }
   const checker = program.getTypeChecker()
-  const source = program.getSourceFile(pluginFile)
-  if (!source) throw new Error(`source not found: ${pluginFile}`)
-  function fail(node, reason) {
+  const source = program.getSourceFile(analysed)
+  if (!source) throw new Error(`source not found: ${analysed}`)
+  const isCordis = node => node.getSourceFile().fileName.replaceAll('\\', '/').includes('/@deepseek-ai/cordis/')
+  const location = node => {
     const { line, character } = node.getSourceFile().getLineAndCharacterOfPosition(node.getStart())
-    throw new Error(`${node.getSourceFile().fileName}:${line + 1}:${character + 1}: ${reason}`)
+    return `${node.getSourceFile().fileName}:${line + 1}:${character + 1}`
   }
-  function rustType(type, node) {
-    if (type.flags & ts.TypeFlags.NumberLike) return 'f64'
-    if (type.flags & ts.TypeFlags.StringLike) return 'String'
-    if (type.flags & ts.TypeFlags.BooleanLike) return 'bool'
-    if (type.flags & ts.TypeFlags.Void) return '()'
-    if (checker.isArrayType(type)) return `Vec<${rustType(checker.getTypeArguments(type)[0], node)}>`
-    return fail(node, `binding not implemented for ${checker.typeToString(type)}`)
+  function fail(node, reason) { throw new Error(`${location(node)}: ${reason}`) }
+  const diagnostics = []
+
+  // ---------------------------------------------------------------------
+  // Rust type model: named data types are generated once per TS type.
+  // ---------------------------------------------------------------------
+  const items = []            // generated Rust item source
+  const named = new Map()     // ts.Type -> Rust name
+  const taken = new Set(['Config', 'Plugin'])
+  const building = new Set()
+  function claim(base) {
+    let name = pascal(base) || 'Value'
+    if (/^[0-9]/.test(name)) name = `T${name}`
+    for (let i = 2; taken.has(name); i++) name = `${pascal(base)}${i}`
+    taken.add(name)
+    return name
   }
-  const services = new Map()
-  function visit(node) {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'provide') {
-      const declaration = checker.getResolvedSignature(node)?.declaration
-      if (declaration?.getSourceFile().fileName.replaceAll('\\', '/').includes('/@deepseek-ai/cordis/')) {
-        const [name, value] = node.arguments
-        if (!name || !ts.isStringLiteral(name) || !value) fail(node, 'service discovery requires a literal native service name and a value')
-        const type = checker.getTypeAtLocation(value)
-        if (services.has(name.text)) fail(node, `multiple declarations for service ${name.text} require further scope analysis`)
-        const methods = []
-        for (const member of checker.getPropertiesOfType(type)) {
-          const decl = member.valueDeclaration ?? member.declarations?.[0]
-          if (!decl) continue
-          const flags = ts.getCombinedModifierFlags(decl)
-          if (flags & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected) || ts.isPrivateIdentifier(decl.name)) continue
-          if (!(ts.isMethodDeclaration(decl) || ts.isMethodSignature(decl))) {
-            fail(decl, `property binding not implemented for ${member.name}`)
+  const derive = '#[derive(Debug, Clone, PartialEq, ::rutis_interop::serde::Serialize, ::rutis_interop::serde::Deserialize)]\n#[serde(crate = "rutis_interop::serde")]'
+  const typeName = (type, hint) => type.aliasSymbol?.getName() ?? (type.getSymbol()?.getName().startsWith('__') ? undefined : type.getSymbol()?.getName()) ?? hint
+
+  function stripNullish(type) {
+    if (!type.isUnion()) return { type, optional: false, members: [type] }
+    const members = type.types.filter(member => !(member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Void)))
+    return { type, optional: members.length !== type.types.length, members }
+  }
+
+  // Map a TypeScript type to a Rust type used for data (arguments, results,
+  // fields). Throws Unsupported with the reason for non-data types.
+  function rust(type, hint) {
+    const flags = type.flags
+    if (flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return '::rutis_interop::serde_json::Value'
+    if (flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined | ts.TypeFlags.Null)) return '()'
+    if (flags & ts.TypeFlags.Never) throw new Unsupported('never type')
+    if (flags & ts.TypeFlags.BigIntLike) throw new Unsupported('bigint')
+    if (flags & ts.TypeFlags.ESSymbolLike) throw new Unsupported('symbol')
+    if (type.isUnion()) {
+      const { optional, members } = stripNullish(type)
+      const inner = unionMembers(type, members, hint)
+      return optional ? `Option<${inner}>` : inner
+    }
+    if (flags & ts.TypeFlags.BooleanLike) return 'bool'
+    if (flags & ts.TypeFlags.NumberLike) return 'f64'
+    if (flags & ts.TypeFlags.StringLike) return 'String'
+    if (type.isIntersection()) {
+      const primitive = type.types.find(member => member.flags & (ts.TypeFlags.String | ts.TypeFlags.Number))
+      if (primitive) return brand(type, primitive, hint)
+      throw new Unsupported(`intersection ${checker.typeToString(type)}`)
+    }
+    const symbol = type.getSymbol()?.getName()
+    if (symbol === 'AbortSignal') throw new Unsupported('AbortSignal parameter (cancellation is not bound yet)')
+    if (['Uint8Array', 'ArrayBuffer', 'Buffer', 'DataView'].includes(symbol)) throw new Unsupported(`${symbol} (binary data is not bound yet)`)
+    if (['AsyncIterable', 'AsyncIterableIterator', 'AsyncGenerator', 'ReadableStream', 'Iterable'].includes(symbol)) throw new Unsupported(`${symbol} (streams are not bound yet)`)
+    if (['Promise', 'PromiseLike'].includes(symbol)) throw new Unsupported('nested Promise')
+    if (checker.isArrayType(type)) return `Vec<${rust(checker.getTypeArguments(type)[0], `${hint}Item`)}>`
+    if (checker.isTupleType(type)) throw new Unsupported(`tuple ${checker.typeToString(type)}`)
+    if (type.getCallSignatures().length || type.getConstructSignatures().length) throw new Unsupported('function value (callbacks are not bound yet)')
+    return object(type, hint)
+  }
+
+  function unionMembers(type, members, hint) {
+    if (!members.length) return '()'
+    if (members.length === 1) return rust(members[0], hint)
+    if (members.every(member => member.flags & ts.TypeFlags.BooleanLiteral)) return 'bool'
+    if (members.every(member => member.flags & ts.TypeFlags.NumberLike)) return 'f64'
+    if (members.every(member => member.flags & ts.TypeFlags.StringLiteral)) return literalEnum(type, members, hint)
+    if (members.every(member => member.flags & ts.TypeFlags.StringLike)) return 'String'
+    // Other unions (e.g. discriminated objects) stay dynamic JSON: the data
+    // crosses unchanged, only its static Rust shape is not generated.
+    return '::rutis_interop::serde_json::Value'
+  }
+
+  function literalEnum(type, members, hint) {
+    if (named.has(type)) return named.get(type)
+    const name = claim(typeName(type, hint))
+    named.set(type, name)
+    const variants = new Set()
+    const body = members.map(member => {
+      let variant = pascal(member.value) || 'Empty'
+      if (/^[0-9]/.test(variant)) variant = `V${variant}`
+      while (variants.has(variant)) variant += '_'
+      variants.add(variant)
+      return `#[serde(rename = ${literal(member.value)})] ${variant},`
+    })
+    items.push(`${derive.replace('PartialEq', 'PartialEq, Eq, Copy, Hash')}\npub enum ${name} { ${body.join(' ')} }`)
+    return name
+  }
+
+  // Branded primitives become transparent newtypes that keep their name.
+  function brand(type, primitive, hint) {
+    if (named.has(type)) return named.get(type)
+    const inner = primitive.flags & ts.TypeFlags.String ? 'String' : 'f64'
+    const alias = type.aliasSymbol?.getName()
+    if (!alias) return inner
+    const name = claim(alias)
+    named.set(type, name)
+    const conversions = inner === 'String'
+      ? `impl From<&str> for ${name} { fn from(value: &str) -> Self { Self(value.to_owned()) } }
+         impl From<String> for ${name} { fn from(value: String) -> Self { Self(value) } }
+         impl ::std::fmt::Display for ${name} { fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result { f.write_str(&self.0) } }`
+      : `impl From<f64> for ${name} { fn from(value: f64) -> Self { Self(value) } }`
+    items.push(`${derive}\n#[serde(transparent)]\npub struct ${name}(pub ${inner});\n${conversions}`)
+    return name
+  }
+
+  function object(type, hint) {
+    if (named.has(type)) {
+      const name = named.get(type)
+      return building.has(type) ? `Box<${name}>` : name
+    }
+    const properties = checker.getPropertiesOfType(type)
+    const methods = properties.filter(property => {
+      const declaration = property.valueDeclaration ?? property.declarations?.[0]
+      return declaration && checker.getTypeOfSymbolAtLocation(property, declaration).getCallSignatures().length
+    })
+    if (methods.length || (type.getSymbol()?.flags & ts.SymbolFlags.Class)) {
+      throw new Unsupported(`${checker.typeToString(type)} is a live object with methods (object references are not bound yet)`)
+    }
+    const index = checker.getIndexInfoOfType(type, ts.IndexKind.String)
+    if (index && !properties.length) return `::std::collections::BTreeMap<String, ${rust(index.type, `${hint}Value`)}>`
+    const name = claim(typeName(type, hint))
+    named.set(type, name)
+    building.add(type)
+    try {
+      const fields = new Set()
+      const body = properties.flatMap(property => {
+        const declaration = property.valueDeclaration ?? property.declarations?.[0]
+        const propertyType = checker.getTypeOfSymbolAtLocation(property, declaration)
+        const { members: present } = stripNullish(propertyType)
+        // Optional AbortSignal fields are left unset, as for parameters.
+        if (property.flags & ts.SymbolFlags.Optional && present.length === 1 && present[0].getSymbol()?.getName() === 'AbortSignal') return []
+        let field = snake(property.getName())
+        field = keywords.has(field) ? `r#${field}` : field
+        if (!/^(r#)?[a-z_][a-z0-9_]*$/.test(field) || fields.has(field)) throw new Unsupported(`field ${property.getName()} cannot be represented in Rust`)
+        fields.add(field)
+        const optional = !!(property.flags & ts.SymbolFlags.Optional)
+        let fieldType = rust(propertyType, `${name}${pascal(property.getName())}`)
+        const attributes = [`rename = ${literal(property.getName())}`]
+        if (optional && !fieldType.startsWith('Option<')) fieldType = `Option<${fieldType}>`
+        if (fieldType.startsWith('Option<')) attributes.push('default', 'skip_serializing_if = "Option::is_none"')
+        return [`#[serde(${attributes.join(', ')})] pub ${field}: ${fieldType},`]
+      })
+      if (index) body.push(`#[serde(flatten)] pub extra: ::std::collections::BTreeMap<String, ${rust(index.type, `${name}Extra`)}>,`)
+      items.push(`${derive}\npub struct ${name} { ${body.join('\n')} }`)
+    } catch (error) {
+      named.delete(type)
+      taken.delete(name)
+      throw error
+    } finally {
+      building.delete(type)
+    }
+    return name
+  }
+
+  // ---------------------------------------------------------------------
+  // Plugin shape: a function plugin (`apply`) or a Service class export.
+  // ---------------------------------------------------------------------
+  const moduleSymbol = checker.getSymbolAtLocation(source)
+  if (!moduleSymbol) throw new Error(`${analysed}: not a module`)
+  const exports = checker.getExportsOfModule(moduleSymbol)
+  const resolveAlias = symbol => symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol
+  const applyExport = exports.find(symbol => symbol.name === 'apply')
+  const defaultExport = exports.find(symbol => symbol.name === 'default')
+  const pluginClass = !applyExport && defaultExport && resolveAlias(defaultExport).flags & ts.SymbolFlags.Class ? resolveAlias(defaultExport) : undefined
+  if (!applyExport && !pluginClass) throw new Error(`${analysed}: expected an apply function or a default-exported Service class`)
+
+  // Context augmentations anywhere in the program: service name -> type.
+  const augmentations = new Map()
+  for (const file of program.getSourceFiles()) {
+    ts.forEachChild(file, function visit(node) {
+      if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name) && node.name.text === '@deepseek-ai/cordis') {
+        for (const statement of node.body?.statements ?? []) {
+          if (!ts.isInterfaceDeclaration(statement) || statement.name.text !== 'Context') continue
+          for (const member of statement.members) {
+            if (member.name && member.type) augmentations.set(member.name.getText().replace(/^['"]|['"]$/g, ''), { type: checker.getTypeFromTypeNode(member.type), node: member, file: file.fileName })
           }
-          const signatures = checker.getTypeOfSymbolAtLocation(member, decl).getCallSignatures()
-          if (signatures.length !== 1) fail(decl, 'overloaded methods require further binding support')
-          const signature = signatures[0]
-          if (signature.typeParameters?.length) fail(decl, 'generic methods require further binding support')
-          const params = signature.parameters.map(parameter => {
-            const declaration = parameter.valueDeclaration
-            if (!declaration || declaration.questionToken || declaration.dotDotDotToken || declaration.initializer) {
-              fail(decl, 'optional, default and rest parameters require further binding support')
-            }
-            return { name: ident(parameter.name), type: rustType(checker.getTypeOfSymbolAtLocation(parameter, declaration), declaration) }
-          })
-          const result = checker.getReturnTypeOfSignature(signature)
-          const promised = checker.getPromisedTypeOfPromise(result)
-          methods.push({ name: member.name, rustName: ident(snake(member.name)), params, async: !!promised, result: rustType(promised ?? result, decl) })
         }
-        if (!methods.length) fail(node, `no public methods found for ${name.text}`)
-        if (new Set(methods.map(method => method.rustName)).size !== methods.length) fail(node, 'method names collide in Rust')
-        services.set(name.text, { name: name.text, type: ident(name.text[0].toUpperCase() + name.text.slice(1)), methods })
+      }
+      ts.forEachChild(node, visit)
+    })
+  }
+
+  const services = new Map() // name -> { type, node }
+  let configType
+  if (pluginClass) {
+    // A Service class provides the Context members typed as itself or one of
+    // its base classes (a seam declares `credentials: CredentialProvider`,
+    // an implementation extends CredentialProvider).
+    const instance = checker.getDeclaredTypeOfSymbol(pluginClass)
+    const lineage = new Set()
+    for (let queue = [instance]; queue.length;) {
+      const current = queue.pop()
+      const symbol = current.getSymbol()
+      if (!symbol || lineage.has(symbol)) continue
+      lineage.add(symbol)
+      if (current.isClassOrInterface()) queue.push(...(checker.getBaseTypes(current) ?? []))
+    }
+    for (const [name, entry] of augmentations) {
+      const symbol = entry.type.getSymbol()
+      if (symbol && lineage.has(symbol) && !isCordis(symbol.declarations[0])) services.set(name, entry)
+    }
+    const construct = checker.getTypeOfSymbolAtLocation(pluginClass, pluginClass.valueDeclaration).getConstructSignatures()[0]
+    const configParameter = construct?.parameters[1]
+    if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
+  } else {
+    const applyType = checker.getTypeOfSymbolAtLocation(applyExport, applyExport.valueDeclaration)
+    const configParameter = applyType.getCallSignatures()[0]?.parameters[1]
+    if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
+    // Source plugins: literal ctx.provide calls. Declaration-only packages:
+    // the Context members the package itself declares.
+    ts.forEachChild(source, function visit(node) {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'provide') {
+        const declaration = checker.getResolvedSignature(node)?.declaration
+        if (declaration && isCordis(declaration)) {
+          const [name, value] = node.arguments
+          if (!name || !ts.isStringLiteral(name) || !value) fail(node, 'service discovery requires a literal native service name and a value')
+          if (services.has(name.text)) fail(node, `multiple declarations for service ${name.text} require further scope analysis`)
+          services.set(name.text, augmentations.get(name.text) ?? { type: checker.getTypeAtLocation(value), node })
+        }
+      }
+      ts.forEachChild(node, visit)
+    })
+    if (!services.size) {
+      for (const [name, entry] of augmentations) if (entry.file.startsWith(packageDir)) services.set(name, entry)
+    }
+  }
+  if (!services.size) throw new Error(`${analysed}: no native Cordis service registrations found`)
+
+  // ---------------------------------------------------------------------
+  // Services and their members.
+  // ---------------------------------------------------------------------
+  const serviceCode = []
+  const structs = new Map() // service name -> Rust struct name
+  const manifest = {}
+  for (const [serviceName, { type, node }] of services) {
+    const structName = claim(typeName(type, serviceName))
+    structs.set(serviceName, structName)
+    const methods = [], unavailable = []
+    const rustNames = new Set()
+    for (const member of checker.getPropertiesOfType(type)) {
+      const declaration = member.valueDeclaration ?? member.declarations?.[0]
+      if (!declaration || isCordis(declaration)) continue
+      const flags = ts.getCombinedModifierFlags(declaration)
+      if (flags & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected) || (declaration.name && ts.isPrivateIdentifier(declaration.name))) continue
+      const memberName = member.getName()
+      if (memberName.startsWith('_') || memberName.startsWith('__@')) continue
+      const skip = reason => {
+        unavailable.push([memberName, reason])
+        diagnostics.push(`${location(declaration)}: ${serviceName}.${memberName} is not bound: ${reason}`)
+      }
+      const memberType = checker.getTypeOfSymbolAtLocation(member, declaration)
+      const signatures = memberType.getCallSignatures()
+      if (!signatures.length) { skip('property (properties are not bound yet)'); continue }
+      if (signatures.length !== 1) { skip('overloaded method'); continue }
+      const signature = signatures[0]
+      if (signature.typeParameters?.length) { skip('generic method'); continue }
+      const hint = `${structName}${pascal(memberName)}`
+      try {
+        const rustName = ident(snake(memberName))
+        if (rustNames.has(rustName)) throw new Unsupported(`method name collides with another as ${rustName}`)
+        const params = signature.parameters.map((parameter, index) => {
+          const parameterDeclaration = parameter.valueDeclaration
+          if (parameterDeclaration?.dotDotDotToken) throw new Unsupported('rest parameter')
+          const parameterType = checker.getTypeOfSymbolAtLocation(parameter, parameterDeclaration)
+          const optional = !!(parameterDeclaration?.questionToken || parameterDeclaration?.initializer)
+          // An AbortSignal the method accepts as undefined is not exposed yet:
+          // the call runs without a signal (cancellation is a later step).
+          const { optional: nullable, members } = stripNullish(parameterType)
+          if ((optional || nullable) && members.length === 1 && members[0].getSymbol()?.getName() === 'AbortSignal') {
+            return { name: ident(snake(parameter.name)), js: parameter.name, omitted: true, index }
+          }
+          let rustType = rust(parameterType, `${hint}${pascal(parameter.name)}`)
+          if (optional && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
+          return { name: ident(snake(parameter.name)), js: parameter.name, rustType, index }
+        })
+        const returned = checker.getReturnTypeOfSignature(signature)
+        const promised = checker.getPromisedTypeOfPromise(returned)
+        const result = rust(promised ?? returned, `${hint}Result`)
+        rustNames.add(rustName)
+        methods.push({ name: memberName, rustName, params, async: !!promised, result })
+      } catch (error) {
+        if (!(error instanceof Unsupported)) throw error
+        skip(error.message)
       }
     }
-    ts.forEachChild(node, visit)
+    manifest[serviceName] = methods.map(method => method.name)
+    serviceCode.push(serviceStruct(serviceName, structName, methods, unavailable))
   }
-  visit(source)
-  if (!services.size) throw new Error('no native Cordis service registrations found')
-  const exports = checker.getExportsOfModule(checker.getSymbolAtLocation(source))
-  const apply = exports.find(symbol => symbol.name === 'apply')
-  if (!apply) throw new Error('this initial binding generator requires a native apply entrypoint')
-  const applyType = checker.getTypeOfSymbolAtLocation(apply, apply.valueDeclaration)
-  const config = applyType.getCallSignatures()[0]?.parameters[1]
-  const configType = config && checker.getTypeOfSymbolAtLocation(config, config.valueDeclaration)
-  const configFields = configType ? checker.getPropertiesOfType(configType) : []
-  const fields = configFields.map(field => {
-    const decl = field.valueDeclaration ?? field.declarations[0]
-    if (field.flags & ts.SymbolFlags.Optional) fail(decl, 'optional configuration fields require further binding support')
-    return `pub ${ident(field.name)}: ${rustType(checker.getTypeOfSymbolAtLocation(field, decl), decl)},`
-  }).join('\n')
-  const methodManifest = Object.fromEntries([...services.values()].map(service => [service.name, service.methods.map(method => method.name)]))
-  function validateNumber(name, type, cordisError = false) {
-    if (type === 'f64') return `if !${name}.is_finite() { return Err(::rutis_interop::Error::Value("non-finite number".into())${cordisError ? '.into()' : ''}); }`
-    if (type.startsWith('Vec<') && type.includes('f64')) return `for value in ${name}.iter() { ${validateNumber('value', type.slice(4, -1), cordisError)} }`
+
+  function borrowed(rustType) {
+    if (rustType === 'String') return '&str'
+    if (rustType === 'f64' || rustType === 'bool') return rustType
+    if (rustType.startsWith('Vec<')) return `&[${rustType.slice(4, -1)}]`
+    if (rustType.startsWith('Option<')) {
+      const inner = rustType.slice(7, -1)
+      return inner === 'f64' || inner === 'bool' ? rustType : `Option<${borrowed(inner).replace(/^&?/, '&')}>`
+    }
+    return `&${rustType}`
+  }
+  function finite(name, rustType) {
+    if (rustType === 'f64') return `if !${name}.is_finite() { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
+    if (rustType === 'Option<f64>') return `if ${name}.is_some_and(|value| !value.is_finite()) { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
+    if (rustType === 'Vec<f64>') return `if ${name}.iter().any(|value| !value.is_finite()) { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
     return ''
   }
-  const serviceCode = [...services.values()].map(service => {
-    const methods = service.methods.map(method => {
-      const args = method.params.map(parameter => `${parameter.name}: ${parameter.type}`).join(', ')
-      const values = method.params.map(parameter => parameter.name).join(', ')
-      return `pub ${method.async ? 'async ' : ''}fn ${method.rustName}(&self${args ? ', ' + args : ''}) -> Result<${method.result}, ::rutis_interop::Error> {
-        ${method.params.map(parameter => validateNumber(parameter.name, parameter.type)).join('\n')}
-        ::rutis_interop::decode(self.process.${method.async ? 'call_async' : 'call'}(&self.handle, ${literal(method.name)}, ::rutis_interop::serde_json::json!([${values}]))${method.async ? '.await' : ''}?)
+  function serviceStruct(serviceName, structName, methods, unavailable) {
+    const code = methods.map(method => {
+      const exposed = method.params.filter(parameter => !parameter.omitted)
+      const signature = exposed.map(parameter => `${parameter.name}: ${borrowed(parameter.rustType)}`).join(', ')
+      // Trailing omitted parameters are left out; earlier ones pass undefined.
+      const passed = method.params.slice(0, method.params.findLastIndex(parameter => !parameter.omitted) + 1)
+      const args = passed.map(parameter => parameter.omitted
+        ? '::rutis_interop::rpc::Value::Undefined'
+        : parameter.rustType.startsWith('Option<')
+          ? `::rutis_interop::optional(${parameter.name})?`
+          : `::rutis_interop::arg(&${parameter.name})?`).join(', ')
+      const call = method.async
+        ? `self.process.invoke_async(&self.handle, ${literal(method.name)}, vec![${args}]).await?`
+        : `self.process.invoke(&self.handle, ${literal(method.name)}, vec![${args}])?`
+      const note = method.params.some(parameter => parameter.omitted) ? '\n      ///\n      /// Runs without an AbortSignal: cancellation is not bound yet.' : ''
+      return `/// Calls \`${serviceName}.${method.name}\` on the Cordis side.${note}
+      pub ${method.async ? 'async ' : ''}fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> Result<${method.result}, ::rutis_interop::Error> {
+        ${exposed.map(parameter => finite(parameter.name, parameter.rustType)).join('\n')}
+        ::rutis_interop::decode(${call})
       }`
     }).join('\n')
+    const missing = unavailable.length
+      ? `///\n/// Members not bound yet:\n${unavailable.map(([name, reason]) => `/// - \`${name}\`: ${reason}`).join('\n')}\n`
+      : ''
     // One proxy per handle: it keeps addressing the object it was created
     // for, and releases that object when the last Arc snapshot is dropped.
-    return `pub struct ${service.type} { process: ::std::sync::Arc<::rutis_interop::Process>, handle: String }
-    impl ${service.type} { ${methods} }
-    impl Drop for ${service.type} { fn drop(&mut self) { self.process.release(&self.handle); } }`
-  }).join('\n')
-  const rust = `// Generated from the original Cordis plugin. Do not edit.
-  #[derive(Clone, ::rutis_interop::serde::Serialize)]
-  #[serde(crate = "rutis_interop::serde")]
-  pub struct Config { ${fields} }
-  ${serviceCode}
+    return `/// Native proxy for the Cordis service \`ctx.${serviceName}\`.
+    ${missing}pub struct ${structName} { process: ::std::sync::Arc<::rutis_interop::Process>, handle: String }
+    impl ${structName} { ${code} }
+    impl Drop for ${structName} { fn drop(&mut self) { self.process.release(&self.handle); } }`
+  }
+
+  // ---------------------------------------------------------------------
+  // Configuration.
+  // ---------------------------------------------------------------------
+  let configCode = `#[derive(Debug, Clone, Default, ::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct Config {}`
+  let configChecks = ''
+  if (configType) {
+    const stripped = stripNullish(configType).members
+    const configObject = stripped.length === 1 ? stripped[0] : undefined
+    if (!configObject || !(configObject.flags & ts.TypeFlags.Object) || checker.isArrayType(configObject)) {
+      configCode = `pub type Config = ::rutis_interop::serde_json::Value;`
+    } else {
+      const fields = [], checks = []
+      let defaultable = true
+      for (const property of checker.getPropertiesOfType(configObject)) {
+        const declaration = property.valueDeclaration ?? property.declarations?.[0]
+        const field = ident(snake(property.getName()))
+        let fieldType
+        try {
+          fieldType = rust(checker.getTypeOfSymbolAtLocation(property, declaration), `Config${pascal(property.getName())}`)
+        } catch (error) {
+          if (!(error instanceof Unsupported)) throw error
+          fieldType = '::rutis_interop::serde_json::Value'
+          diagnostics.push(`${location(declaration)}: config.${property.getName()} is dynamic JSON: ${error.message}`)
+        }
+        const optional = !!(property.flags & ts.SymbolFlags.Optional)
+        if (optional && !fieldType.startsWith('Option<')) fieldType = `Option<${fieldType}>`
+        if (!fieldType.startsWith('Option<')) defaultable = false
+        const attributes = [`rename = ${literal(property.getName())}`]
+        if (fieldType.startsWith('Option<')) attributes.push('skip_serializing_if = "Option::is_none"')
+        fields.push(`#[serde(${attributes.join(', ')})] pub ${field}: ${fieldType},`)
+        const check = finite(`self.config.${field}`, fieldType)
+        if (check) checks.push(check.replace('::rutis_interop::Error::Value("non-finite number".into())', '::rutis_interop::Error::Value("non-finite number".into()).into()'))
+      }
+      configCode = `#[derive(Debug, Clone, ${defaultable ? 'Default, ' : ''}::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct Config { ${fields.join('\n')} }`
+      configChecks = checks.join('\n')
+    }
+  }
+
+  const serviceNames = [...services.keys()]
+  const rust_ = `// Generated from the original Cordis plugin. Do not edit.
+  ${configCode}
+  ${items.join('\n')}
+  ${serviceCode.join('\n')}
   pub struct Plugin { config: Config }
   impl Plugin { pub fn new(config: Config) -> Self { Self { config } } }
   impl ::rutis::Plugin for Plugin {
-    fn name(&self) -> &str { "cordis:${[...services.keys()].join(',')}" }
+    fn name(&self) -> &str { "cordis:${serviceNames.join(',')}" }
     fn validate(&self) -> Result<(), ::rutis::CordisError> {
-      ${configFields.map(field => {
-        const decl = field.valueDeclaration ?? field.declarations[0]
-        return validateNumber(`self.config.${ident(field.name)}`, rustType(checker.getTypeOfSymbolAtLocation(field, decl), decl), true)
-      }).join('\n')}
+      ${configChecks}
       Ok(())
     }
     fn apply<'a>(&'a self, ctx: &'a ::rutis::Ctx) -> ::rutis::BoxFuture<'a, Result<::rutis::Effect, ::rutis::CordisError>> {
       Box::pin(async move {
         let projection = ::rutis_interop::Projection::new();
-        ${[...services.values()].map(service => `projection.service::<${service.type}>(${literal(service.name)}, |process, handle| ${service.type} { process, handle });`).join('\n')}
+        ${[...structs].map(([name, struct]) => `projection.service::<${struct}>(${literal(name)}, |process, handle| ${struct} { process, handle });`).join('\n')}
         let process = ::rutis_interop::Process::launch_observed(
-          ::std::path::Path::new(${literal(nodePackage)}), ::std::path::Path::new(${literal(pluginFile)}),
+          ::std::path::Path::new(${literal(nodePackage)}), ::std::path::Path::new(${literal(entry)}),
           ::rutis_interop::serde_json::to_value(&self.config).map_err(|e| ::rutis::CordisError::PluginFailed(Box::new(e)))?,
-          ::rutis_interop::serde_json::json!(${JSON.stringify(methodManifest)}),
+          ::rutis_interop::serde_json::json!(${JSON.stringify(manifest)}),
           Some(projection.clone()),
         ).await?;
         // Registered before any service binding, so native cleanup withdraws
@@ -154,7 +464,7 @@ export function generate(pluginFile, nodePackage) {
     }
   }
   `
-  return { rust, inputs: program.getSourceFiles().map(source => source.fileName) }
+  return { rust: rust_, inputs: program.getSourceFiles().map(file => file.fileName), diagnostics }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

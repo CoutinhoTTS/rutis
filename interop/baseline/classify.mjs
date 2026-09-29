@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { targets } from './scenarios.mjs'
+import { generate } from '../node/src/generate.mjs'
 
 const require = createRequire(import.meta.url)
 const ts = require(require.resolve('typescript', { paths: [new URL('../node', import.meta.url).pathname] }))
@@ -13,14 +14,14 @@ const ts = require(require.resolve('typescript', { paths: [new URL('../node', im
 // Capabilities, and whether the current generator / wire protocol has them.
 export const CAPABILITIES = {
   primitive: ['number, string, boolean, void and their arrays', true, true],
-  'data-object': ['plain data object / interface (incl. literal unions, nullable)', false, true],
-  branded: ['branded string or number', false, true],
-  dynamic: ['any / unknown', false, true],
-  optional: ['optional or rest parameter', false, true],
+  'data-object': ['plain data object / interface (incl. literal unions, nullable)', true, true],
+  branded: ['branded string or number', true, true],
+  dynamic: ['any / unknown', true, true],
+  optional: ['optional or rest parameter', true, true],
   callback: ['function-typed parameter', false, true],
   'returns-function': ['returns a function (e.g. a disposer)', false, true],
   'live-object': ['object with methods or class instance', false, false],
-  'abort-signal': ['AbortSignal parameter', false, false],
+  'abort-signal': ['AbortSignal parameter (optional ones are omitted, not bound)', false, false],
   bytes: ['Uint8Array / ArrayBuffer', false, false],
   'async-iterable': ['AsyncIterable / stream', false, false],
   property: ['public property', false, false],
@@ -130,26 +131,33 @@ function census(packageName) {
 const report = targets.map(target => {
   // Abstract seams declare the service; the concrete package implements it.
   const seam = target.package.replace(/-local$/, '')
-  return census(seam)
+  const entry = census(seam)
+  // Ground truth for binding coverage: what the generator actually binds.
+  const packageDir = dirname(require.resolve(`${target.package}/package.json`))
+  const { diagnostics } = generate(packageDir, new URL('../node', import.meta.url).pathname)
+  const unbound = new Set(diagnostics.map(line => line.match(/: ([\w$]+\.[\w$]+) is not bound/)?.[1]).filter(Boolean))
+  for (const member of entry.members) member.bound = !unbound.has(`${member.service}.${member.member}`)
+  return entry
 })
 
 if (process.argv.includes('--json')) {
   process.stdout.write(JSON.stringify(report, null, 2))
 } else {
   const counts = Object.fromEntries(Object.keys(CAPABILITIES).map(cap => [cap, 0]))
-  let total = 0, generatorReady = 0, protocolReady = 0
+  let total = 0, bound = 0, protocolReady = 0
   for (const entry of report) {
     console.log(`\n## ${entry.package}@${entry.version} (ctx.${entry.services.join(', ctx.')})`)
     for (const { member, caps } of entry.members) {
       total++
       caps.forEach(cap => counts[cap]++)
-      if (caps.every(cap => CAPABILITIES[cap][1])) generatorReady++
+      if (entry.members.find(item => item.member === member)?.bound) bound++
       if (caps.every(cap => CAPABILITIES[cap][2])) protocolReady++
-      console.log(`  ${member.padEnd(26)} ${caps.join(', ')}`)
+      const mark = entry.members.find(item => item.member === member)?.bound ? 'bound  ' : 'missing'
+      console.log(`  ${mark} ${member.padEnd(26)} ${caps.join(', ')}`)
     }
     for (const { event, kind } of entry.events) console.log(`  event ${event.padEnd(20)} ${kind}`)
   }
-  console.log(`\n## Totals: ${total} members; generator-ready ${generatorReady}; protocol-ready ${protocolReady}`)
+  console.log(`\n## Totals: ${total} members; bound by the generator ${bound}; protocol-ready ${protocolReady}`)
   for (const [cap, [description, generator, protocol]] of Object.entries(CAPABILITIES)) {
     console.log(`  ${cap.padEnd(18)} ${String(counts[cap]).padStart(3)}  generator:${generator ? 'yes' : 'no '} protocol:${protocol ? 'yes' : 'no '}  ${description}`)
   }

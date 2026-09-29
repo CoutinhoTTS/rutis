@@ -90,7 +90,12 @@ function mount(args) {
     const plugin = typeof module.apply === 'function' ? module : (module.default ?? module)
     pluginFiber = ctx.plugin(plugin, args.config)
     await pluginFiber.await()
-    if (!pluginFiber.store) throw new Error('native plugin dependencies are unresolved')
+    // This process hosts only the mounted plugin, and rutis cannot provide
+    // its dependencies yet, so an unresolved dependency can never resolve.
+    if (!pluginFiber.store) {
+      const missing = Object.keys(pluginFiber.inject ?? {}).filter(name => ctx.get(name, false) === undefined)
+      throw new Error(`native plugin dependencies are unresolved: ${missing.join(', ') || 'unknown'}`)
+    }
     refresh()
     mounted = true
     return { services: Object.fromEntries([...slots].map(([name, slot]) => [name, [slot.handle, slot.version]])) }

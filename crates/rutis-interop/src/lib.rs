@@ -50,3 +50,21 @@ impl From<Error> for rutis::CordisError {
 pub fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, Error> {
     serde_json::from_value(value).map_err(|error| Error::Value(error.to_string()))
 }
+
+/// Encode a required argument for a generated call.
+#[cfg(unix)]
+pub fn arg<T: serde::Serialize + ?Sized>(value: &T) -> Result<rpc::Value, Error> {
+    serde_json::to_value(value)
+        .map(rpc::Value::Data)
+        .map_err(|error| Error::Value(error.to_string()))
+}
+
+/// Encode an optional argument: `None` is passed as JS `undefined`, not
+/// `null`, so defaults and `=== undefined` checks behave as in native calls.
+#[cfg(unix)]
+pub fn optional<T: serde::Serialize>(value: Option<T>) -> Result<rpc::Value, Error> {
+    match value {
+        Some(value) => arg(&value),
+        None => Ok(rpc::Value::Undefined),
+    }
+}

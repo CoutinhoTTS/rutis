@@ -17,18 +17,62 @@ async function fixture(body, run) {
   } finally { await rm(temporary, { recursive: true, force: true }) }
 }
 
-test('unsupported public objects produce a source diagnostic instead of losing methods', async () => {
+test('unsupported members are reported with their source location, not dropped silently', async () => {
   await fixture(`import type { Context } from '@deepseek-ai/cordis'
-    class Service { session(): { close(): void } { return { close() {} } } }
+    class Service { session(): { close(): void } { return { close() {} } } ping(): number { return 1 } }
     export function apply(ctx: Context) { ctx.provide('session', new Service()) }
-  `, file => assert.throws(() => generate(file, root), /plugin\.ts:\d+:\d+: binding not implemented/))
+  `, file => {
+    const { rust, diagnostics } = generate(file, root)
+    assert.equal(diagnostics.length, 1)
+    assert.match(diagnostics[0], /plugin\.ts:\d+:\d+: session\.session is not bound: .*live object/)
+    assert.match(rust, /pub fn ping\(&self\)/)
+    assert.match(rust, /Members not bound yet:\n\/\/\/ - `session`/)
+    assert.doesNotMatch(rust, /fn session\(/)
+  })
 })
 
 test('public state cannot silently become a copied value', async () => {
   await fixture(`import type { Context } from '@deepseek-ai/cordis'
     class Service { value = 1; read(): number { return this.value } }
     export function apply(ctx: Context) { ctx.provide('state', new Service()) }
-  `, file => assert.throws(() => generate(file, root), /property binding not implemented for value/))
+  `, file => {
+    const { rust, diagnostics } = generate(file, root)
+    assert.match(diagnostics.join('\n'), /state\.value is not bound: property/)
+    assert.doesNotMatch(rust, /pub value/)
+  })
+})
+
+test('a Service class provides the Context members typed as it or its bases', async () => {
+  await fixture(`import { Context, Service } from '@deepseek-ai/cordis'
+    declare module '@deepseek-ai/cordis' { interface Context { store: Store } }
+    export type Key = string & { readonly __brand: 'Key' }
+    export type Mode = 'read' | 'write'
+    export interface Entry { key: Key; mode: Mode; size?: number; tags: readonly string[]; meta: Record<string, number> | null }
+    export abstract class Store extends Service {
+      constructor(ctx: Context) { super(ctx, 'store') }
+      abstract get(key: Key, signal?: AbortSignal): Promise<Entry | undefined>
+      abstract put(entry: Entry, overwrite?: boolean): void
+    }
+    export interface Config { root: string; limit?: number }
+    export default class MemoryStore extends Store {
+      constructor(ctx: Context, config: Config) { super(ctx) }
+      async get(key: Key) { return undefined }
+      put(entry: Entry, overwrite?: boolean) {}
+    }
+  `, file => {
+    const { rust, diagnostics } = generate(file, root)
+    assert.deepEqual(diagnostics, [])
+    assert.match(rust, /pub struct Key\(pub String\)/)
+    assert.match(rust, /pub enum Mode \{ #\[serde\(rename = "read"\)\] Read, #\[serde\(rename = "write"\)\] Write, \}/)
+    assert.match(rust, /pub size: Option<f64>/)
+    assert.match(rust, /pub tags: Vec<String>/)
+    assert.match(rust, /pub meta: Option<::std::collections::BTreeMap<String, f64>>/)
+    assert.match(rust, /pub async fn get\(&self, key: &Key\) -> Result<Option<Entry>, ::rutis_interop::Error>/)
+    assert.match(rust, /pub fn put\(&self, entry: &Entry, overwrite: Option<bool>\)/)
+    assert.match(rust, /::rutis_interop::optional\(overwrite\)\?/)
+    assert.match(rust, /pub struct Config \{ #\[serde\(rename = "root"\)\] pub root: String,/)
+    assert.match(rust, /projection\.service::<Store>\("store"/)
+  })
 })
 
 test('ordinary imported interfaces participate in Cargo regeneration', async () => {
