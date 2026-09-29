@@ -53,6 +53,8 @@ fn main() {
     rutis_interop::build::Bindings::new("persona", "../../interop/node")
         .plugin(modules.join("dsh-persona"))
         .provide("systemPrompt")
+        // The host announces prompt changes the way the Cordis registry does.
+        .emit("system-prompt/change")
         .generate()
         .unwrap_or_else(|error| panic!("generate bindings for dsh-persona: {error}"));
     println!("cargo:rustc-cfg=dsh_baseline");

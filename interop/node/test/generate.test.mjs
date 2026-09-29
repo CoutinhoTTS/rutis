@@ -194,6 +194,12 @@ test('selected notification events become rutis event types', async () => {
     assert.match(rust, /impl ::rutis::Event for StoreChanged \{ const NAME: &'static str = "store\/changed"; type Value = \(\); \}/)
     assert.match(rust, /events\.forward::<StoreChanged>\("store\/changed", StoreChanged::from_args\);/)
     assert.throws(() => generate(file, root, { events: ['store/decide'] }), /event store\/decide is not a notification/)
+    // rutis -> Cordis: the same event type gains to_args and a listener.
+    const outward = generate(file, root, { emits: ['store/changed'] }).rust
+    assert.match(outward, /pub fn to_args\(&self\) -> Result<Vec<::rutis_interop::rpc::Value>, ::rutis_interop::Error> \{\s*Ok\(vec!\[::rutis_interop::arg\(&self\.key\)\?, ::rutis_interop::arg\(&self\.size\)\?\]\)/)
+    assert.match(outward, /EmitToCordis::new\(process\.clone\(\), "store\/changed", StoreChanged::to_args\)/)
+    assert.match(outward, /emits: vec!\["store\/changed"\.into\(\)\]/)
+    assert.throws(() => generate(file, root, { events: ['store/changed'], emits: ['store/changed'] }), /selected in both directions/)
     assert.throws(() => generate(file, root, { events: ['store/missing'] }), /no Cordis Events declaration found/)
   })
 })

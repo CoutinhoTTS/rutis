@@ -18,6 +18,7 @@ let mounted = false
 let closing = false
 let disposing
 let version = 0
+let emits = new Set() // events the rutis side may emit here
 
 // Each exported service slot is projected as a sequence of object handles.
 // A handle always addresses the object it was created for; when the slot
@@ -140,6 +141,7 @@ function mount(args) {
     slots.set(name, { methods: new Set(methods), scope: undefined, object: undefined, identity: undefined, handle: null, generation: 0, version: 0 })
   }
   const plugins = args.plugins ?? [{ entry: pluginPath, config: args.config }]
+  emits = new Set(args.emits ?? [])
   // Services the rutis application provides are registered before the
   // plugins load, so the plugins' dependencies on them resolve natively.
   for (const [name, methods] of Object.entries(args.provided ?? {})) ctx.provide(name, hostProxy(name, methods))
@@ -190,6 +192,12 @@ function dispatch(target, method, args) {
       case 'dispose':
         closing = true
         return Promise.all([dispose(), peer.drain()]).then(() => null)
+      case 'emit': {
+        // A rutis event re-emitted for the Cordis listeners.
+        const [name, values] = args ?? []
+        if (!emits.has(name)) throw new Error(`event ${name} is not declared for emission from rutis`)
+        return ctx.parallel(name, ...(values ?? []))
+      }
       case 'get': {
         // A live read of a declared service property.
         const [handle, property] = args ?? []

@@ -1,5 +1,6 @@
-//! Forwards Cordis events into the rutis event bus.
+//! Forwards events between the Cordis and rutis event buses.
 //!
+//! Cordis → rutis:
 //! The Node side registers one Cordis listener per forwarded event; its
 //! arguments arrive here, are decoded into the generated event type and
 //! emitted with rutis `parallel` from the mounting plugin's context. A
@@ -92,5 +93,43 @@ impl EventSink for Events {
             emitted.await?;
             Ok(Value::Undefined)
         }))
+    }
+}
+
+/// rutis → Cordis: a rutis listener that re-emits the event in the mounted
+/// Cordis Context with `parallel`, so a rutis `parallel` waits for the
+/// Cordis listeners while a rutis `emit` stays fire and forget. It belongs
+/// to the mounting plugin and ends with it.
+pub struct EmitToCordis<E> {
+    process: Arc<crate::Process>,
+    name: String,
+    encode: fn(&E) -> Result<Vec<Value>, Error>,
+}
+
+impl<E: Event> EmitToCordis<E> {
+    pub fn new(
+        process: Arc<crate::Process>,
+        name: &str,
+        encode: fn(&E) -> Result<Vec<Value>, Error>,
+    ) -> Self {
+        Self {
+            process,
+            name: name.to_owned(),
+            encode,
+        }
+    }
+}
+
+impl<E: Event> rutis::Listener<E> for EmitToCordis<E> {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        event: &'a E,
+    ) -> BoxFuture<'a, Result<Option<E::Value>, rutis::CordisError>> {
+        Box::pin(async move {
+            let args = (self.encode)(event)?;
+            self.process.emit(&self.name, args).await?;
+            Ok(None)
+        })
     }
 }

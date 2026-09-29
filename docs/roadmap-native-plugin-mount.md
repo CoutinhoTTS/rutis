@@ -98,7 +98,7 @@ W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设�
 4. ~~**取消**~~（已完成）：`AbortSignal` 参数由 Rust future 的丢弃来中止；选项对象里的 `AbortSignal` 字段仍不传。绑定覆盖率 40 / 55。
 5. ~~**回调参数、返回函数**~~（已完成）：回调参数生成 `impl Fn` 闭包参数（同步或返回 `BoxFuture`），返回的函数为 `RemoteFunction`，JS `Error` 值为 `JsError`。invariants 安装器、`modifyRecord`、`fs.watch`、`attachController` 在真实插件上验证（`examples/dsh-baseline/tests/callbacks.rs`）。绑定覆盖率 47 / 55。
 6. ~~**服务属性**~~（已完成）：服务自身的属性生成实时 getter。绑定覆盖率 52 / 55，剩余为二进制（2）和流（1）。
-7. ~~**事件（Cordis → rutis）**~~（已完成）：应用用 `Bindings::event` 选择要转发的通知事件，生成 rutis 事件类型；Cordis `emit` 发出即忘，`parallel` 等待 rutis 监听。credentials 的两个事件在真实插件上验证（`examples/dsh-baseline/tests/events.rs`）。rutis → Cordis 方向、waterfall / 有返回值的事件未做。
+7. ~~**事件（双向）**~~（已完成）：`Bindings::event` 选择 Cordis → rutis 的通知事件，生成 rutis 事件类型；Cordis `emit` 发出即忘，`parallel` 等待 rutis 监听。credentials 的两个事件在真实插件上验证（`examples/dsh-baseline/tests/events.rs`）。`Bindings::emit` 选择 rutis → Cordis 的事件，宿主服务用它发出接口层的事件（persona 示例发出 `system-prompt/change`）。同一事件只能选一个方向。waterfall / 有返回值的事件不转发。
 8. `Uint8Array`、`AsyncIterable`：按需。
 
 ### W4 包级接入

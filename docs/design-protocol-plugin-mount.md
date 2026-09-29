@@ -191,7 +191,12 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 - **Rust 侧**：参数解码成事件类型后，用 rutis `parallel` 从挂载插件的 Context 发出。
 - **顺序**：转发监听在原插件启动之后登记，所以 Cordis 侧的顺序为：启动期间登记的监听 → rutis 一组 → 之后登记的监听；组内按 rutis 原生顺序执行（边界规则 3）。原插件启动期间发出的事件不会转发。
 
-**rutis → Cordis（未实现）**：rutis 插件发出的事件交给 Cordis 监听，等有需要的目标插件时再做；做时需要防止两个方向的转发形成回环。
+**rutis → Cordis（已实现）**：应用用 `Bindings::emit("名字")` 选择由 rutis 发往 Cordis 的事件，同样只接受通知事件。这是宿主服务完整实现所需的：rutis 替 Cordis 插件提供服务时（§5），依赖它的 Cordis 插件常常还监听该服务的事件（例如 `system-prompt/change`、`credentials/record-updated`）。
+
+- **生成**：事件类型同上，另有 `to_args`。挂载插件在 rutis 总线上为它登记一个 `EmitToCordis` 监听，这个监听属于挂载插件，随它卸载。
+- **Node 侧**：runner 收到后在 Cordis Context 中用 `parallel` 发出；只接受挂载时声明过的事件名。
+- **语义**：rutis `parallel` 等 Cordis 监听处理完；rutis `emit` 按 rutis 原生排队规则发出即忘。
+- **防回环**：同一事件名只能选一个方向，两个方向都选时构建报错，所以转发不会回环。
 
 ## 8. 反方向：Cordis 应用挂载 rutis 插件（冻结）
 

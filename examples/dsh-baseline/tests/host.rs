@@ -79,6 +79,16 @@ async fn persona_uses_the_system_prompt_the_rutis_host_provides() {
         ]
     );
 
+    // The host emits its change event into Cordis like the native registry.
+    ctx.events()
+        .parallel(
+            &ctx,
+            &rutis::EventKey::<persona::SystemPromptChange>::of(),
+            std::sync::Arc::new(persona::SystemPromptChange {}),
+        )
+        .await
+        .unwrap();
+
     // Withdrawing the host service stops the mount by native dependency
     // rules; the plugin's Cordis cleanup calls the disposers it was given.
     provider.dispose().await.unwrap();

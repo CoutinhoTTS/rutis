@@ -23,7 +23,7 @@ pub mod rpc;
 pub mod server;
 
 #[cfg(unix)]
-pub use events::{EventSink, Events};
+pub use events::{EmitToCordis, EventSink, Events};
 #[cfg(unix)]
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]

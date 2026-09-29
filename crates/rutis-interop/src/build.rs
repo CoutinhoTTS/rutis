@@ -59,6 +59,7 @@ pub struct Bindings {
     members: Vec<(Option<String>, std::path::PathBuf)>,
     provided: Vec<String>,
     events: Vec<String>,
+    emits: Vec<String>,
 }
 
 impl Bindings {
@@ -69,6 +70,7 @@ impl Bindings {
             members: Vec::new(),
             provided: Vec::new(),
             events: Vec::new(),
+            emits: Vec::new(),
         }
     }
 
@@ -100,13 +102,30 @@ impl Bindings {
         self
     }
 
+    /// Emit a rutis event into the mounted Cordis Context, for example the
+    /// change events of a service the host provides. An event is forwarded
+    /// in one direction only.
+    pub fn emit(mut self, name: &str) -> Self {
+        self.emits.push(name.to_owned());
+        self
+    }
+
     pub fn generate(self) -> Result<(), Box<dyn std::error::Error>> {
         let single = matches!(self.members.as_slice(), [(None, _)]);
         let mut args: Vec<std::ffi::OsString> = self
             .provided
             .iter()
             .map(|service| format!("--provide={service}").into())
-            .chain(self.events.iter().map(|event| format!("--event={event}").into()))
+            .chain(
+                self.events
+                    .iter()
+                    .map(|event| format!("--event={event}").into()),
+            )
+            .chain(
+                self.emits
+                    .iter()
+                    .map(|event| format!("--emit={event}").into()),
+            )
             .collect();
         for (name, plugin) in &self.members {
             let plugin = plugin.canonicalize()?;

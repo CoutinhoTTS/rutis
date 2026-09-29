@@ -53,6 +53,8 @@ pub struct Mount<'a> {
     pub hosts: Vec<Host>,
     /// Cordis events forwarded to the rutis side, and where they go.
     pub events: Option<(Vec<String>, Arc<dyn EventSink>)>,
+    /// Events the rutis side may emit into Cordis (see `Process::emit`).
+    pub emits: Vec<String>,
 }
 impl Imports {
     fn update(&self, name: String, handle: Option<String>, version: u64) {
@@ -158,6 +160,7 @@ impl Process {
                 observer: events,
                 hosts,
                 events: None,
+                emits: Vec::new(),
             },
         )
         .await
@@ -171,6 +174,7 @@ impl Process {
             observer: events,
             hosts,
             events: forwarded,
+            emits,
         } = mount;
         let (forwarded_names, forwarded) = match forwarded {
             Some((names, sink)) => (names, Some(sink)),
@@ -241,7 +245,7 @@ impl Process {
             .call_async(
                 "",
                 "mount",
-                json!({ "plugins": plugins, "services": services, "provided": provided, "events": forwarded_names }),
+                json!({ "plugins": plugins, "services": services, "provided": provided, "events": forwarded_names, "emits": emits }),
             )
             .await?;
         let slots: HashMap<String, (Option<String>, u64)> =
@@ -291,6 +295,14 @@ impl Process {
         args: Vec<RpcValue>,
     ) -> Result<RpcValue, Error> {
         self.peer.invoke(handle, method, RpcValue::List(args))
+    }
+
+    /// Emit a declared event in the Cordis Context with `parallel`; resolves
+    /// once the Cordis listeners are done.
+    pub async fn emit(&self, event: &str, args: Vec<RpcValue>) -> Result<(), Error> {
+        let args = RpcValue::List(vec![json!(event).into(), RpcValue::List(args)]);
+        crate::rpc::settle(self.peer.invoke_async("", "emit", args).await?).await?;
+        Ok(())
     }
 
     /// Read a declared property of the service object `handle` (live).

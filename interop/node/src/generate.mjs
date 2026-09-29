@@ -39,7 +39,8 @@ function locate(pluginPath) {
 // `options.provide` lists Cordis services the rutis application provides to
 // the plugins; their interface comes from the plugins' Context declarations.
 // `options.events` lists Cordis events forwarded to rutis listeners.
-export function generate(plugins, nodePackage, { provide = [], events = [] } = {}) {
+// `options.emits` lists events the rutis side emits into Cordis.
+export function generate(plugins, nodePackage, { provide = [], events = [], emits = [] } = {}) {
   const single = !Array.isArray(plugins)
   const group = (single ? [{ path: plugins }] : plugins).map(plugin => ({ ...plugin, ...locate(plugin.path) }))
   if (!group.length) throw new Error('a mount needs at least one plugin')
@@ -583,8 +584,13 @@ export function generate(plugins, nodePackage, { provide = [], events = [] } = {
   // that answers a waterfall or bail on behalf of rutis would change it.
   // ---------------------------------------------------------------------
   const eventCode = []
-  const forwarded = [] // { name, type }
-  for (const eventName of events) {
+  const forwarded = [] // Cordis -> rutis: { name, type }
+  const emitted = [] // rutis -> Cordis: { name, type }
+  for (const eventName of events.filter(name => emits.includes(name))) {
+    // One direction per event: forwarding both ways could loop.
+    throw new Error(`event ${eventName} is selected in both directions; forward it one way only`)
+  }
+  for (const [eventName, outward] of [...events.map(name => [name, false]), ...emits.map(name => [name, true])]) {
     const declaration = declaredEvents.get(eventName)
     if (!declaration) throw new Error(`no Cordis Events declaration found for the forwarded event ${eventName}`)
     if (eventName.startsWith('internal/')) throw new Error(`internal Cordis event ${eventName} is not forwarded`)
@@ -608,19 +614,23 @@ export function generate(plugins, nodePackage, { provide = [], events = [] } = {
       }
     })
     mapping = undefined
-    forwarded.push({ name: eventName, type: typeName })
-    eventCode.push(`/// The Cordis event \`${eventName}\`, forwarded to rutis listeners.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct ${typeName} { ${fields.map(field => `pub ${field.name}: ${field.rustType},`).join(' ')} }
-    impl ::rutis::Event for ${typeName} { const NAME: &'static str = ${literal(eventName)}; type Value = (); }
-    impl ${typeName} {
-      /// Build the event from the Cordis listener arguments.
+    ;(outward ? emitted : forwarded).push({ name: eventName, type: typeName })
+    const convert = outward
+      ? `/// The Cordis listener arguments for this event.
+      pub fn to_args(&self) -> Result<Vec<::rutis_interop::rpc::Value>, ::rutis_interop::Error> {
+        Ok(vec![${fields.map(field => `::rutis_interop::arg(&self.${field.name})?`).join(', ')}])
+      }`
+      : `/// Build the event from the Cordis listener arguments.
       pub fn from_args(args: Vec<::rutis_interop::rpc::Value>) -> Result<Self, ::rutis_interop::Error> {
         #[allow(unused_mut, unused_variables)]
         let mut args = args.into_iter();
         Ok(Self { ${fields.map(field => `${field.name}: ::rutis_interop::decode_value(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?,`).join(' ')} })
-      }
-    }`)
+      }`
+    eventCode.push(`/// The Cordis event \`${eventName}\`, ${outward ? 'emitted into Cordis when rutis emits it' : 'forwarded to rutis listeners'}.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ${typeName} { ${fields.map(field => `pub ${field.name}: ${field.rustType},`).join(' ')} }
+    impl ::rutis::Event for ${typeName} { const NAME: &'static str = ${literal(eventName)}; type Value = (); }
+    impl ${typeName} { ${convert} }`)
   }
 
   const hostCode = []
@@ -829,6 +839,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [] } = {
             observer: Some(projection.clone()),
             hosts,
             events: Some((events.names(), events.clone())),
+            emits: vec![${emitted.map(event => `${literal(event.name)}.into()`).join(', ')}],
           },
         ).await?;
         // Registered before any service binding, so native cleanup withdraws
@@ -842,6 +853,8 @@ export function generate(plugins, nodePackage, { provide = [], events = [] } = {
           owner.dispose().await.map_err(Into::into)
         }))))?;
         events.attach(ctx);
+        // rutis events re-emitted into Cordis; the listeners end with this plugin.
+        ${emitted.map(event => `ctx.events().on(ctx, &::rutis::EventKey::<${event.type}>::of(), ::rutis_interop::EmitToCordis::new(process.clone(), ${literal(event.name)}, ${event.type}::to_args))?;`).join('\n')}
         projection.attach(ctx, process)?;
         Ok(::rutis::Effect::Done)
       })
@@ -851,17 +864,18 @@ export function generate(plugins, nodePackage, { provide = [], events = [] } = {
   return { rust: rust_, inputs: program.getSourceFiles().map(file => file.fileName), diagnostics }
 }
 
-// `node generate.mjs <node package> [--provide=<service>...] [--event=<name>...] <plugin>` or,
+// `node generate.mjs <node package> [--provide=<service>...] [--event=<name>...] [--emit=<name>...] <plugin>` or,
 // for a group, `... <name>=<plugin> ...`.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [nodePackage, ...rest] = process.argv.slice(2)
     const provide = rest.filter(arg => arg.startsWith('--provide=')).map(arg => arg.slice('--provide='.length))
     const events = rest.filter(arg => arg.startsWith('--event=')).map(arg => arg.slice('--event='.length))
-    const members = rest.filter(arg => !arg.startsWith('--provide=') && !arg.startsWith('--event='))
+    const emits = rest.filter(arg => arg.startsWith('--emit=')).map(arg => arg.slice('--emit='.length))
+    const members = rest.filter(arg => !/^--(provide|event|emit)=/.test(arg))
     const plugins = members.length === 1 && !members[0].includes('=')
       ? resolve(members[0])
       : members.map(member => { const at = member.indexOf('='); return { name: member.slice(0, at), path: resolve(member.slice(at + 1)) } })
-    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage), { provide, events })))
+    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage), { provide, events, emits })))
   } catch (error) { console.error(error.message); process.exitCode = 1 }
 }
