@@ -1,8 +1,20 @@
-import { Context } from '@deepseek-ai/cordis'
+import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { Process } from './client.mjs'
 
 const [socketPath, pluginPath] = process.argv.slice(2)
+
+// The plugin's Service classes must come from the same Cordis instance as the
+// Context, so prefer the Cordis that the plugin itself resolves.
+async function loadCordis() {
+  try {
+    return await import(pathToFileURL(createRequire(pluginPath).resolve('@deepseek-ai/cordis')).href)
+  } catch {
+    return await import('@deepseek-ai/cordis')
+  }
+}
+
+const { Context } = await loadCordis()
 let peer
 const ctx = new Context()
 let pluginFiber
@@ -72,7 +84,10 @@ function mount(args) {
     slots.set(name, { methods: new Set(methods), object: undefined, handle: null, generation: 0, version: 0 })
   }
   return (async () => {
-    const plugin = await import(pathToFileURL(pluginPath).href)
+    const module = await import(pathToFileURL(pluginPath).href)
+    // An `apply` export is a function plugin; otherwise use the default
+    // export, which is how packaged plugins ship their Service class.
+    const plugin = typeof module.apply === 'function' ? module : (module.default ?? module)
     pluginFiber = ctx.plugin(plugin, args.config)
     await pluginFiber.await()
     if (!pluginFiber.store) throw new Error('native plugin dependencies are unresolved')

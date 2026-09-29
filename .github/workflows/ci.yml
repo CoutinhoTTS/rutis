@@ -34,9 +34,13 @@ jobs:
         with:
           node-version: '26'
           cache: npm
-          cache-dependency-path: interop/node/package-lock.json
+          cache-dependency-path: |
+            interop/node/package-lock.json
+            interop/baseline/package-lock.json
       - run: npm --prefix interop/node ci
       - run: npm --prefix interop/node test
+      # Real published Cordis plugins for the rutis-interop baseline test.
+      - run: npm --prefix interop/baseline ci
 
       - name: cargo test (workspace, skip external host e2e)
         run: cargo test --workspace
