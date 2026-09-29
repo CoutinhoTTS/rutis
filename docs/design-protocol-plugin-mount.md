@@ -23,13 +23,15 @@ rutis 应用进程                                   Node 进程
 | 挂载插件 | 生成代码 | 启动 Node 进程、注册清理 effect、把服务交给 `Projection` 发布 |
 | `Projection` | `crates/rutis-interop/src/projection.rs` | 把 Cordis 服务槽位的变化映射为 rutis 服务的注册、替换和撤销 |
 | `Process` / `rpc` | `crates/rutis-interop/src/{process,rpc,protocol}.rs` | 进程管理、线协议、调用与引用表 |
-| runner / Peer | `interop/node/src/{runner,client,peer,io-worker,errors}.mjs` | 加载原插件，跟踪服务槽位，执行调用 |
+| runner / Peer | `interop/node/src/{runner,client,peer,io-worker,errors}.mjs` | 按顺序加载一个或一组原插件，跟踪服务槽位，执行调用 |
 
 rutis 内核和 Cordis 都没有为兼容做任何修改。
 
 ## 2. 构建期生成
 
 `build.rs` 调用 `rutis_interop::build::cordis_module(插件, interop/node, 模块名)`，生成结果写入 `OUT_DIR/{模块名}.rs`，由应用 `include!`（`cordis_plugin` 是模块名为 `cordis` 的简写）。插件可以是 TypeScript 源文件，也可以是已安装的 npm 包目录；包按 `package.json` 的 `types` 分析，按运行时入口加载。
+
+**组合挂载**：已发布的插件通常设计成组合使用，例如 `dsh-workspace` 依赖 `dsh-storage`、`dsh-storage-domain` 和一个会话持久化实现提供的服务。`cordis_group(模块名, &[(名字, 插件), ...], interop/node)` 为一组插件生成一份绑定：这组插件按给定顺序装进同一个 Node 进程的同一个 Cordis Context，彼此的依赖按 Cordis 原生规则解析；组内所有插件的服务都导出到 rutis，同名服务在构建时报错；每个插件的配置是组合 `Config` 的一个字段，字段名即给定的名字。
 
 **服务发现**
 
@@ -122,7 +124,7 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 
 ## 5. 生命周期与故障
 
-- **启动**：挂载插件启动 Node 进程，握手后发 `mount`；Node 侧加载原插件并等待 `fiber.await()`。runner 使用插件自己解析到的 Cordis（插件的 `Service` 子类与 `Context` 必须来自同一模块实例），插件入口可以导出 `apply`，也可以默认导出 `Service` 子类。原插件启动失败时挂载失败，不注册任何服务。每个 Node 进程只运行被挂载的这一个插件，rutis 侧也暂不能为它提供依赖，所以原插件的必需依赖无法满足时挂载直接失败，错误列出缺少的服务；挂载之后服务变为不可用（例如被插件自己撤销）时，按 §4.2 撤销注册。
+- **启动**：挂载插件启动 Node 进程，握手后发 `mount`；Node 侧加载原插件并等待 `fiber.await()`。runner 使用插件自己解析到的 Cordis（插件的 `Service` 子类与 `Context` 必须来自同一模块实例），插件入口可以导出 `apply`，也可以默认导出 `Service` 子类。原插件启动失败时挂载失败，不注册任何服务。一个 Node 进程只运行这次挂载的插件（单个或一组），rutis 侧也暂不能为它们提供服务，所以组内满足不了的必需依赖永远不会到位：挂载直接失败，错误列出是哪个插件缺哪些服务。挂载之后服务变为不可用（例如被插件自己撤销）时，按 §4.2 撤销注册。
 - **清理顺序**：挂载插件先注册自己的清理 effect，再注册服务。rutis 逆序清理，所以先撤销服务、执行消费者的 disposer（此时仍可调用远端服务），最后才关闭 Node 进程。
 - **先清理后排空**：`dispose` 同时启动 Cordis 插件卸载和在途调用排空，不先等调用结束；disposer 可能正是解除在途等待的动作。
 - **故障**：Node 进程退出或连接断开时，所有在途调用和后续调用都返回 `Transport` 错误。不重试，不返回默认值，已发送但未返回的调用视为结果未知。

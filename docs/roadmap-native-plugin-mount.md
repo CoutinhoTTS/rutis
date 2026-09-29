@@ -46,7 +46,7 @@ node interop/baseline/classify.mjs
 | dsh-fs-local | `fs` | 是 | 8 / 8（含 `FsError` 业务错误） |
 | dsh-jobs-local | `jobs` | 是 | 2 / 2（含业务错误） |
 | dsh-commands | `commands` | 是 | 无纯数据方法 |
-| dsh-workspace | `workspaceRegistry` | 是（缺依赖，两边都不发布服务） | — |
+| dsh-workspace（与 storage、storage-json、storage-domain、session-persistence-jsonl 组合挂载） | `workspaceRegistry` | 是 | 2 / 2 |
 
 **绑定层结果**：生成器对 6 个插件全部停在 L0，原因相同：它们都用 `class X extends Service` 注册，服务名和类型写在 `declare module '@deepseek-ai/cordis' { interface Context { ... } }` 里，而生成器只识别 `ctx.provide('名字', 值)`。
 
@@ -64,6 +64,12 @@ node interop/baseline/classify.mjs
 | `Uint8Array` / `AsyncIterable` | 2 / 1 | 否 | 否 |
 
 事件：纯通知 5 个，waterfall 3 个（`fs/write-intent`、`fs/edit-intent`、`workspace/session-activity`），有返回值 1 个。
+
+### W1.5 组合挂载（已完成）
+
+W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设计成组合使用，单独挂载时依赖无法满足（`dsh-workspace` 在原生 Cordis 中单独装载同样起不来）。现在一次挂载可以是一组插件，装进同一个 Cordis Context，依赖按原生规则解析；绑定用 `cordis_group` 生成。`dsh-workspace` + `dsh-storage` + `dsh-storage-json` + `dsh-storage-domain` + `dsh-session-persistence-jsonl` 作为一组挂载后，协议层与原生一致，类型化绑定可调用。测试：`crates/rutis-interop/tests/group_mount.rs`、`dsh_baseline.rs`、`examples/dsh-baseline/tests/typed.rs`。
+
+跨进程依赖（Cordis 插件依赖 rutis 侧提供的服务）仍不支持，等有实际需求时再做。
 
 ### W2 工程防护（与 W1 并行）
 

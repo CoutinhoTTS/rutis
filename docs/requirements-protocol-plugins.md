@@ -5,6 +5,7 @@
 **以 rutis 为中心，让 rutis 应用跨进程挂载和使用现有的 Cordis（Node）插件。所有兼容工作都在兼容层完成，rutis 内核不为兼容而修改。**
 
 - Cordis 插件仍在真实的 Cordis 中运行，源码不改；rutis 侧通过自动生成的 Rust 类型、按 rutis 原生方式使用它。
+- 一次挂载可以是一组彼此依赖的 Cordis 插件（已发布插件通常设计成组合使用），组内依赖按 Cordis 原生规则解析。
 - 兼容层是外挂库（`crates/rutis-interop`、`interop/node`），不是另一个宿主，也不是新的插件框架。
 - 反方向（Cordis / dsh 宿主使用 Rust）由已在用的 `rutis-cordis` + `host/` 负责（见 [dsh 桥设计](design-dsh-bridge-2026-08-21.md)）。`rutis-interop` 中已有的反方向实现冻结，不再增加能力。
 
