@@ -27,6 +27,8 @@
 | 组合挂载：组内依赖解析、缺失依赖点名 | `crates/rutis-interop/tests/group_mount.rs` |
 | 宿主向插件提供服务：依赖门控、调用、注销函数、撤销与恢复 | `crates/rutis-interop/tests/host_services.rs`、`examples/dsh-baseline/tests/host.rs` |
 | 投影与导出生命周期（评审回归） | `crates/rutis-interop/tests/projection_lifecycle.rs` |
+| 回调参数、返回函数：真实插件 | `examples/dsh-baseline/tests/callbacks.rs` |
+| 取消：丢弃 future 中止 AbortSignal、迟到应答丢弃 | `crates/rutis-interop/tests/cancellation.rs` |
 | 活对象：实时属性、方法、身份、嵌在数据里、传回原对象 | `crates/rutis-interop/tests/live_objects.rs`、`interop/node/test/peer.test.mjs`、`examples/dsh-baseline/tests/typed.rs` |
 
 ## 3. 后续工作
@@ -92,7 +94,7 @@ W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设�
 1. ~~**服务发现改为读取类型声明**~~（已完成）：从 `Context` 声明取服务，支持 `Service` 子类和 npm 包目录。
 2. ~~**数据类型**~~（已完成）：品牌类型、数据对象、字面量联合、可空、可选参数、`Record`、动态 JSON；可省略的 `AbortSignal` 暂不暴露。结果：6 个插件全部生成类型化绑定并通过 L0；55 个成员中绑定 32 个（此前 1 个），`examples/dsh-baseline` 用生成的类型调用 credentials、fs、jobs，与原生行为一致。
 3. ~~**取消**~~（已完成）：`AbortSignal` 参数由 Rust future 的丢弃来中止；选项对象里的 `AbortSignal` 字段仍不传。绑定覆盖率 40 / 55。
-4. **回调参数、返回函数**：生成器接入协议已有的函数引用，10 个成员。
+4. ~~**回调参数、返回函数**~~（已完成）：回调参数生成 `impl Fn` 闭包参数（同步或返回 `BoxFuture`），返回的函数为 `RemoteFunction`，JS `Error` 值为 `JsError`。invariants 安装器、`modifyRecord`、`fs.watch`、`attachController` 在真实插件上验证（`examples/dsh-baseline/tests/callbacks.rs`）。绑定覆盖率 47 / 55。
 5. ~~**活对象**~~（已完成）：协议增加对象引用、记录值、方法调用和属性读取；生成器为带方法的接口和类实例生成代理，属性实时读取。`dsh-workspace` 的 `create` / `get` / `list` / `resolveByPath` 可以通过类型化绑定使用。绑定覆盖率 39 / 55（此前 32）。服务自身的属性（5 个）仍未绑定。
 6. **事件**：纯通知事件按设计 §7 转发；waterfall 事件暂不转发。
 7. `Uint8Array`、`AsyncIterable`：按需。
