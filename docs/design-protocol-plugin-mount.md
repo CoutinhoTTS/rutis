@@ -181,29 +181,17 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 - **先清理后排空**：`dispose` 同时启动 Cordis 插件卸载和在途调用排空，不先等调用结束；disposer 可能正是解除在途等待的动作。
 - **故障**：Node 进程退出或连接断开时，所有在途调用和后续调用都返回 `Transport` 错误。不重试，不返回默认值，已发送但未返回的调用视为结果未知。
 
-## 7. 事件（待实现）
+## 7. 事件
 
-跨边界事件按组转发，只用两侧的公开 API，不改 rutis 内核。
+**Cordis → rutis（已实现）**：应用在 `build.rs` 中用 `Bindings::event("名字")` 选择要转发的事件。
 
-**事件声明**：生成器读取原插件对 Cordis `Events` 接口的声明，为每个事件生成 Rust 事件类型（实现 rutis `Event`，`NAME` 为事件名）；载荷目前只支持数据类型。
+- **生成**：每个选中的事件生成一个 Rust 结构体（字段即事件参数，类型映射同 §2），实现 `rutis::Event`（`NAME` 为事件名，`Value = ()`）并提供 `from_args`。rutis 插件按原生方式订阅：`ctx.events().on(&ctx, &EventKey::<CredentialsRecordUpdated>::of(), listener)`。
+- **只转发通知**：只接受返回 `void` 的事件。waterfall、bail 等有返回值的事件在构建时报错，因为由转发监听替 rutis 作答会改变原事件链（`rutis-cordis` 在 dsh 上实测过，被动订阅 waterfall 事件会中断整条链）。`internal/*` 事件不转发。
+- **Node 侧**：原插件启动完成后，runner 为每个选中的事件在 Cordis 中登记一个转发监听，把参数经协议发给 Rust，返回一个在 rutis 侧处理完后 resolve 的 Promise。Cordis `emit` 忽略这个 Promise（发出即忘，边界规则 2）；`parallel` / `serial` 会等待它。被忽略的拒绝不会成为未处理拒绝。
+- **Rust 侧**：参数解码成事件类型后，用 rutis `parallel` 从挂载插件的 Context 发出。
+- **顺序**：转发监听在原插件启动之后登记，所以 Cordis 侧的顺序为：启动期间登记的监听 → rutis 一组 → 之后登记的监听；组内按 rutis 原生顺序执行（边界规则 3）。原插件启动期间发出的事件不会转发。
 
-**Cordis → rutis**：原插件加载完成后，runner 为每个转发事件在 Cordis 中登记一个转发监听。事件的签名决定转发方式，不去猜调用方用的是哪种分发：
-
-| 事件签名 | 转发监听的行为 | 在 rutis 侧 |
-| --- | --- | --- |
-| 返回 `void` / `Promise<void>` | 返回一个 Promise，在 rutis 侧处理完成后 resolve。`emit` 会忽略它（发出即忘），`parallel` / `serial` 会等待它 | `parallel` |
-| 同步返回值 | 同步调用 Rust，返回结果；用于 `bail` | `bail_sync`，`Some(v)` 转成短路值，`None` 转成 `undefined` |
-| 返回 `Promise<值>` | 异步调用 Rust；用于 `serial` | `serial` |
-
-**rutis → Cordis**：挂载插件为每个转发事件登记一个 rutis 监听，收到后调用 Node 侧，以相同签名规则在 Cordis 中分发。
-
-**防止回环**：两侧的转发监听都忽略由对方转发器自己发出的事件。
-
-**顺序**：转发监听在原插件 `apply` 完成后登记，所以 Cordis 侧顺序为：apply 期间登记的监听 → rutis 一组 → 之后登记的监听。组内按 rutis 原生顺序执行。
-
-**不转发**：`internal/*` 事件；waterfall 暂不转发，声明时在构建期报错。
-
-**默认只转发纯 `emit` 事件**：`rutis-cordis` 在 dsh 上实测过，被动订阅一个 waterfall 事件（例如 `agent/request`）会让链在转发监听处中断，因为不调用 `next()` 的监听会否决整条链。事件是否转发由应用显式列出，列表只收已确认为 `emit` 的事件；其他分发方式需要签名能证明转发监听的行为与原链相容。
+**rutis → Cordis（未实现）**：rutis 插件发出的事件交给 Cordis 监听，等有需要的目标插件时再做；做时需要防止两个方向的转发形成回环。
 
 ## 8. 反方向：Cordis 应用挂载 rutis 插件（冻结）
 

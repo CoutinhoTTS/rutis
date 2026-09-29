@@ -125,7 +125,7 @@ test('a group gets one Config field per member and rejects a service provided tw
     const { rust } = generate([{ name: 'clock', path: clock }, { name: 'greeter', path: greeter }], root)
     assert.match(rust, /pub struct Config \{ pub clock: ClockConfig, pub greeter: GreeterConfig, \}/)
     assert.match(rust, /pub struct ClockConfig \{ #\[serde\(rename = "now"\)\] pub now: f64,/)
-    assert.match(rust, /Process::launch_mount\(/)
+    assert.match(rust, /Process::mount\(/)
     assert.match(rust, /self\.config\.clock\.now\.is_finite\(\)/)
     assert.throws(() => generate([{ name: 'a', path: clock }, { name: 'b', path: clock }], root), /service clock is provided by both/)
   })
@@ -176,5 +176,24 @@ test('callback parameters take Rust closures and returned functions stay remote'
     assert.match(rust, /install\(&self, installer: impl Fn\(Context\) -> ::rutis::BoxFuture<'static, Result<\(\), ::rutis_interop::Error>>/)
     assert.match(rust, /let changed = ::rutis_interop::rpc::Value::callback\(move \|args\|/)
     assert.match(diagnostics.join('\n'), /hooks\.maybe is not bound: optional callback parameter/)
+  })
+})
+
+test('selected notification events become rutis event types', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    declare module '@deepseek-ai/cordis' {
+      interface Events {
+        'store/changed'(key: string, size?: number): void
+        'store/decide'(key: string): boolean
+      }
+    }
+    export function apply(ctx: Context) { ctx.provide('store', { ping(): number { return 1 } }) }
+  `, file => {
+    const { rust } = generate(file, root, { events: ['store/changed'] })
+    assert.match(rust, /pub struct StoreChanged \{ pub key: String, pub size: Option<f64>, \}/)
+    assert.match(rust, /impl ::rutis::Event for StoreChanged \{ const NAME: &'static str = "store\/changed"; type Value = \(\); \}/)
+    assert.match(rust, /events\.forward::<StoreChanged>\("store\/changed", StoreChanged::from_args\);/)
+    assert.throws(() => generate(file, root, { events: ['store/decide'] }), /event store\/decide is not a notification/)
+    assert.throws(() => generate(file, root, { events: ['store/missing'] }), /no Cordis Events declaration found/)
   })
 })

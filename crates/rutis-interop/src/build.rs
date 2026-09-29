@@ -58,6 +58,7 @@ pub struct Bindings {
     node_package: std::path::PathBuf,
     members: Vec<(Option<String>, std::path::PathBuf)>,
     provided: Vec<String>,
+    events: Vec<String>,
 }
 
 impl Bindings {
@@ -67,6 +68,7 @@ impl Bindings {
             node_package: node_package.as_ref().to_owned(),
             members: Vec::new(),
             provided: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -91,12 +93,20 @@ impl Bindings {
         self
     }
 
+    /// Forward a Cordis event to rutis listeners as a generated event type.
+    /// Only notifications (events returning `void`) can be forwarded.
+    pub fn event(mut self, name: &str) -> Self {
+        self.events.push(name.to_owned());
+        self
+    }
+
     pub fn generate(self) -> Result<(), Box<dyn std::error::Error>> {
         let single = matches!(self.members.as_slice(), [(None, _)]);
         let mut args: Vec<std::ffi::OsString> = self
             .provided
             .iter()
             .map(|service| format!("--provide={service}").into())
+            .chain(self.events.iter().map(|event| format!("--event={event}").into()))
             .collect();
         for (name, plugin) in &self.members {
             let plugin = plugin.canonicalize()?;

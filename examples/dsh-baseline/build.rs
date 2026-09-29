@@ -5,7 +5,6 @@ use std::path::Path;
 
 const PLUGINS: &[(&str, &str)] = &[
     ("invariants", "dsh-invariants"),
-    ("credentials", "dsh-credentials-local"),
     ("fs", "dsh-fs-local"),
     ("jobs", "dsh-jobs-local"),
     ("commands", "dsh-commands"),
@@ -42,6 +41,13 @@ fn main() {
         .collect();
     rutis_interop::build::cordis_group("workspace", &members, "../../interop/node")
         .unwrap_or_else(|error| panic!("generate bindings for the workspace group: {error}"));
+    // Credential changes are forwarded to rutis listeners as events.
+    rutis_interop::build::Bindings::new("credentials", "../../interop/node")
+        .plugin(modules.join("dsh-credentials-local"))
+        .event("credentials/reference-updated")
+        .event("credentials/record-updated")
+        .generate()
+        .unwrap_or_else(|error| panic!("generate bindings for dsh-credentials-local: {error}"));
     // dsh-persona contributes prompt sections to `systemPrompt`, which the
     // rutis application provides.
     rutis_interop::build::Bindings::new("persona", "../../interop/node")

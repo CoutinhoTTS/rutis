@@ -167,6 +167,17 @@ function mount(args) {
     if (unresolved.length) throw new Error(`native plugin dependencies are unresolved: ${unresolved.join('; ')}`)
     refresh()
     mounted = true
+    // Forward selected Cordis events to rutis. Registered after the plugins
+    // started, so the rutis side runs as one group after the listeners the
+    // plugins registered while starting. emit ignores the returned Promise
+    // (fire and forget); parallel / serial wait for the rutis listeners.
+    for (const name of args.events ?? []) {
+      ctx.on(name, (...values) => {
+        const done = peer.callAsync('', 'event', [name, values])
+        done.catch(() => {}) // an ignored emit must not become an unhandled rejection
+        return done
+      })
+    }
     return { services: Object.fromEntries([...slots].map(([name, slot]) => [name, [slot.handle, slot.version]])) }
   })()
 }

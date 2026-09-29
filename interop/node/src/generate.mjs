@@ -38,7 +38,8 @@ function locate(pluginPath) {
 // members get one `Config` field each, named by `name`.
 // `options.provide` lists Cordis services the rutis application provides to
 // the plugins; their interface comes from the plugins' Context declarations.
-export function generate(plugins, nodePackage, { provide = [] } = {}) {
+// `options.events` lists Cordis events forwarded to rutis listeners.
+export function generate(plugins, nodePackage, { provide = [], events = [] } = {}) {
   const single = !Array.isArray(plugins)
   const group = (single ? [{ path: plugins }] : plugins).map(plugin => ({ ...plugin, ...locate(plugin.path) }))
   if (!group.length) throw new Error('a mount needs at least one plugin')
@@ -245,15 +246,19 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
   // ---------------------------------------------------------------------
   // Plugin shape: a function plugin (`apply`) or a Service class export.
   // ---------------------------------------------------------------------
-  // Context augmentations anywhere in the program: service name -> type.
+  // Context augmentations anywhere in the program: service name -> type;
+  // Events augmentations: event name -> declaration.
   const augmentations = new Map()
+  const declaredEvents = new Map()
   for (const file of program.getSourceFiles()) {
     ts.forEachChild(file, function visit(node) {
       if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name) && node.name.text === '@deepseek-ai/cordis') {
         for (const statement of node.body?.statements ?? []) {
-          if (!ts.isInterfaceDeclaration(statement) || statement.name.text !== 'Context') continue
+          if (!ts.isInterfaceDeclaration(statement)) continue
           for (const member of statement.members) {
-            if (member.name && member.type) augmentations.set(member.name.getText().replace(/^['"]|['"]$/g, ''), { type: checker.getTypeFromTypeNode(member.type), node: member, file: file.fileName })
+            const name = member.name?.getText().replace(/^['"]|['"]$/g, '')
+            if (statement.name.text === 'Context' && name && member.type) augmentations.set(name, { type: checker.getTypeFromTypeNode(member.type), node: member, file: file.fileName })
+            if (statement.name.text === 'Events' && name) declaredEvents.set(name, member)
           }
         }
       }
@@ -572,6 +577,52 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
   // Host-provided services: a trait the rutis application implements, a
   // dispatcher for calls from Node, and a registration helper.
   // ---------------------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // Forwarded events: one rutis event type per selected Cordis event.
+  // Only notifications (returning void) are forwarded: a Cordis listener
+  // that answers a waterfall or bail on behalf of rutis would change it.
+  // ---------------------------------------------------------------------
+  const eventCode = []
+  const forwarded = [] // { name, type }
+  for (const eventName of events) {
+    const declaration = declaredEvents.get(eventName)
+    if (!declaration) throw new Error(`no Cordis Events declaration found for the forwarded event ${eventName}`)
+    if (eventName.startsWith('internal/')) throw new Error(`internal Cordis event ${eventName} is not forwarded`)
+    const signature = checker.getSignatureFromDeclaration(declaration)
+    const returned = signature && checker.getReturnTypeOfSignature(signature)
+    if (!signature || !(returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined))) {
+      throw new Error(`${location(declaration)}: event ${eventName} is not a notification (it returns ${returned ? checker.typeToString(returned) : 'a value'}); only events returning void are forwarded`)
+    }
+    const typeName = claim(eventName)
+    mapping = `${location(declaration)}: event ${eventName}`
+    const fields = signature.parameters.map(parameter => {
+      const parameterDeclaration = parameter.valueDeclaration
+      const parameterType = checker.getTypeOfSymbolAtLocation(parameter, parameterDeclaration)
+      try {
+        let rustType = rust(parameterType, `${typeName}${pascal(parameter.name)}`)
+        if (parameterDeclaration?.questionToken && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
+        return { name: ident(snake(parameter.name)), rustType }
+      } catch (error) {
+        if (!(error instanceof Unsupported)) throw error
+        throw new Error(`${location(declaration)}: event ${eventName} cannot be forwarded: ${parameter.name} is ${error.message}`)
+      }
+    })
+    mapping = undefined
+    forwarded.push({ name: eventName, type: typeName })
+    eventCode.push(`/// The Cordis event \`${eventName}\`, forwarded to rutis listeners.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ${typeName} { ${fields.map(field => `pub ${field.name}: ${field.rustType},`).join(' ')} }
+    impl ::rutis::Event for ${typeName} { const NAME: &'static str = ${literal(eventName)}; type Value = (); }
+    impl ${typeName} {
+      /// Build the event from the Cordis listener arguments.
+      pub fn from_args(args: Vec<::rutis_interop::rpc::Value>) -> Result<Self, ::rutis_interop::Error> {
+        #[allow(unused_mut, unused_variables)]
+        let mut args = args.into_iter();
+        Ok(Self { ${fields.map(field => `${field.name}: ::rutis_interop::decode_value(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?,`).join(' ')} })
+      }
+    }`)
+  }
+
   const hostCode = []
   const hosts = [] // { name, trait, dispatch, manifest }
   for (const [serviceName, { type }] of provided) {
@@ -748,6 +799,7 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
   ${items.join('\n')}
   ${serviceCode.join('\n')}
   ${hostCode.join('\n')}
+  ${eventCode.join('\n')}
   pub struct Plugin { config: Config, injects: Vec<::rutis::TypeKey> }
   impl Plugin { pub fn new(config: Config) -> Self { Self { config, injects: vec![${hostKeys.join(', ')}] } } }
   impl ::rutis::Plugin for Plugin {
@@ -767,21 +819,29 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
           methods: ::rutis_interop::serde_json::json!(${JSON.stringify(host.manifest)}),
           dispatch: ::std::sync::Arc::new(${host.dispatch}(ctx.require_as::<dyn ${host.trait}>(::rutis::TypeKey::of::<dyn ${host.trait}>())?)),
         }`).join(', ')}];
-        let process = ::rutis_interop::Process::launch_mount(
+        let events = ::rutis_interop::Events::new();
+        ${forwarded.map(event => `events.forward::<${event.type}>(${literal(event.name)}, ${event.type}::from_args);`).join('\n')}
+        let process = ::rutis_interop::Process::mount(
           ::std::path::Path::new(${literal(nodePackage)}),
-          &[${launched.join(',\n            ')}],
-          ::rutis_interop::serde_json::json!(${JSON.stringify(manifest)}),
-          Some(projection.clone()),
-          hosts,
+          ::rutis_interop::Mount {
+            plugins: vec![${launched.join(',\n            ')}],
+            services: ::rutis_interop::serde_json::json!(${JSON.stringify(manifest)}),
+            observer: Some(projection.clone()),
+            hosts,
+            events: Some((events.names(), events.clone())),
+          },
         ).await?;
         // Registered before any service binding, so native cleanup withdraws
         // the services and runs their consumers' disposers first.
         let owner = process.clone();
         let followed = projection.clone();
+        let forwarding = events.clone();
         ctx.effect(move || ::rutis::Effect::AsyncDisposer(Box::new(move || Box::pin(async move {
+          forwarding.close();
           followed.close();
           owner.dispose().await.map_err(Into::into)
         }))))?;
+        events.attach(ctx);
         projection.attach(ctx, process)?;
         Ok(::rutis::Effect::Done)
       })
@@ -791,16 +851,17 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
   return { rust: rust_, inputs: program.getSourceFiles().map(file => file.fileName), diagnostics }
 }
 
-// `node generate.mjs <node package> [--provide=<service>...] <plugin>` or,
+// `node generate.mjs <node package> [--provide=<service>...] [--event=<name>...] <plugin>` or,
 // for a group, `... <name>=<plugin> ...`.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [nodePackage, ...rest] = process.argv.slice(2)
     const provide = rest.filter(arg => arg.startsWith('--provide=')).map(arg => arg.slice('--provide='.length))
-    const members = rest.filter(arg => !arg.startsWith('--provide='))
+    const events = rest.filter(arg => arg.startsWith('--event=')).map(arg => arg.slice('--event='.length))
+    const members = rest.filter(arg => !arg.startsWith('--provide=') && !arg.startsWith('--event='))
     const plugins = members.length === 1 && !members[0].includes('=')
       ? resolve(members[0])
       : members.map(member => { const at = member.indexOf('='); return { name: member.slice(0, at), path: resolve(member.slice(at + 1)) } })
-    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage), { provide })))
+    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage), { provide, events })))
   } catch (error) { console.error(error.message); process.exitCode = 1 }
 }

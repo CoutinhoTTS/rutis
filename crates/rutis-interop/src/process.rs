@@ -1,3 +1,4 @@
+use crate::events::EventSink;
 use crate::rpc::{Connection, Dispatch, Reply, Value as RpcValue};
 use crate::Error;
 use serde_json::{json, Value};
@@ -35,6 +36,23 @@ struct Imports {
     slots: Slots,
     events: Option<Arc<dyn ServiceEvents>>,
     hosts: HashMap<String, Arc<dyn HostDispatch>>,
+    forwarded: Option<Arc<dyn EventSink>>,
+}
+
+/// Everything one mount needs: the plugins loaded in order into one Cordis
+/// Context, the exported services, and what the rutis side contributes.
+#[derive(Default)]
+pub struct Mount<'a> {
+    /// `(entry, config)` per plugin, in load order.
+    pub plugins: Vec<(&'a Path, Value)>,
+    /// Exported services: `{ name: [member, ...] }`.
+    pub services: Value,
+    /// Follows changes of the exported service slots.
+    pub observer: Option<Arc<dyn ServiceEvents>>,
+    /// rutis services the plugins may depend on.
+    pub hosts: Vec<Host>,
+    /// Cordis events forwarded to the rutis side, and where they go.
+    pub events: Option<(Vec<String>, Arc<dyn EventSink>)>,
 }
 impl Imports {
     fn update(&self, name: String, handle: Option<String>, version: u64) {
@@ -59,6 +77,15 @@ impl Dispatch for Imports {
                 .get(name)
                 .ok_or_else(|| Error::Value(format!("no host service {name}")))?;
             return host.invoke(method, args);
+        }
+        if target.is_empty() && method == "event" {
+            let mut args = args.list()?.into_iter();
+            let name: String = crate::decode(args.next().unwrap_or(RpcValue::Undefined).json()?)?;
+            let values = args.next().unwrap_or(RpcValue::List(Vec::new())).list()?;
+            return match &self.forwarded {
+                Some(sink) => sink.event(&name, values),
+                None => Ok(RpcValue::Undefined),
+            };
         }
         if !(target.is_empty() && method == "service") {
             return Err(Error::Value(
@@ -123,6 +150,32 @@ impl Process {
         events: Option<Arc<dyn ServiceEvents>>,
         hosts: Vec<Host>,
     ) -> Result<Arc<Self>, Error> {
+        Self::mount(
+            node_package,
+            Mount {
+                plugins: plugins.to_vec(),
+                services,
+                observer: events,
+                hosts,
+                events: None,
+            },
+        )
+        .await
+    }
+
+    /// Launch a mount: see [`Mount`].
+    pub async fn mount(node_package: &Path, mount: Mount<'_>) -> Result<Arc<Self>, Error> {
+        let Mount {
+            plugins,
+            services,
+            observer: events,
+            hosts,
+            events: forwarded,
+        } = mount;
+        let (forwarded_names, forwarded) = match forwarded {
+            Some((names, sink)) => (names, Some(sink)),
+            None => (Vec::new(), None),
+        };
         let provided: serde_json::Map<String, Value> = hosts
             .iter()
             .map(|host| (host.name.clone(), host.methods.clone()))
@@ -173,6 +226,7 @@ impl Process {
             slots: Slots::default(),
             events,
             hosts,
+            forwarded,
         });
         let peer = Connection::connect(stream, imports.clone())?;
         peer.ready().await?;
@@ -187,7 +241,7 @@ impl Process {
             .call_async(
                 "",
                 "mount",
-                json!({ "plugins": plugins, "services": services, "provided": provided }),
+                json!({ "plugins": plugins, "services": services, "provided": provided, "events": forwarded_names }),
             )
             .await?;
         let slots: HashMap<String, (Option<String>, u64)> =

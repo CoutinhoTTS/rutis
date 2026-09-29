@@ -8,6 +8,8 @@
 
 pub mod build;
 #[cfg(unix)]
+mod events;
+#[cfg(unix)]
 mod objects;
 #[cfg(unix)]
 mod process;
@@ -21,9 +23,11 @@ pub mod rpc;
 pub mod server;
 
 #[cfg(unix)]
+pub use events::{EventSink, Events};
+#[cfg(unix)]
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
-pub use process::{Host, HostDispatch, Process, ServiceEvents};
+pub use process::{Host, HostDispatch, Mount, Process, ServiceEvents};
 #[cfg(unix)]
 pub use projection::Projection;
 pub use serde;
