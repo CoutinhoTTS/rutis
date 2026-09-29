@@ -22,3 +22,8 @@ runtime = "../../interop/node"
 
 [package.metadata.rutis-interop.mounts.bindings]
 path = "../../interop/node/test/fixtures/counter.ts"
+
+# Edge cases of the generated bindings, mounted by tests/edge.rs.
+[package.metadata.rutis-interop.mounts.edge]
+path = "../../interop/node/test/fixtures/edge.ts"
+provide = ["edgeHost"]

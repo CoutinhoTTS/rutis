@@ -52,18 +52,22 @@ rutis 内核和 Cordis 都没有为兼容做任何修改。
 | `number` / `string` / `boolean` / `void` | `f64` / `String` / `bool` / `()` |
 | 品牌类型 `string & { __brand }`（带别名） | 同名 newtype，`#[serde(transparent)]`，可 `From<&str>` |
 | 字符串字面量联合 | 同名枚举，变体按原字符串重命名 |
-| 数据接口 / 对象字面量 | 同名结构体，字段 snake_case，按原名序列化；可选字段为 `Option` 且不序列化 `None` |
-| `T \| undefined` / `T \| null` | `Option<T>` |
+| 数据接口 / 对象字面量 | 同名结构体，字段 snake_case，按原名序列化；缺省规则同下一行 |
+| `T \| null`（必填） | `Option<T>`，`None` 发送 `null` |
+| `T \| undefined`、可选参数 / 字段 `x?: T` | `Option<T>`，`None` 发送 `undefined`（字段省略） |
+| 可选且可空 `x?: T \| null` | `Option<Option<T>>`：`None` 省略，`Some(None)` 发送 `null`；解码时区分缺失与 `null` |
 | 数组 / 只读数组 | `Vec<T>`；参数位置借用为 `&[T]` |
 | `Record<string, T>` | `BTreeMap<String, T>` |
-| `any` / `unknown`，以及其他联合（如带判别字段的对象联合） | `serde_json::Value`：数据原样过线，只是没有生成静态结构 |
+| `any` / `unknown`，以及其他纯数据联合（如带判别字段的对象联合） | `serde_json::Value`：数据原样过线，只是没有生成静态结构。值里若含活对象或函数，解码报错，不会把内部引用标记当数据返回 |
+| 活对象的联合（`Left \| Right`） | `ObjectRef`：引用保留，按需包进某个成员的代理（`Left(object)`）；各成员仍生成代理 |
+| 活对象与数据的联合（`Session \| SessionId`） | 同名 `untagged` 枚举，引用变体在前；多个活对象成员共用一个 `Object(ObjectRef)` 变体 |
 | 活对象：带方法的接口 / 对象，或类实例（例如 `Workspace`、`SessionHandle`） | 同名代理结构体（包着 `ObjectRef`）：数据属性生成 getter，每次读取都是实时值；方法按服务方法的规则生成；可嵌在数据结构、数组和参数里；两个代理指向同一对象时相等；传回 Cordis 时还原为原对象 |
 | 函数参数（回调） | `impl Fn(参数...) -> Result<T>`；回调返回 Promise 时为 `BoxFuture`，`void \| Promise<void>` 也按异步处理。Cordis 可以立即调用，也可以保存后再调用；回调收到的函数和 `AbortSignal` 是原始协议值。可选的回调参数暂不支持 |
 | 返回的函数（例如注销函数） | `RemoteFunction`：`call` 同步调用，`call_async` 等待返回的 Promise；函数留在 Cordis 侧 |
 | JS `Error` 值（例如回调收到的错误） | `JsError { name, message, stack }` |
 | JS 内置类型（`Map`、`Set`、迭代器等） | 不绑定 |
 
-方法：同步方法仍同步，返回 Promise 的生成 `async fn`，都返回 `Result<T, rutis_interop::Error>`。可选参数为 `Option<T>`，`None` 以 JS `undefined` 传递（不是 `null`）。`AbortSignal` 参数不出现在 Rust 签名里：Cordis 方法收到一个真实的 `AbortSignal`，丢弃返回的 future（例如 `tokio::time::timeout` 超时）即取消调用并中止这个信号。同步方法无法中途取消，它收到的信号永远不会中止。选项对象里的 `AbortSignal` 字段暂不支持，不传。
+方法：同步方法仍同步，返回 Promise 的生成 `async fn`，都返回 `Result<T, rutis_interop::Error>`。参数的缺省规则同上表：可选参数的 `None` 以 JS `undefined` 传递，必填可空参数的 `None` 以 `null` 传递。生成代码的内部变量带 `__rutis_` 前缀，插件的任何参数名都不会与之冲突。`AbortSignal` 参数不出现在 Rust 签名里：Cordis 方法收到一个真实的 `AbortSignal`，丢弃返回的 future（例如 `tokio::time::timeout` 超时）即取消调用并中止这个信号。同步方法无法中途取消，它收到的信号永远不会中止。选项对象里的 `AbortSignal` 字段暂不支持，不传。
 
 服务自身的属性同样生成 getter，经控制操作 `get(句柄, 属性)` 实时读取。
 

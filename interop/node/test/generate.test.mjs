@@ -97,6 +97,53 @@ test('a Service class provides the Context members typed as it or its bases', as
   })
 })
 
+// PR #73 review of 2fe5e3e: null stays apart from undefined, parameter
+// names cannot shadow generated locals, and unions of live objects stay
+// references.
+test('null, parameter names and unions of live objects', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    declare module '@deepseek-ai/cordis' { interface Context { edge: Edge, edgeHost: EdgeHost } }
+    export interface Input { key: string | null; note?: string; label?: string | null }
+    export interface Config { key: string | null }
+    export class Left { kind() { return 'left' } }
+    export class Right { kind() { return 'right' } }
+    export interface Picked { item: Left | { plain: true } }
+    export interface EdgeHost { call(args: string[], suffix: string): string }
+    export class Edge {
+      nullable(value: string | null): boolean { return value === null }
+      either(value?: string | null): string { return String(value) }
+      input(input: Input): Input { return input }
+      call(args: (value: number) => number): number { return args(1) }
+      object(choice: boolean): Left | Right { return choice ? new Left() : new Right() }
+      picked(): Picked { return { item: new Left() } }
+    }
+    export function apply(ctx: Context, config: Config) { ctx.provide('edge', new Edge()) }
+  `, file => {
+    const { rust, diagnostics } = generate(file, root, { provide: ['edgeHost'] })
+    // Required nullable: None sends null. Optional and nullable: Option<Option<T>>.
+    assert.match(rust, /pub fn nullable\(&self, value: Option<&str>\)/)
+    assert.match(rust, /vec!\[::rutis_interop::arg\(&value\)\?\]/)
+    assert.match(rust, /pub fn either\(&self, value: Option<Option<&str>>\)/)
+    assert.match(rust, /vec!\[::rutis_interop::optional\(value\)\?\]/)
+    assert.match(rust, /#\[serde\(rename = "key", default\)\] pub key: Option<String>,/)
+    assert.match(rust, /#\[serde\(rename = "note", default, skip_serializing_if = "Option::is_none"\)\] pub note: Option<String>,/)
+    assert.match(rust, /#\[serde\(rename = "label", default, skip_serializing_if = "Option::is_none", deserialize_with = "::rutis_interop::nullable"\)\] pub label: Option<Option<String>>,/)
+    assert.match(rust, /pub struct Config \{ #\[serde\(rename = "key"\)\] pub key: Option<String>, \}/)
+    // A parameter named `args` does not shadow the generated locals.
+    assert.match(rust, /let args = ::rutis_interop::rpc::Value::callback\(move \|__rutis_args\|/)
+    assert.match(rust, /let args: Vec<String> = ::rutis_interop::decode_value\(__rutis_args\.next\(\)/)
+    assert.match(rust, /let suffix: String = ::rutis_interop::decode_value\(__rutis_args\.next\(\)/)
+    // A union of live objects is an untyped reference; each member keeps a proxy.
+    assert.match(rust, /pub fn object\(&self, choice: bool\) -> Result<::rutis_interop::ObjectRef, ::rutis_interop::Error>/)
+    assert.match(rust, /pub struct Left\(pub ::rutis_interop::ObjectRef\)/)
+    assert.match(rust, /pub struct Right\(pub ::rutis_interop::ObjectRef\)/)
+    // A union mixing live objects and data keeps the reference variant first.
+    assert.deepEqual(diagnostics, [])
+    assert.match(rust, /#\[serde\(untagged\)\]\npub enum PickedItem \{ Left\(Left\), PickedItem2\(PickedItem2\), \}/)
+    assert.match(rust, /pub fn picked\(&self\) -> Result<Picked, ::rutis_interop::Error>/)
+  })
+})
+
 test('ordinary imported interfaces participate in Cargo regeneration', async () => {
   await fixture(`import type { Context } from '@deepseek-ai/cordis'
     import type { Settings } from './settings.js'
@@ -174,7 +221,7 @@ test('callback parameters take Rust closures and returned functions stay remote'
     assert.match(rust, /pub fn watch\(&self, path: &str, changed: impl Fn\(Option<::rutis_interop::JsError>\) -> Result<\(\), ::rutis_interop::Error> \+ Send \+ Sync \+ 'static\) -> Result<::rutis_interop::RemoteFunction, ::rutis_interop::Error>/)
     assert.match(rust, /pub async fn update\(&self, mutate: impl Fn\(Option<f64>\) -> ::rutis::BoxFuture<'static, Result<f64, ::rutis_interop::Error>> \+ Send \+ Sync \+ 'static\)/)
     assert.match(rust, /install\(&self, installer: impl Fn\(Context\) -> ::rutis::BoxFuture<'static, Result<\(\), ::rutis_interop::Error>>/)
-    assert.match(rust, /let changed = ::rutis_interop::rpc::Value::callback\(move \|args\|/)
+    assert.match(rust, /let changed = ::rutis_interop::rpc::Value::callback\(move \|__rutis_args\|/)
     assert.match(diagnostics.join('\n'), /hooks\.maybe is not bound: optional callback parameter/)
   })
 })
@@ -196,7 +243,7 @@ test('selected notification events become rutis event types', async () => {
     assert.throws(() => generate(file, root, { events: ['store/decide'] }), /event store\/decide is not a notification/)
     // rutis -> Cordis: the same event type gains to_args and a listener.
     const outward = generate(file, root, { emits: ['store/changed'] }).rust
-    assert.match(outward, /pub fn to_args\(&self\) -> Result<Vec<::rutis_interop::rpc::Value>, ::rutis_interop::Error> \{\s*Ok\(vec!\[::rutis_interop::arg\(&self\.key\)\?, ::rutis_interop::arg\(&self\.size\)\?\]\)/)
+    assert.match(outward, /pub fn to_args\(&self\) -> Result<Vec<::rutis_interop::rpc::Value>, ::rutis_interop::Error> \{\s*Ok\(vec!\[::rutis_interop::arg\(&self\.key\)\?, ::rutis_interop::optional\(self\.size\.as_ref\(\)\)\?\]\)/)
     assert.match(outward, /EmitToCordis::new\(process\.clone\(\), "store\/changed", StoreChanged::to_args\)/)
     assert.match(outward, /emits: vec!\["store\/changed"\.into\(\)\]/)
     assert.throws(() => generate(file, root, { events: ['store/changed'], emits: ['store/changed'] }), /selected in both directions/)

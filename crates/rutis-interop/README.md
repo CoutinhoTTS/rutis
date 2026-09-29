@@ -94,8 +94,8 @@ store.set(&credentials::CredentialRef::from("app/api-key"), "s3cret").await?;
 | 能力 | 用法 |
 | --- | --- |
 | 方法 | 同步方法仍同步，返回 Promise 的方法是 `async fn`；返回 `Result<T, rutis_interop::Error>`，Cordis 的业务错误为 `Error::Remote` |
-| 数据类型 | 品牌类型为 newtype（`CredentialRef::from("…")`），接口为结构体，字面量联合为枚举，可选为 `Option` |
-| 活对象 | 带方法的对象（例如 `Workspace`）是代理：属性 getter 实时读取，方法调用原对象，传回时还原为原对象 |
+| 数据类型 | 品牌类型为 newtype（`CredentialRef::from("…")`），接口为结构体，字面量联合为枚举；可选（`x?: T`）为 `Option`，`None` 发送 `undefined`；必填可空（`T \| null`）为 `Option`，`None` 发送 `null`；可选且可空为 `Option<Option<T>>` |
+| 活对象 | 带方法的对象（例如 `Workspace`）是代理：属性 getter 实时读取，方法调用原对象，传回时还原为原对象；活对象的联合为 `ObjectRef`，与数据混合的联合为枚举 |
 | 回调 | 函数参数传 Rust 闭包；返回的函数（例如注销函数）为 `RemoteFunction` |
 | 取消 / 超时 | 丢弃返回的 future 即取消，Cordis 方法收到的 `AbortSignal` 会中止：`tokio::time::timeout(d, store.read_record(&key)).await` |
 | 事件 | `events` 中的事件生成 rutis 事件类型，用 `ctx.events().on(&ctx, &EventKey::<CredentialsRecordUpdated>::of(), listener)` 订阅；`emits` 中的事件由 rutis `emit` / `parallel` 发往 Cordis |

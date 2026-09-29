@@ -98,6 +98,63 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     return { type, optional: members.length !== type.types.length, members }
   }
 
+  // How a value sent to the Cordis side may be absent. TypeScript tells
+  // `null` from an omitted / `undefined` value and plugins may treat them
+  // differently (clear vs keep): a nullable value sends null, an omissible
+  // one undefined (or no field), and one that may be either is
+  // `Option<Option<T>>` (outer `None` omits it, `Some(None)` sends null).
+  function absence(type, omissible) {
+    const members = type.isUnion() ? type.types : [type]
+    return {
+      nullable: members.some(member => member.flags & ts.TypeFlags.Null),
+      omissible: omissible || members.some(member => member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)),
+    }
+  }
+  function outbound(rustType, { nullable, omissible }) {
+    if (!nullable && !omissible) return { rustType, omit: false, nested: false }
+    const inner = rustType.startsWith('Option<') ? rustType.slice(7, -1) : rustType
+    if (nullable && omissible) return { rustType: `Option<Option<${inner}>>`, omit: true, nested: true }
+    return { rustType: `Option<${inner}>`, omit: omissible, nested: false }
+  }
+  // Serde attributes for an outbound field (see `outbound`).
+  function absentField(field, deserialize) {
+    if (field.nested) return ['default', 'skip_serializing_if = "Option::is_none"', ...(deserialize ? ['deserialize_with = "::rutis_interop::nullable"'] : [])]
+    if (field.omit) return ['default', 'skip_serializing_if = "Option::is_none"']
+    return field.rustType.startsWith('Option<') ? ['default'] : []
+  }
+  // Rust parameter names never shadow the generated code's own locals.
+  const paramName = name => {
+    const id = ident(snake(name))
+    return id.startsWith('__rutis') ? `p${id}` : id
+  }
+  // Whether values of a type can be (or contain) live objects or functions,
+  // which cannot cross as data.
+  function isLive(type) {
+    if (!(type.flags & ts.TypeFlags.Object) || checker.isArrayType(type) || checker.isTupleType(type)) return false
+    const declared = type.getSymbol()?.declarations?.[0]?.getSourceFile()
+    if (declared && program.isSourceFileDefaultLibrary(declared)) return false
+    if (type.getCallSignatures().length) return true
+    return !!(type.getSymbol()?.flags & ts.SymbolFlags.Class) || checker.getPropertiesOfType(type).some(property => {
+      const declaration = property.valueDeclaration ?? property.declarations?.[0]
+      return declaration && checker.getTypeOfSymbolAtLocation(property, declaration).getCallSignatures().length
+    })
+  }
+  function holdsLive(type, seen = new Set()) {
+    if (seen.has(type)) return false
+    seen.add(type)
+    if (type.isUnion() || type.isIntersection()) return type.types.some(member => holdsLive(member, seen))
+    if (!(type.flags & ts.TypeFlags.Object)) return false
+    if (isLive(type)) return true
+    if (checker.isArrayType(type) || checker.isTupleType(type)) return checker.getTypeArguments(type).some(member => holdsLive(member, seen))
+    const declared = type.getSymbol()?.declarations?.[0]?.getSourceFile()
+    if (declared && program.isSourceFileDefaultLibrary(declared)) return false
+    const index = checker.getIndexInfoOfType(type, ts.IndexKind.String)
+    return (index && holdsLive(index.type, seen)) || checker.getPropertiesOfType(type).some(property => {
+      const declaration = property.valueDeclaration ?? property.declarations?.[0]
+      return declaration && holdsLive(checker.getTypeOfSymbolAtLocation(property, declaration), seen)
+    })
+  }
+
   // Map a TypeScript type to a Rust type used for data (arguments, results,
   // fields). Throws Unsupported with the reason for non-data types.
   function rust(type, hint) {
@@ -153,9 +210,56 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     if (members.every(member => member.flags & ts.TypeFlags.NumberLike)) return 'f64'
     if (members.every(member => member.flags & ts.TypeFlags.StringLiteral)) return literalEnum(type, members, hint)
     if (members.every(member => member.flags & ts.TypeFlags.StringLike)) return 'String'
+    // A union of live objects stays a reference: an untyped `ObjectRef`
+    // that wraps into any member's proxy (e.g. `Left(object)`).
+    if (members.every(isLive)) {
+      members.forEach((member, index) => rust(member, `${hint}${index + 1}`))
+      return '::rutis_interop::ObjectRef'
+    }
+    // Dynamic JSON would lose the objects a union member may hold.
+    if (members.some(member => holdsLive(member))) return mixedUnion(type, members, hint)
     // Other unions (e.g. discriminated objects) stay dynamic JSON: the data
     // crosses unchanged, only its static Rust shape is not generated.
     return '::rutis_interop::serde_json::Value'
+  }
+
+  // A union of live objects and data: an untagged enum whose variants keep
+  // their references. Live members cannot be told apart by their data, so
+  // several of them share one `ObjectRef` variant (wrap it in a member's
+  // proxy); reference variants come first so data variants never take a
+  // reference for an object.
+  function mixedUnion(type, members, hint) {
+    if (named.has(type)) return named.get(type)
+    const live = members.filter(isLive)
+    const variants = []
+    if (live.length === 1) variants.push(rust(live[0], `${hint}Object`))
+    if (live.length > 1) {
+      live.forEach((member, index) => rust(member, `${hint}${index + 1}`))
+      variants.push('::rutis_interop::ObjectRef')
+    }
+    for (const member of members.filter(member => !isLive(member))) {
+      const rustType = rust(member, `${hint}${variants.length + 1}`)
+      if (!variants.includes(rustType)) variants.push(rustType)
+    }
+    if (variants.includes('::rutis_interop::serde_json::Value')) {
+      variants.push(...variants.splice(variants.indexOf('::rutis_interop::serde_json::Value'), 1))
+    }
+    const name = claim(typeName(type, hint))
+    named.set(type, name)
+    const used = new Set()
+    const body = variants.map(rustType => {
+      const base = rustType === '::rutis_interop::ObjectRef' ? 'Object'
+        : rustType === '::rutis_interop::serde_json::Value' ? 'Json'
+          : rustType === 'String' ? 'Text' : rustType === 'f64' ? 'Number' : rustType === 'bool' ? 'Bool'
+            : rustType.startsWith('Vec<') ? 'List' : rustType.includes('BTreeMap<') ? 'Map'
+              : rustType.replace(/<.*$/, '').split('::').pop()
+      let variant = base
+      for (let i = 2; used.has(variant); i++) variant = `${base}${i}`
+      used.add(variant)
+      return `${variant}(${rustType}),`
+    })
+    items.push(`${derive}\n#[serde(untagged)]\npub enum ${name} { ${body.join(' ')} }`)
+    return name
   }
 
   function literalEnum(type, members, hint) {
@@ -226,11 +330,9 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
         if (!/^(r#)?[a-z_][a-z0-9_]*$/.test(field) || fields.has(field)) throw new Unsupported(`field ${property.getName()} cannot be represented in Rust`)
         fields.add(field)
         const optional = !!(property.flags & ts.SymbolFlags.Optional)
-        let fieldType = rust(propertyType, `${name}${pascal(property.getName())}`)
-        const attributes = [`rename = ${literal(property.getName())}`]
-        if (optional && !fieldType.startsWith('Option<')) fieldType = `Option<${fieldType}>`
-        if (fieldType.startsWith('Option<')) attributes.push('default', 'skip_serializing_if = "Option::is_none"')
-        return [`#[serde(${attributes.join(', ')})] pub ${field}: ${fieldType},`]
+        const shape = outbound(rust(propertyType, `${name}${pascal(property.getName())}`), absence(propertyType, optional))
+        const attributes = [`rename = ${literal(property.getName())}`, ...absentField(shape, true)]
+        return [`#[serde(${attributes.join(', ')})] pub ${field}: ${shape.rustType},`]
       })
       if (index) body.push(`#[serde(flatten)] pub extra: ::std::collections::BTreeMap<String, ${rust(index.type, `${name}Extra`)}>,`)
       items.push(`${derive}\npub struct ${name} { ${body.join('\n')} }`)
@@ -401,16 +503,15 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
           // that aborts when the returned future is dropped (a cancellation).
           const { members } = stripNullish(parameterType)
           if (members.length === 1 && members[0].getSymbol()?.getName() === 'AbortSignal') {
-            return { name: ident(snake(parameter.name)), js: parameter.name, signal: true, index }
+            return { name: paramName(parameter.name), js: parameter.name, signal: true, index }
           }
           // A function parameter takes a Rust closure; Cordis calls it back.
           if (members.length === 1 && members[0].getCallSignatures().length) {
             if (optional || stripNullish(parameterType).optional) throw new Unsupported('optional callback parameter')
-            return { name: ident(snake(parameter.name)), js: parameter.name, callback: callbackSignature(members[0], `${hint}${pascal(parameter.name)}`), index }
+            return { name: paramName(parameter.name), js: parameter.name, callback: callbackSignature(members[0], `${hint}${pascal(parameter.name)}`), index }
           }
-          let rustType = rust(parameterType, `${hint}${pascal(parameter.name)}`)
-          if (optional && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
-          return { name: ident(snake(parameter.name)), js: parameter.name, rustType, index }
+          const { rustType, omit } = outbound(rust(parameterType, `${hint}${pascal(parameter.name)}`), absence(parameterType, optional))
+          return { name: paramName(parameter.name), js: parameter.name, rustType, omit, index }
         })
         const returned = checker.getReturnTypeOfSignature(signature)
         const promised = checker.getPromisedTypeOfPromise(returned)
@@ -459,29 +560,36 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
       throw new Unsupported('callback returning a value or a Promise')
     }
     const nothing = awaited.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined | ts.TypeFlags.Never)
-    const result = nothing ? '()' : rust(awaited, `${hint}Result`)
+    const shape = nothing ? { rustType: '()', omit: false } : outbound(rust(awaited, `${hint}Result`), absence(awaited, false))
+    const result = shape.rustType
     const output = promise
       ? `::rutis::BoxFuture<'static, Result<${result}, ::rutis_interop::Error>>`
       : `Result<${result}, ::rutis_interop::Error>`
-    return { params, async: !!promise, result, rustFn: `impl Fn(${params.map(param => param.rustType).join(', ')}) -> ${output} + Send + Sync + 'static` }
+    return { params, async: !!promise, result, omit: shape.omit, rustFn: `impl Fn(${params.map(param => param.rustType).join(', ')}) -> ${output} + Send + Sync + 'static` }
   }
 
   // Wrap a Rust closure as a protocol callback the Cordis side can call.
+  // Its locals are prefixed so that no parameter name can shadow them.
   function callbackValue(name, callback) {
     const decode = callback.params.map((param, index) => param.raw
-      ? `let a${index} = args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined);`
-      : `let a${index}: ${param.rustType} = ::rutis_interop::decode_value(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?;`).join(' ')
-    const values = callback.params.map((_, index) => `a${index}`).join(', ')
-    const encode = callback.result === '()' ? 'Ok(::rutis_interop::rpc::Value::Undefined)' : '::rutis_interop::arg(&result)'
+      ? `let __rutis_a${index} = __rutis_args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined);`
+      : `let __rutis_a${index}: ${param.rustType} = ::rutis_interop::decode_value(__rutis_args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?;`).join(' ')
+    const values = callback.params.map((_, index) => `__rutis_a${index}`).join(', ')
+    const encode = encodeResult(callback.result, callback.omit, '__rutis_result')
     const call = callback.async
-      ? `let pending = ${name}(${values}); Ok(::rutis_interop::rpc::Value::future(async move { #[allow(unused_variables)] let result = pending.await?; ${encode} }))`
-      : `#[allow(unused_variables)] let result = ${name}(${values})?; ${encode}`
-    return `let ${name} = ::rutis_interop::rpc::Value::callback(move |args| {
+      ? `let __rutis_pending = ${name}(${values}); Ok(::rutis_interop::rpc::Value::future(async move { #[allow(unused_variables)] let __rutis_result = __rutis_pending.await?; ${encode} }))`
+      : `#[allow(unused_variables)] let __rutis_result = ${name}(${values})?; ${encode}`
+    return `let ${name} = ::rutis_interop::rpc::Value::callback(move |__rutis_args| {
           #[allow(unused_mut, unused_variables)]
-          let mut args = args.list()?.into_iter();
+          let mut __rutis_args = __rutis_args.list()?.into_iter();
           ${decode}
           ${call}
         });`
+  }
+
+  function encodeResult(rustType, omit, value) {
+    if (rustType === '()') return 'Ok(::rutis_interop::rpc::Value::Undefined)'
+    return omit ? `::rutis_interop::optional(${value})` : `::rutis_interop::arg(&${value})`
   }
 
   // One generated method; `target(method, args)` is the call expression.
@@ -492,7 +600,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     const args = method.params.map(parameter => parameter.signal
       ? '::rutis_interop::rpc::Value::Signal'
       : parameter.callback ? parameter.name
-      : parameter.rustType.startsWith('Option<')
+      : parameter.omit
         ? `::rutis_interop::optional(${parameter.name})?`
         : `::rutis_interop::arg(&${parameter.name})?`).join(', ')
     const cancellable = method.params.some(parameter => parameter.signal)
@@ -545,6 +653,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     if (rustType.startsWith('Vec<')) return `&[${rustType.slice(4, -1)}]`
     if (rustType.startsWith('Option<')) {
       const inner = rustType.slice(7, -1)
+      if (inner.startsWith('Option<')) return `Option<${borrowed(inner)}>`
       return inner === 'f64' || inner === 'bool' ? rustType : `Option<${borrowed(inner).replace(/^&?/, '&')}>`
     }
     return `&${rustType}`
@@ -552,6 +661,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
   function finite(name, rustType) {
     if (rustType === 'f64') return `if !${name}.is_finite() { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
     if (rustType === 'Option<f64>') return `if ${name}.is_some_and(|value| !value.is_finite()) { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
+    if (rustType === 'Option<Option<f64>>') return `if ${name}.flatten().is_some_and(|value| !value.is_finite()) { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
     if (rustType === 'Vec<f64>') return `if ${name}.iter().any(|value| !value.is_finite()) { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
     return ''
   }
@@ -605,8 +715,11 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
       const parameterDeclaration = parameter.valueDeclaration
       const parameterType = checker.getTypeOfSymbolAtLocation(parameter, parameterDeclaration)
       try {
+        const optional = !!(parameterDeclaration?.questionToken || parameterDeclaration?.initializer)
         let rustType = rust(parameterType, `${typeName}${pascal(parameter.name)}`)
-        if (parameterDeclaration?.questionToken && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
+        // Arguments emitted into Cordis keep null apart from undefined.
+        if (outward) return { name: ident(snake(parameter.name)), ...outbound(rustType, absence(parameterType, optional)) }
+        if (optional && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
         return { name: ident(snake(parameter.name)), rustType }
       } catch (error) {
         if (!(error instanceof Unsupported)) throw error
@@ -618,7 +731,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     const convert = outward
       ? `/// The Cordis listener arguments for this event.
       pub fn to_args(&self) -> Result<Vec<::rutis_interop::rpc::Value>, ::rutis_interop::Error> {
-        Ok(vec![${fields.map(field => `::rutis_interop::arg(&self.${field.name})?`).join(', ')}])
+        Ok(vec![${fields.map(field => field.omit ? `::rutis_interop::optional(self.${field.name}.as_ref())?` : `::rutis_interop::arg(&self.${field.name})?`).join(', ')}])
       }`
       : `/// Build the event from the Cordis listener arguments.
       pub fn from_args(args: Vec<::rutis_interop::rpc::Value>) -> Result<Self, ::rutis_interop::Error> {
@@ -667,7 +780,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
           const parameterType = checker.getTypeOfSymbolAtLocation(parameter, parameterDeclaration)
           const optional = !!(parameterDeclaration?.questionToken || parameterDeclaration?.initializer)
           const { optional: nullable, members } = stripNullish(parameterType)
-          const name = ident(snake(parameter.name))
+          const name = paramName(parameter.name)
           if ((optional || nullable) && members.length === 1 && members[0].getSymbol()?.getName() === 'AbortSignal') return { name, omitted: true }
           // A function argument arrives as a callable protocol reference.
           if (members.length === 1 && members[0].getCallSignatures().length) {
@@ -683,9 +796,9 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
         // Returning a function (e.g. a disposer) means building a callable
         // protocol value, e.g. `rpc::Value::callback(...)`.
         const rawResult = !awaited.isUnion() && awaited.getCallSignatures().length > 0
-        const result = rawResult ? '::rutis_interop::rpc::Value' : rust(awaited, `${hint}Result`)
+        const shape = rawResult ? { rustType: '::rutis_interop::rpc::Value', omit: false } : outbound(rust(awaited, `${hint}Result`), absence(awaited, false))
         rustNames.add(rustName)
-        methods.push({ name: memberName, rustName, params, async: !!promised, result, rawResult })
+        methods.push({ name: memberName, rustName, params, async: !!promised, result: shape.rustType, omit: shape.omit, rawResult })
       } catch (error) {
         if (!(error instanceof Unsupported)) throw error
         skip(error.message)
@@ -706,17 +819,17 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
         ? `fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> ::rutis::BoxFuture<'static, Result<${method.result}, ::rutis_interop::Error>> { Box::pin(async { Err(${unimplemented(method)}) }) }`
         : `fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> Result<${method.result}, ::rutis_interop::Error> { Err(${unimplemented(method)}) }`
     }).join('\n')
-    const encode = method => method.rawResult ? 'Ok(result)'
-      : method.result === '()' ? 'Ok(::rutis_interop::rpc::Value::Undefined)'
-        : '::rutis_interop::arg(&result)'
+    // The dispatcher's locals are prefixed so that no parameter name can
+    // shadow them.
+    const encode = method => method.rawResult ? 'Ok(__rutis_result)' : encodeResult(method.result, method.omit, '__rutis_result')
     const arms = methods.map(method => {
-      const decode = method.params.map(parameter => parameter.omitted ? 'args.next();'
-        : parameter.raw ? `let ${parameter.name} = args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined);`
-          : `let ${parameter.name}: ${parameter.rustType} = ::rutis_interop::decode_value(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?;`).join('\n')
+      const decode = method.params.map(parameter => parameter.omitted ? '__rutis_args.next();'
+        : parameter.raw ? `let ${parameter.name} = __rutis_args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined);`
+          : `let ${parameter.name}: ${parameter.rustType} = ::rutis_interop::decode_value(__rutis_args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?;`).join('\n')
       const call = `${method.rustName}(${method.params.filter(parameter => !parameter.omitted).map(parameter => parameter.name).join(', ')})`
       return method.async
-        ? `${literal(method.name)} => { ${decode} let host = self.0.clone(); Ok(::rutis_interop::rpc::Value::future(async move { let result = host.${call}.await?; ${encode(method)} })) }`
-        : `${literal(method.name)} => { ${decode} let result = self.0.${call}?; ${encode(method)} }`
+        ? `${literal(method.name)} => { ${decode} let __rutis_host = self.0.clone(); Ok(::rutis_interop::rpc::Value::future(async move { let __rutis_result = __rutis_host.${call}.await?; ${encode(method)} })) }`
+        : `${literal(method.name)} => { ${decode} let __rutis_result = self.0.${call}?; ${encode(method)} }`
     }).join('\n')
     const missing = unavailable.length
       ? `///\n/// Members not bound yet (calls from Cordis report an error):\n${unavailable.map(([name, reason]) => `/// - \`${name}\`: ${reason}`).join('\n')}\n`
@@ -729,11 +842,11 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     /// Serves calls from the Cordis side to a [\`${traitName}\`].
     pub struct ${dispatchName}(pub ::std::sync::Arc<dyn ${traitName}>);
     impl ::rutis_interop::HostDispatch for ${dispatchName} {
-      fn invoke(&self, method: &str, args: ::rutis_interop::rpc::Value) -> ::rutis_interop::rpc::Reply {
+      fn invoke(&self, __rutis_method: &str, __rutis_args: ::rutis_interop::rpc::Value) -> ::rutis_interop::rpc::Reply {
         #[allow(unused_mut, unused_variables)]
-        let mut args = args.list()?.into_iter();
-        match method { ${arms}
-          _ => Err(::rutis_interop::Error::Value(format!("${serviceName}.{method} is not bound"))),
+        let mut __rutis_args = __rutis_args.list()?.into_iter();
+        match __rutis_method { ${arms}
+          _ => Err(::rutis_interop::Error::Value(format!("${serviceName}.{__rutis_method} is not bound"))),
         }
       }
     }
@@ -768,10 +881,10 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
         diagnostics.push(`${location(declaration)}: config.${property.getName()} is dynamic JSON: ${error.message}`)
       }
       const optional = !!(property.flags & ts.SymbolFlags.Optional)
-      if (optional && !fieldType.startsWith('Option<')) fieldType = `Option<${fieldType}>`
+      const shape = outbound(fieldType, absence(checker.getTypeOfSymbolAtLocation(property, declaration), optional))
+      fieldType = shape.rustType
       if (!fieldType.startsWith('Option<')) defaultable = false
-      const attributes = [`rename = ${literal(property.getName())}`]
-      if (fieldType.startsWith('Option<')) attributes.push('skip_serializing_if = "Option::is_none"')
+      const attributes = [`rename = ${literal(property.getName())}`, ...absentField(shape, false).filter(attribute => attribute !== 'default')]
       fields.push(`#[serde(${attributes.join(', ')})] pub ${field}: ${fieldType},`)
       const check = finite(`${accessor}.${field}`, fieldType)
       if (check) checks.push(check.replace('::rutis_interop::Error::Value("non-finite number".into())', '::rutis_interop::Error::Value("non-finite number".into()).into()'))

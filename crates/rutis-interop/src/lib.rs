@@ -74,6 +74,18 @@ pub fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Resul
     serde_json::from_value(value).map_err(|error| Error::Value(error.to_string()))
 }
 
+/// Deserialize a field that TypeScript declares both optional and nullable
+/// (`key?: T | null`) as `Option<Option<T>>`: a missing field is `None`, an
+/// explicit `null` is `Some(None)`. Use with `#[serde(default)]`.
+#[cfg(unix)]
+pub fn nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 /// Encode an optional argument: `None` is passed as JS `undefined`, not
 /// `null`, so defaults and `=== undefined` checks behave as in native calls.
 #[cfg(unix)]

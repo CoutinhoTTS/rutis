@@ -16,7 +16,8 @@ use crate::Error;
 const MARK: &str = "\u{0}rutis:reference";
 
 thread_local! {
-    static DECODING: RefCell<Vec<Reference>> = const { RefCell::new(Vec::new()) };
+    /// The references of the value being decoded; taken as they are consumed.
+    static DECODING: RefCell<Vec<Option<Reference>>> = const { RefCell::new(Vec::new()) };
     static ENCODING: RefCell<Option<Vec<Reference>>> = const { RefCell::new(None) };
 }
 
@@ -129,7 +130,12 @@ fn referenced<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Reference, D
         .and_then(Json::as_u64)
         .ok_or_else(|| de::Error::custom("expected a reference, received data"))?;
     DECODING
-        .with(|references| references.borrow().get(index as usize).cloned())
+        .with(|references| {
+            references
+                .borrow_mut()
+                .get_mut(index as usize)
+                .and_then(Option::take)
+        })
         .ok_or_else(|| de::Error::custom("reference outside of a decode"))
 }
 
@@ -150,13 +156,25 @@ fn mark<S: Serializer>(reference: &Reference, serializer: S) -> Result<S::Ok, S:
 
 /// Decode a call result into a generated type; object references in it
 /// become `ObjectRef`s.
+///
+/// Every reference must end up in an `ObjectRef` or `RemoteFunction`: one
+/// that lands in dynamic JSON (or is ignored) would lose the object, so the
+/// decode fails instead of returning the internal marker as data.
 pub fn decode_value<T: de::DeserializeOwned>(value: Value) -> Result<T, Error> {
     let mut references = Vec::new();
     let json = marked(value, &mut references);
-    let previous = DECODING.with(|current| current.replace(references));
+    let previous =
+        DECODING.with(|current| current.replace(references.into_iter().map(Some).collect()));
     let result = serde_json::from_value(json);
-    DECODING.with(|current| current.replace(previous));
-    result.map_err(|error| Error::Value(error.to_string()))
+    let left = DECODING.with(|current| current.replace(previous));
+    let value = result.map_err(|error| Error::Value(error.to_string()))?;
+    if left.iter().any(Option::is_some) {
+        return Err(Error::Value(
+            "the value holds a live Cordis object or function that its Rust type cannot represent"
+                .into(),
+        ));
+    }
+    Ok(value)
 }
 
 fn marked(value: Value, references: &mut Vec<Reference>) -> Json {
