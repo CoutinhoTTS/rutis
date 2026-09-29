@@ -345,9 +345,9 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
   for (const [serviceName, { type, node }] of services) {
     const structName = claim(typeName(type, serviceName))
     structs.set(serviceName, structName)
-    const { methods, unavailable } = bindMembers(type, serviceName, structName, { properties: false })
-    manifest[serviceName] = methods.map(method => method.name)
-    serviceCode.push(serviceStruct(serviceName, structName, methods, unavailable))
+    const { methods, getters, unavailable } = bindMembers(type, serviceName, structName, { properties: true })
+    manifest[serviceName] = [...methods, ...getters].map(member => member.name)
+    serviceCode.push(serviceStruct(serviceName, structName, methods, getters, unavailable))
   }
 
   // Bind the members of a service or live object type. Methods keep their
@@ -549,10 +549,16 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
     if (rustType === 'Vec<f64>') return `if ${name}.iter().any(|value| !value.is_finite()) { return Err(::rutis_interop::Error::Value("non-finite number".into())); }`
     return ''
   }
-  function serviceStruct(serviceName, structName, methods, unavailable) {
-    const code = methods.map(method => methodCode(serviceName, method, (method, args) => method.async
-      ? `self.process.invoke_async(&self.handle, ${literal(method.name)}, ${args}).await?`
-      : `self.process.invoke(&self.handle, ${literal(method.name)}, ${args})?`)).join('\n')
+  function serviceStruct(serviceName, structName, methods, getters, unavailable) {
+    const code = [
+      ...getters.map(getter => `/// Reads \`${serviceName}.${getter.name}\` from the service object.
+      pub fn ${getter.rustName}(&self) -> Result<${getter.result}, ::rutis_interop::Error> {
+        ::rutis_interop::decode_value(self.process.get(&self.handle, ${literal(getter.name)})?)
+      }`),
+      ...methods.map(method => methodCode(serviceName, method, (method, args) => method.async
+        ? `self.process.invoke_async(&self.handle, ${literal(method.name)}, ${args}).await?`
+        : `self.process.invoke(&self.handle, ${literal(method.name)}, ${args})?`)),
+    ].join('\n')
     const missing = unboundDocs(unavailable)
     // One proxy per handle: it keeps addressing the object it was created
     // for, and releases that object when the last Arc snapshot is dropped.

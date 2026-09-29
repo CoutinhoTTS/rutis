@@ -179,6 +179,14 @@ function dispatch(target, method, args) {
       case 'dispose':
         closing = true
         return Promise.all([dispose(), peer.drain()]).then(() => null)
+      case 'get': {
+        // A live read of a declared service property.
+        const [handle, property] = args ?? []
+        const entry = handles.get(handle)
+        if (!entry) throw new Error(`unknown or released service object ${handle}`)
+        if (!slots.get(entry.name).methods.has(property)) throw new Error(`unknown service property ${entry.name}.${property}`)
+        return entry.object[property]
+      }
       case 'release': {
         const entry = handles.get(args?.[0])
         if (entry) { entry.released = true; if (!entry.current) handles.delete(args[0]) }

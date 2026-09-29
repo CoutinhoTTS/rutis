@@ -53,9 +53,11 @@ test('public state cannot silently become a copied value', async () => {
     class Service { value = 1; read(): number { return this.value } }
     export function apply(ctx: Context) { ctx.provide('state', new Service()) }
   `, file => {
+    // Bound as a live read of the service object, never a copied field.
     const { rust, diagnostics } = generate(file, root)
-    assert.match(diagnostics.join('\n'), /state\.value is not bound: property/)
+    assert.deepEqual(diagnostics, [])
     assert.doesNotMatch(rust, /pub value/)
+    assert.match(rust, /pub fn value\(&self\) -> Result<f64, ::rutis_interop::Error> \{\s*::rutis_interop::decode_value\(self\.process\.get\(&self\.handle, "value"\)\?\)/)
   })
 })
 

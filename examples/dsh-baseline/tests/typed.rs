@@ -88,6 +88,7 @@ async fn published_plugins_through_typed_bindings() {
         project.canonicalize().unwrap().to_str().unwrap()
     );
     assert!(created.session_ids().unwrap().is_empty());
+    assert!(registry.pinned_session_ids().unwrap().is_empty());
     assert_eq!(registry.get(&id).unwrap().as_ref(), Some(&created));
     assert_eq!(registry.list().unwrap(), vec![created.clone()]);
     assert_eq!(
@@ -129,6 +130,8 @@ async fn published_plugins_through_typed_bindings() {
     assert_eq!(entries[0].r#type, fs::FsInfoType::File);
     assert_eq!(entries[0].target, file);
     assert!(files.contains(&root, &file).unwrap());
+    // Service properties are read live from the service object.
+    assert_eq!(files.sandbox_mode().unwrap(), None);
     let written = files.write_text(&file, "world", None, None).await.unwrap();
     assert_eq!(written.operation, fs::FsWriteOutcomeOperation::Update);
     assert_eq!(files.read_text(&file).await.unwrap(), "world");

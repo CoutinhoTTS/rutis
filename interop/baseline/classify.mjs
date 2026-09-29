@@ -24,7 +24,7 @@ export const CAPABILITIES = {
   'abort-signal': ['AbortSignal parameter (aborted when the Rust future is dropped)', true, true],
   bytes: ['Uint8Array / ArrayBuffer', false, false],
   'async-iterable': ['AsyncIterable / stream', false, false],
-  property: ['public property', false, false],
+  property: ['public property (read live)', true, true],
   generic: ['generic method', false, false],
 }
 

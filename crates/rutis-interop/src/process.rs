@@ -239,6 +239,12 @@ impl Process {
         self.peer.invoke(handle, method, RpcValue::List(args))
     }
 
+    /// Read a declared property of the service object `handle` (live).
+    pub fn get(&self, handle: &str, property: &str) -> Result<RpcValue, Error> {
+        self.peer
+            .invoke("", "get", json!([handle, property]).into())
+    }
+
     /// Asynchronous form of [`Process::invoke`]: awaits a returned Promise.
     pub async fn invoke_async(
         &self,
