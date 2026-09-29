@@ -103,8 +103,37 @@ test('a group gets one Config field per member and rejects a service provided tw
     const { rust } = generate([{ name: 'clock', path: clock }, { name: 'greeter', path: greeter }], root)
     assert.match(rust, /pub struct Config \{ pub clock: ClockConfig, pub greeter: GreeterConfig, \}/)
     assert.match(rust, /pub struct ClockConfig \{ #\[serde\(rename = "now"\)\] pub now: f64,/)
-    assert.match(rust, /Process::launch_group\(/)
+    assert.match(rust, /Process::launch_mount\(/)
     assert.match(rust, /self\.config\.clock\.now\.is_finite\(\)/)
     assert.throws(() => generate([{ name: 'a', path: clock }, { name: 'b', path: clock }], root), /service clock is provided by both/)
+  })
+})
+
+test('a host-provided service becomes a trait, a dispatcher and an injected dependency', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    declare module '@deepseek-ai/cordis' { interface Context { prompt: Prompt } }
+    export type Slot = 'prefix' | 'suffix'
+    export interface Section { name: string; order: number; text: string | ((scope: string) => string) }
+    export interface Prompt {
+      section(section: Section): () => void
+      order(slot: Slot): number
+      render(signal?: AbortSignal): Promise<string>
+      provider(provide: (scope: string) => string): () => void
+    }
+    export const inject = ['prompt']
+    export function apply(ctx: Context) { ctx.effect(() => ctx.prompt.section({ name: 'a', order: ctx.prompt.order('prefix'), text: 'hi' })) }
+  `, file => {
+    const { rust, diagnostics } = generate(file, root, { provide: ['prompt'] })
+    assert.match(diagnostics.join('\n'), /host prompt\.section: function values in .* are not bound; only its data members are/)
+    assert.match(rust, /pub trait PromptHost: Send \+ Sync \+ 'static/)
+    assert.match(rust, /fn section\(&self, section: Section\) -> Result<::rutis_interop::rpc::Value, ::rutis_interop::Error>/)
+    assert.match(rust, /fn order\(&self, slot: Slot\) -> Result<f64, ::rutis_interop::Error>/)
+    assert.match(rust, /fn render\(&self\) -> ::rutis::BoxFuture<'static, Result<String, ::rutis_interop::Error>>/)
+    assert.match(rust, /fn provider\(&self, provide: ::rutis_interop::rpc::Value\)/)
+    assert.match(rust, /pub text: String,/)
+    assert.match(rust, /pub fn provide_prompt\(ctx: &::rutis::Ctx, host: impl PromptHost\)/)
+    assert.match(rust, /injects: vec!\[::rutis::TypeKey::of::<dyn PromptHost>\(\)\]/)
+    assert.match(rust, /"section":"sync","order":"sync","render":"async","provider":"sync"/)
+    assert.throws(() => generate(file, root, { provide: ['missing'] }), /no Cordis Context declaration found for the host-provided service missing/)
   })
 })

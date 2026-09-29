@@ -13,12 +13,28 @@ pub trait ServiceEvents: Send + Sync + 'static {
     fn changed(&self, name: &str, handle: Option<String>, version: u64);
 }
 
+/// A rutis service provided to the mounted Cordis plugins: the Node side
+/// registers a proxy under `name` whose calls arrive here.
+pub trait HostDispatch: Send + Sync + 'static {
+    fn invoke(&self, method: &str, args: RpcValue) -> Reply;
+}
+
+/// One host-provided service: its Cordis name, the bound methods as
+/// `{ method: "sync" | "async" }`, and the dispatcher that serves them.
+pub struct Host {
+    pub name: String,
+    pub methods: Value,
+    pub dispatch: Arc<dyn HostDispatch>,
+}
+
 type Slots = Arc<Mutex<HashMap<String, (Option<String>, u64)>>>;
 
-/// Records the newest handle per slot and forwards newer changes.
+/// Records the newest handle per slot and forwards newer changes; serves
+/// calls to host-provided services.
 struct Imports {
     slots: Slots,
     events: Option<Arc<dyn ServiceEvents>>,
+    hosts: HashMap<String, Arc<dyn HostDispatch>>,
 }
 impl Imports {
     fn update(&self, name: String, handle: Option<String>, version: u64) {
@@ -37,6 +53,13 @@ impl Imports {
 }
 impl Dispatch for Imports {
     fn invoke(&self, _: &Connection, target: &str, method: &str, args: RpcValue) -> Reply {
+        if let Some(name) = target.strip_prefix("host:") {
+            let host = self
+                .hosts
+                .get(name)
+                .ok_or_else(|| Error::Value(format!("no host service {name}")))?;
+            return host.invoke(method, args);
+        }
         if !(target.is_empty() && method == "service") {
             return Err(Error::Value(
                 "application has no exported service target".into(),
@@ -87,6 +110,27 @@ impl Process {
         services: Value,
         events: Option<Arc<dyn ServiceEvents>>,
     ) -> Result<Arc<Self>, Error> {
+        Self::launch_mount(node_package, plugins, services, events, Vec::new()).await
+    }
+
+    /// Launch a group and provide rutis services to it: each host is
+    /// registered in the Cordis Context before the plugins load, so their
+    /// dependencies on it resolve natively.
+    pub async fn launch_mount(
+        node_package: &Path,
+        plugins: &[(&Path, Value)],
+        services: Value,
+        events: Option<Arc<dyn ServiceEvents>>,
+        hosts: Vec<Host>,
+    ) -> Result<Arc<Self>, Error> {
+        let provided: serde_json::Map<String, Value> = hosts
+            .iter()
+            .map(|host| (host.name.clone(), host.methods.clone()))
+            .collect();
+        let hosts = hosts
+            .into_iter()
+            .map(|host| (host.name, host.dispatch))
+            .collect();
         let Some((plugin, _)) = plugins.first() else {
             return Err(Error::Value("a mount needs at least one plugin".into()));
         };
@@ -128,6 +172,7 @@ impl Process {
         let imports = Arc::new(Imports {
             slots: Slots::default(),
             events,
+            hosts,
         });
         let peer = Connection::connect(stream, imports.clone())?;
         peer.ready().await?;
@@ -142,7 +187,7 @@ impl Process {
             .call_async(
                 "",
                 "mount",
-                json!({ "plugins": plugins, "services": services }),
+                json!({ "plugins": plugins, "services": services, "provided": provided }),
             )
             .await?;
         let slots: HashMap<String, (Option<String>, u64)> =

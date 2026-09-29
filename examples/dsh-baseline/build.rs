@@ -42,5 +42,12 @@ fn main() {
         .collect();
     rutis_interop::build::cordis_group("workspace", &members, "../../interop/node")
         .unwrap_or_else(|error| panic!("generate bindings for the workspace group: {error}"));
+    // dsh-persona contributes prompt sections to `systemPrompt`, which the
+    // rutis application provides.
+    rutis_interop::build::Bindings::new("persona", "../../interop/node")
+        .plugin(modules.join("dsh-persona"))
+        .provide("systemPrompt")
+        .generate()
+        .unwrap_or_else(|error| panic!("generate bindings for dsh-persona: {error}"));
     println!("cargo:rustc-cfg=dsh_baseline");
 }

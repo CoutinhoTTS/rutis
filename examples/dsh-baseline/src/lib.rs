@@ -12,4 +12,12 @@ macro_rules! bindings {
     )*};
 }
 
-bindings!(invariants, credentials, fs, jobs, commands, workspace);
+bindings!(
+    invariants,
+    credentials,
+    fs,
+    jobs,
+    commands,
+    workspace,
+    persona
+);

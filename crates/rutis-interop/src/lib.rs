@@ -19,7 +19,7 @@ pub mod rpc;
 pub mod server;
 
 #[cfg(unix)]
-pub use process::{Process, ServiceEvents};
+pub use process::{Host, HostDispatch, Process, ServiceEvents};
 #[cfg(unix)]
 pub use projection::Projection;
 pub use serde;

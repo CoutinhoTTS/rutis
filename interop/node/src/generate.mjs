@@ -1,7 +1,7 @@
 import ts from 'typescript'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 const keywords = new Set('as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while'.split(' '))
 function ident(name) {
@@ -11,7 +11,8 @@ function ident(name) {
   return keywords.has(name) ? `r#${name}` : name
 }
 const snake = name => name.replace(/[A-Z]/g, (letter, index) => (index ? '_' : '') + letter.toLowerCase()).replace(/[^A-Za-z0-9_]/g, '_')
-const pascal = name => name.replace(/(^|[^A-Za-z0-9])([a-z])/g, (_, __, letter) => letter.toUpperCase()).replace(/[^A-Za-z0-9]/g, '')
+// SCREAMING_CASE words are lowered first, so they read as PascalCase words.
+const pascal = name => (/[a-z]/.test(name) ? name : name.toLowerCase()).replace(/(^|[^A-Za-z0-9])([a-z])/g, (_, __, letter) => letter.toUpperCase()).replace(/[^A-Za-z0-9]/g, '')
 const literal = value => JSON.stringify(value)
 
 /** A member or type the bindings cannot represent yet; reported, not fatal. */
@@ -35,7 +36,9 @@ function locate(pluginPath) {
 // `plugins` is one plugin path, or a group [{ name, path }] mounted together
 // in one Cordis Context (dependencies between them resolve natively). Group
 // members get one `Config` field each, named by `name`.
-export function generate(plugins, nodePackage) {
+// `options.provide` lists Cordis services the rutis application provides to
+// the plugins; their interface comes from the plugins' Context declarations.
+export function generate(plugins, nodePackage, { provide = [] } = {}) {
   const single = !Array.isArray(plugins)
   const group = (single ? [{ path: plugins }] : plugins).map(plugin => ({ ...plugin, ...locate(plugin.path) }))
   if (!group.length) throw new Error('a mount needs at least one plugin')
@@ -126,7 +129,19 @@ export function generate(plugins, nodePackage) {
     return object(type, hint)
   }
 
+  // What is being mapped, for diagnostics raised while mapping its types.
+  let mapping
+  const notes = new Set()
   function unionMembers(type, members, hint) {
+    // Function members (e.g. `string | ((ctx) => string)`) cannot cross as
+    // data: bind the data members and report the rest.
+    const data = members.filter(member => !member.getCallSignatures().length)
+    if (data.length !== members.length) {
+      if (!data.length) throw new Unsupported('function value (callbacks are not bound yet)')
+      const note = `${mapping ?? 'type'}: function values in ${checker.typeToString(type)} are not bound; only its data members are`
+      if (!notes.has(note)) { notes.add(note); diagnostics.push(note) }
+      members = data
+    }
     if (!members.length) return '()'
     if (members.length === 1) return rust(members[0], hint)
     if (members.every(member => member.flags & ts.TypeFlags.BooleanLiteral)) return 'bool'
@@ -289,8 +304,8 @@ export function generate(plugins, nodePackage) {
         }
         ts.forEachChild(node, visit)
       })
-      if (!services.size) {
-        for (const [name, entry] of augmentations) if (entry.file.startsWith(packageDir)) services.set(name, entry)
+      if (!services.size && source.isDeclarationFile) {
+        for (const [name, entry] of augmentations) if (entry.file.startsWith(packageDir) && !provide.includes(name)) services.set(name, entry)
       }
     }
     return { services, configType }
@@ -305,7 +320,14 @@ export function generate(plugins, nodePackage) {
       services.set(name, { ...entry, plugin })
     }
   }
-  if (!services.size) throw new Error(`${group.map(plugin => plugin.analysed).join(', ')}: no native Cordis service registrations found`)
+  const provided = new Map() // host-provided service name -> { type, node }
+  for (const name of provide) {
+    const entry = augmentations.get(name)
+    if (!entry) throw new Error(`no Cordis Context declaration found for the host-provided service ${name}`)
+    if (services.has(name)) throw new Error(`service ${name} is provided both by the host and by ${services.get(name).plugin.path}`)
+    provided.set(name, entry)
+  }
+  if (!services.size && !provided.size) throw new Error(`${group.map(plugin => plugin.analysed).join(', ')}: no native Cordis service registrations found`)
 
   // ---------------------------------------------------------------------
   // Services and their members.
@@ -336,6 +358,7 @@ export function generate(plugins, nodePackage) {
       const signature = signatures[0]
       if (signature.typeParameters?.length) { skip('generic method'); continue }
       const hint = `${structName}${pascal(memberName)}`
+      mapping = `${location(declaration)}: ${serviceName}.${memberName}`
       try {
         const rustName = ident(snake(memberName))
         if (rustNames.has(rustName)) throw new Unsupported(`method name collides with another as ${rustName}`)
@@ -417,6 +440,120 @@ export function generate(plugins, nodePackage) {
   }
 
   // ---------------------------------------------------------------------
+  // Host-provided services: a trait the rutis application implements, a
+  // dispatcher for calls from Node, and a registration helper.
+  // ---------------------------------------------------------------------
+  const hostCode = []
+  const hosts = [] // { name, trait, dispatch, manifest }
+  for (const [serviceName, { type }] of provided) {
+    const traitName = claim(`${typeName(type, serviceName)}Host`)
+    const dispatchName = claim(`${traitName}Dispatch`)
+    const methods = [], unavailable = []
+    const rustNames = new Set()
+    for (const member of checker.getPropertiesOfType(type)) {
+      const declaration = member.valueDeclaration ?? member.declarations?.[0]
+      if (!declaration || isCordis(declaration)) continue
+      const flags = ts.getCombinedModifierFlags(declaration)
+      if (flags & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected) || (declaration.name && ts.isPrivateIdentifier(declaration.name))) continue
+      const memberName = member.getName()
+      if (memberName.startsWith('_') || memberName.startsWith('__@')) continue
+      const skip = reason => {
+        unavailable.push([memberName, reason])
+        diagnostics.push(`${location(declaration)}: host ${serviceName}.${memberName} is not bound: ${reason}`)
+      }
+      const signatures = checker.getTypeOfSymbolAtLocation(member, declaration).getCallSignatures()
+      if (!signatures.length) { skip('property (properties are not bound yet)'); continue }
+      if (signatures.length !== 1) { skip('overloaded method'); continue }
+      const signature = signatures[0]
+      if (signature.typeParameters?.length) { skip('generic method'); continue }
+      const hint = `${traitName}${pascal(memberName)}`
+      mapping = `${location(declaration)}: host ${serviceName}.${memberName}`
+      try {
+        const rustName = ident(snake(memberName))
+        if (rustNames.has(rustName)) throw new Unsupported(`method name collides with another as ${rustName}`)
+        const params = signature.parameters.map(parameter => {
+          const parameterDeclaration = parameter.valueDeclaration
+          if (parameterDeclaration?.dotDotDotToken) throw new Unsupported('rest parameter')
+          const parameterType = checker.getTypeOfSymbolAtLocation(parameter, parameterDeclaration)
+          const optional = !!(parameterDeclaration?.questionToken || parameterDeclaration?.initializer)
+          const { optional: nullable, members } = stripNullish(parameterType)
+          const name = ident(snake(parameter.name))
+          if ((optional || nullable) && members.length === 1 && members[0].getSymbol()?.getName() === 'AbortSignal') return { name, omitted: true }
+          // A function argument arrives as a callable protocol reference.
+          if (members.length === 1 && members[0].getCallSignatures().length) {
+            return { name, raw: true, rustType: '::rutis_interop::rpc::Value' }
+          }
+          let rustType = rust(parameterType, `${hint}${pascal(parameter.name)}`)
+          if (optional && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
+          return { name, rustType }
+        })
+        const returned = checker.getReturnTypeOfSignature(signature)
+        const promised = checker.getPromisedTypeOfPromise(returned)
+        const awaited = promised ?? returned
+        // Returning a function (e.g. a disposer) means building a callable
+        // protocol value, e.g. `rpc::Value::callback(...)`.
+        const rawResult = !awaited.isUnion() && awaited.getCallSignatures().length > 0
+        const result = rawResult ? '::rutis_interop::rpc::Value' : rust(awaited, `${hint}Result`)
+        rustNames.add(rustName)
+        methods.push({ name: memberName, rustName, params, async: !!promised, result, rawResult })
+      } catch (error) {
+        if (!(error instanceof Unsupported)) throw error
+        skip(error.message)
+      } finally {
+        mapping = undefined
+      }
+    }
+    hosts.push({ name: serviceName, trait: traitName, dispatch: dispatchName, manifest: Object.fromEntries(methods.map(method => [method.name, method.async ? 'async' : 'sync'])) })
+    hostCode.push(hostTrait(serviceName, traitName, dispatchName, methods, unavailable))
+  }
+
+  function hostTrait(serviceName, traitName, dispatchName, methods, unavailable) {
+    const unimplemented = method => `::rutis_interop::Error::Value(${literal(`${serviceName}.${method.name} is not implemented by the rutis host`)}.into())`
+    const signatureOf = method => method.params.filter(parameter => !parameter.omitted).map(parameter => `${parameter.name}: ${parameter.rustType}`).join(', ')
+    const declarations = methods.map(method => {
+      const signature = signatureOf(method)
+      return method.async
+        ? `fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> ::rutis::BoxFuture<'static, Result<${method.result}, ::rutis_interop::Error>> { Box::pin(async { Err(${unimplemented(method)}) }) }`
+        : `fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> Result<${method.result}, ::rutis_interop::Error> { Err(${unimplemented(method)}) }`
+    }).join('\n')
+    const encode = method => method.rawResult ? 'Ok(result)'
+      : method.result === '()' ? 'Ok(::rutis_interop::rpc::Value::Undefined)'
+        : '::rutis_interop::arg(&result)'
+    const arms = methods.map(method => {
+      const decode = method.params.map(parameter => parameter.omitted ? 'args.next();'
+        : parameter.raw ? `let ${parameter.name} = args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined);`
+          : `let ${parameter.name}: ${parameter.rustType} = ::rutis_interop::decode(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined).json()?)?;`).join('\n')
+      const call = `${method.rustName}(${method.params.filter(parameter => !parameter.omitted).map(parameter => parameter.name).join(', ')})`
+      return method.async
+        ? `${literal(method.name)} => { ${decode} let host = self.0.clone(); Ok(::rutis_interop::rpc::Value::future(async move { let result = host.${call}.await?; ${encode(method)} })) }`
+        : `${literal(method.name)} => { ${decode} let result = self.0.${call}?; ${encode(method)} }`
+    }).join('\n')
+    const missing = unavailable.length
+      ? `///\n/// Members not bound yet (calls from Cordis report an error):\n${unavailable.map(([name, reason]) => `/// - \`${name}\`: ${reason}`).join('\n')}\n`
+      : ''
+    return `/// The rutis implementation of the Cordis service \`ctx.${serviceName}\` that the
+    /// mounted plugins depend on. Every method defaults to an error: implement
+    /// the ones the plugins use, then register it with [\`provide_${snake(serviceName)}\`].
+    ${missing}#[allow(unused_variables)]
+    pub trait ${traitName}: Send + Sync + 'static { ${declarations} }
+    /// Serves calls from the Cordis side to a [\`${traitName}\`].
+    pub struct ${dispatchName}(pub ::std::sync::Arc<dyn ${traitName}>);
+    impl ::rutis_interop::HostDispatch for ${dispatchName} {
+      fn invoke(&self, method: &str, args: ::rutis_interop::rpc::Value) -> ::rutis_interop::rpc::Reply {
+        #[allow(unused_mut, unused_variables)]
+        let mut args = args.list()?.into_iter();
+        match method { ${arms}
+          _ => Err(::rutis_interop::Error::Value(format!("${serviceName}.{method} is not bound"))),
+        }
+      }
+    }
+    /// Register \`host\` as the rutis provider of \`ctx.${serviceName}\` for mounted Cordis plugins.
+    pub fn provide_${snake(serviceName)}(ctx: &::rutis::Ctx, host: impl ${traitName}) -> Result<::rutis::Disposer, ::rutis::CordisError> {
+      ctx.provide_as::<dyn ${traitName}>(::rutis::TypeKey::of::<dyn ${traitName}>(), ::std::sync::Arc::new(host))
+    }`
+  }
+
+  // ---------------------------------------------------------------------
   // Configuration.
   // ---------------------------------------------------------------------
   function configFor(configType, structName, accessor) {
@@ -475,14 +612,19 @@ export function generate(plugins, nodePackage) {
   }
 
   const serviceNames = [...services.keys()]
+  const label = serviceNames.length ? serviceNames.join(',') : group.map(plugin => basename(plugin.entry)).join(',')
+  const hostKeys = hosts.map(host => `::rutis::TypeKey::of::<dyn ${host.trait}>()`)
   const rust_ = `// Generated from the original Cordis plugin. Do not edit.
   ${configCode}
   ${items.join('\n')}
   ${serviceCode.join('\n')}
-  pub struct Plugin { config: Config }
-  impl Plugin { pub fn new(config: Config) -> Self { Self { config } } }
+  ${hostCode.join('\n')}
+  pub struct Plugin { config: Config, injects: Vec<::rutis::TypeKey> }
+  impl Plugin { pub fn new(config: Config) -> Self { Self { config, injects: vec![${hostKeys.join(', ')}] } } }
   impl ::rutis::Plugin for Plugin {
-    fn name(&self) -> &str { "cordis:${serviceNames.join(',')}" }
+    fn name(&self) -> &str { "cordis:${label}" }
+    /// Host-provided services: the mount waits for them natively.
+    fn injects(&self) -> &[::rutis::TypeKey] { &self.injects }
     fn validate(&self) -> Result<(), ::rutis::CordisError> {
       ${configChecks}
       Ok(())
@@ -491,11 +633,17 @@ export function generate(plugins, nodePackage) {
       Box::pin(async move {
         let projection = ::rutis_interop::Projection::new();
         ${[...structs].map(([name, struct]) => `projection.service::<${struct}>(${literal(name)}, |process, handle| ${struct} { process, handle });`).join('\n')}
-        let process = ::rutis_interop::Process::launch_group(
+        let hosts = vec![${hosts.map(host => `::rutis_interop::Host {
+          name: ${literal(host.name)}.into(),
+          methods: ::rutis_interop::serde_json::json!(${JSON.stringify(host.manifest)}),
+          dispatch: ::std::sync::Arc::new(${host.dispatch}(ctx.require_as::<dyn ${host.trait}>(::rutis::TypeKey::of::<dyn ${host.trait}>())?)),
+        }`).join(', ')}];
+        let process = ::rutis_interop::Process::launch_mount(
           ::std::path::Path::new(${literal(nodePackage)}),
           &[${launched.join(',\n            ')}],
           ::rutis_interop::serde_json::json!(${JSON.stringify(manifest)}),
           Some(projection.clone()),
+          hosts,
         ).await?;
         // Registered before any service binding, so native cleanup withdraws
         // the services and runs their consumers' disposers first.
@@ -514,14 +662,16 @@ export function generate(plugins, nodePackage) {
   return { rust: rust_, inputs: program.getSourceFiles().map(file => file.fileName), diagnostics }
 }
 
-// `node generate.mjs <node package> <plugin>` or, for a group,
-// `node generate.mjs <node package> <name>=<plugin> ...`.
+// `node generate.mjs <node package> [--provide=<service>...] <plugin>` or,
+// for a group, `... <name>=<plugin> ...`.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const [nodePackage, ...members] = process.argv.slice(2)
+    const [nodePackage, ...rest] = process.argv.slice(2)
+    const provide = rest.filter(arg => arg.startsWith('--provide=')).map(arg => arg.slice('--provide='.length))
+    const members = rest.filter(arg => !arg.startsWith('--provide='))
     const plugins = members.length === 1 && !members[0].includes('=')
       ? resolve(members[0])
       : members.map(member => { const at = member.indexOf('='); return { name: member.slice(0, at), path: resolve(member.slice(at + 1)) } })
-    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage))))
+    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage), { provide })))
   } catch (error) { console.error(error.message); process.exitCode = 1 }
 }

@@ -109,6 +109,26 @@ function dispose() {
   })()
 }
 
+// A rutis service seen from Cordis: bound methods call the Rust host
+// (synchronously or returning a Promise, as declared); any other method is
+// reported as not provided rather than silently missing. It is not an
+// instance of the class the plugin declares (boundary rule 7).
+function hostProxy(name, methods) {
+  const target = {}
+  for (const [method, kind] of Object.entries(methods)) {
+    target[method] = kind === 'async'
+      ? (...args) => peer.callAsync(`host:${name}`, method, args)
+      : (...args) => peer.call(`host:${name}`, method, args)
+  }
+  const passthrough = new Set(['then', 'toJSON', 'constructor'])
+  return new Proxy(target, {
+    get(target, property, receiver) {
+      if (typeof property !== 'string' || property in target || passthrough.has(property)) return Reflect.get(target, property, receiver)
+      return () => { throw new Error(`${name}.${property} is not provided by the rutis host`) }
+    },
+  })
+}
+
 // A mount is a group of plugins sharing one Context, so dependencies between
 // them resolve natively. `args.plugins` lists [{ entry, config }] in load
 // order; a single-plugin mount passes only `args.config`.
@@ -120,6 +140,9 @@ function mount(args) {
     slots.set(name, { methods: new Set(methods), scope: undefined, object: undefined, identity: undefined, handle: null, generation: 0, version: 0 })
   }
   const plugins = args.plugins ?? [{ entry: pluginPath, config: args.config }]
+  // Services the rutis application provides are registered before the
+  // plugins load, so the plugins' dependencies on them resolve natively.
+  for (const [name, methods] of Object.entries(args.provided ?? {})) ctx.provide(name, hostProxy(name, methods))
   return (async () => {
     for (const { entry } of plugins) {
       const own = cordisOf(entry)

@@ -21,9 +21,9 @@ pub fn cordis_module(
     node_package: impl AsRef<Path>,
     module: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let plugin = plugin.as_ref().canonicalize()?;
-    println!("cargo:rerun-if-changed={}", plugin.display());
-    generate(vec![plugin.into_os_string()], node_package.as_ref(), module)
+    Bindings::new(module, node_package)
+        .plugin(plugin)
+        .generate()
 }
 
 /// Generate one binding module for a group of Cordis plugins that are
@@ -35,19 +35,88 @@ pub fn cordis_group(
     plugins: &[(&str, &Path)],
     node_package: impl AsRef<Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut members = Vec::new();
-    for (name, plugin) in plugins {
-        let plugin = plugin.canonicalize()?;
-        println!("cargo:rerun-if-changed={}", plugin.display());
-        let mut member = std::ffi::OsString::from(format!("{name}="));
-        member.push(plugin);
-        members.push(member);
+    plugins
+        .iter()
+        .fold(
+            Bindings::new(module, node_package),
+            |bindings, (name, plugin)| bindings.member(name, plugin),
+        )
+        .generate()
+}
+
+/// Bindings for one mount: a plugin or a named group, plus the services the
+/// rutis application provides to it.
+///
+/// ```ignore
+/// Bindings::new("persona", "../../interop/node")
+///     .plugin(modules.join("dsh-persona"))
+///     .provide("systemPrompt")
+///     .generate()?;
+/// ```
+pub struct Bindings {
+    module: String,
+    node_package: std::path::PathBuf,
+    members: Vec<(Option<String>, std::path::PathBuf)>,
+    provided: Vec<String>,
+}
+
+impl Bindings {
+    pub fn new(module: &str, node_package: impl AsRef<Path>) -> Self {
+        Self {
+            module: module.to_owned(),
+            node_package: node_package.as_ref().to_owned(),
+            members: Vec::new(),
+            provided: Vec::new(),
+        }
     }
-    generate(members, node_package.as_ref(), module)
+
+    /// The single plugin of this mount; its configuration is `Config` itself.
+    pub fn plugin(mut self, plugin: impl AsRef<Path>) -> Self {
+        self.members.push((None, plugin.as_ref().to_owned()));
+        self
+    }
+
+    /// A named member of a group, loaded in order; `name` is its `Config` field.
+    pub fn member(mut self, name: &str, plugin: impl AsRef<Path>) -> Self {
+        self.members
+            .push((Some(name.to_owned()), plugin.as_ref().to_owned()));
+        self
+    }
+
+    /// A Cordis service the rutis application provides to the plugins. The
+    /// generated module gets a trait to implement and a `provide_*` helper;
+    /// the mount waits for the service natively.
+    pub fn provide(mut self, service: &str) -> Self {
+        self.provided.push(service.to_owned());
+        self
+    }
+
+    pub fn generate(self) -> Result<(), Box<dyn std::error::Error>> {
+        let single = matches!(self.members.as_slice(), [(None, _)]);
+        let mut args: Vec<std::ffi::OsString> = self
+            .provided
+            .iter()
+            .map(|service| format!("--provide={service}").into())
+            .collect();
+        for (name, plugin) in &self.members {
+            let plugin = plugin.canonicalize()?;
+            println!("cargo:rerun-if-changed={}", plugin.display());
+            match name {
+                None if single => args.push(plugin.into_os_string()),
+                None => return Err("group members need names; use Bindings::member".into()),
+                Some(name) => {
+                    let mut member = std::ffi::OsString::from(format!("{name}="));
+                    member.push(plugin);
+                    args.push(member);
+                }
+            }
+        }
+        generate(args, &self.node_package, &self.module)
+    }
 }
 
 fn generate(
-    members: Vec<std::ffi::OsString>,
+    args: Vec<std::ffi::OsString>,
     node_package: &Path,
     module: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -61,7 +130,7 @@ fn generate(
     let output = std::process::Command::new("node")
         .arg(&generator)
         .arg(&node_package)
-        .args(&members)
+        .args(&args)
         .output()?;
     if !output.status.success() {
         return Err(format!(

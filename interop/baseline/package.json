@@ -17,10 +17,12 @@
     "@deepseek-ai/dsh-invariants": "0.2.0-rc.1",
     "@deepseek-ai/dsh-jobs": "0.2.0-rc.1",
     "@deepseek-ai/dsh-jobs-local": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-persona": "0.2.0-rc.1",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.0-rc.1",
     "@deepseek-ai/dsh-storage": "0.2.0-rc.1",
     "@deepseek-ai/dsh-storage-domain": "0.2.0-rc.1",
     "@deepseek-ai/dsh-storage-json": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.1",
     "@deepseek-ai/dsh-workspace": "0.2.0-rc.1"
   }
 }
