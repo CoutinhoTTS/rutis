@@ -11,7 +11,7 @@ cargo run -p native-mount-example
 cargo test -p native-mount-example --test cordis_mount -- --nocapture
 ```
 
-没有独立的生成步骤：[build.rs](build.rs) 在普通 Cargo 构建时生成绑定，生成文件放在构建目录，不提交、不手工维护。
+没有独立的生成步骤：挂载写在 [Cargo.toml](Cargo.toml) 的 `[package.metadata.rutis-interop]` 中，[build.rs](build.rs) 调用 `from_manifest()` 在普通 Cargo 构建时生成绑定，生成文件放在构建目录，不提交、不手工维护。接入方式见 [rutis-interop 接入文档](../../crates/rutis-interop/README.md)。
 
 | 方向 | 原插件 | 消费方式 |
 | --- | --- | --- |

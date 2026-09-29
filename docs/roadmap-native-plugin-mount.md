@@ -101,9 +101,11 @@ W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设�
 7. ~~**事件（双向）**~~（已完成）：`Bindings::event` 选择 Cordis → rutis 的通知事件，生成 rutis 事件类型；Cordis `emit` 发出即忘，`parallel` 等待 rutis 监听。credentials 的两个事件在真实插件上验证（`examples/dsh-baseline/tests/events.rs`）。`Bindings::emit` 选择 rutis → Cordis 的事件，宿主服务用它发出接口层的事件（persona 示例发出 `system-prompt/change`）。同一事件只能选一个方向。waterfall / 有返回值的事件不转发。
 8. `Uint8Array`、`AsyncIterable`：按需。
 
-### W4 包级接入
+### W4 包级接入（已完成）
 
-用应用清单（`Cargo.toml` 的 `package.metadata`）配置插件包与版本，替代 `build.rs` 中的源码路径；按 npm 包解析插件入口和类型声明。
+应用在 `Cargo.toml` 的 `[package.metadata.rutis-interop]` 中声明 npm 项目和挂载，`build.rs` 只调用 `from_manifest()`，代码中 `include_mounts!()`。构建检查插件是否安装、版本是否一致、运行时协议版本是否匹配，出错时给出处理命令（`crates/rutis-interop/src/build.rs` 的 `manifest_tests`）。两个示例都改为清单驱动。接入文档：[crates/rutis-interop/README.md](../crates/rutis-interop/README.md)。
+
+未做：`@rutis/interop` 尚未发布到 npm，应用需要以 `file:` 依赖引用仓库中的 `interop/node`；生成代码中嵌入的是构建机上的绝对路径，二进制移动到其他机器前需要重新构建。
 
 ## 4. 验证
 

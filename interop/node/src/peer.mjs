@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { readFileSync } from 'node:fs'
 import { encode } from './wire.mjs'
 import { encodeError, decodeError } from './errors.mjs'
 
@@ -19,6 +20,10 @@ function needsRecord(value) {
     || (Array.isArray(item) && item.some(element => typeof element === 'function' || element instanceof Promise || isLive(element)))
     || (item !== null && typeof item === 'object' && !Array.isArray(item) && !isLive(item) && Object.getPrototypeOf(item) === Object.prototype && needsRecord(item)))
 }
+
+// The protocol version this runtime speaks; builds check it against the
+// rutis-interop crate (package.json `rutisProtocol`).
+const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).rutisProtocol
 
 function checkData(value, seen = new Set()) {
   if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') throw new TypeError('value requires an unsupported binding')
@@ -60,7 +65,7 @@ export class Peer {
     this.ready = new Promise((resolve, reject) => { this.#resolveReady = resolve; this.#rejectReady = reject })
     this.#finalizer = new FinalizationRegistry(record => this.#release(record))
   }
-  start() { this.#send(encode({ op: 'hello', version: 1 })) }
+  start() { this.#send(encode({ op: 'hello', version: PROTOCOL })) }
   close(error = new Error('session closed')) {
     if (this.#closed) return
     this.#closed = error; this.#rejectReady(error)
@@ -209,7 +214,7 @@ export class Peer {
     if (this.#closed) return
     try {
       if (frame.op === 'hello') {
-        if (frame.version !== 1 || this.#handshake) throw new Error('incompatible or duplicate protocol handshake')
+        if (frame.version !== PROTOCOL || this.#handshake) throw new Error('incompatible or duplicate protocol handshake')
         this.#handshake = true; this.#resolveReady(); return
       }
       if (!this.#handshake) throw new Error('request before protocol handshake')

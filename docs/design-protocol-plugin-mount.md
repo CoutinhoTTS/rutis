@@ -29,7 +29,9 @@ rutis 内核和 Cordis 都没有为兼容做任何修改。
 
 ## 2. 构建期生成
 
-`build.rs` 调用 `rutis_interop::build::cordis_module(插件, interop/node, 模块名)`，生成结果写入 `OUT_DIR/{模块名}.rs`，由应用 `include!`（`cordis_plugin` 是模块名为 `cordis` 的简写）。插件可以是 TypeScript 源文件，也可以是已安装的 npm 包目录；包按 `package.json` 的 `types` 分析，按运行时入口加载。
+**包级接入**：应用在 `Cargo.toml` 的 `[package.metadata.rutis-interop]` 中声明 npm 项目和挂载（插件包或 TypeScript 源文件、版本、组合成员、宿主服务、事件），`build.rs` 只调用 `rutis_interop::build::from_manifest()`，代码中用 `rutis_interop::include_mounts!()` 引入全部挂载模块。npm 项目的锁文件是插件版本的唯一来源；构建不安装 npm 依赖，缺包、版本不符、运行时协议版本不符时构建失败并给出处理命令。运行时包在 package.json 中声明 `rutisProtocol`，必须等于 crate 的 `PROTOCOL`，运行时握手再核对一次。用法见 [接入文档](../crates/rutis-interop/README.md)。
+
+底层 API：`Bindings::new(模块名, 运行时目录)` 加 `.plugin` / `.member` / `.provide` / `.event` / `.emit`，生成结果写入 `OUT_DIR/{模块名}.rs`；`cordis_module`、`cordis_group`、`cordis_plugin` 是它的简写。插件可以是 TypeScript 源文件，也可以是已安装的 npm 包目录；包按 `package.json` 的 `types` 分析，按运行时入口加载。
 
 **组合挂载**：已发布的插件通常设计成组合使用，例如 `dsh-workspace` 依赖 `dsh-storage`、`dsh-storage-domain` 和一个会话持久化实现提供的服务。`cordis_group(模块名, &[(名字, 插件), ...], interop/node)` 为一组插件生成一份绑定：这组插件按给定顺序装进同一个 Node 进程的同一个 Cordis Context，彼此的依赖按 Cordis 原生规则解析；组内所有插件的服务都导出到 rutis，同名服务在构建时报错；每个插件的配置是组合 `Config` 的一个字段，字段名即给定的名字。
 
@@ -209,7 +211,8 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 ## 9. 工程防护
 
 - **已完成**：取消传播和超时（§3.1）、迟到应答丢弃并计数、帧走独立 socket（插件向 stdout 打印不会破坏帧流）、断连时所有在途调用明确失败。
-- **推迟**：握手时的能力协商。生成器和 runner 目前在同一个 `interop/node` 包里一起发布，协议版本不会错配；W4 把插件包与运行时分开发布时再做。断连时逐个记录在途调用的方法名，等需要排障时再做。
+- **协议版本**：运行时包声明 `rutisProtocol`，构建时与 crate 的 `PROTOCOL` 比对，运行时握手再核对。目前只有一个协议版本，不做多版本协商。
+- **推迟**：断连时逐个记录在途调用的方法名，等需要排障时再做。
 
 ## 10. 做不到或不支持的部分
 

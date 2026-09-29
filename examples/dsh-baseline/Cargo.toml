@@ -16,3 +16,46 @@ tempfile = "3"
 
 [build-dependencies]
 rutis-interop = { path = "../../crates/rutis-interop" }
+
+# Cordis plugins mounted by this crate. The npm project pins the packages;
+# `npm --prefix interop/baseline ci` installs them.
+[package.metadata.rutis-interop]
+npm = "../../interop/baseline"
+runtime = "../../interop/node"
+
+[package.metadata.rutis-interop.mounts.invariants]
+plugin = "@deepseek-ai/dsh-invariants"
+version = "0.2.0-rc.1"
+
+[package.metadata.rutis-interop.mounts.credentials]
+plugin = "@deepseek-ai/dsh-credentials-local"
+version = "0.2.0-rc.1"
+# Credential changes are forwarded to rutis listeners.
+events = ["credentials/reference-updated", "credentials/record-updated"]
+
+[package.metadata.rutis-interop.mounts.fs]
+plugin = "@deepseek-ai/dsh-fs-local"
+
+[package.metadata.rutis-interop.mounts.jobs]
+plugin = "@deepseek-ai/dsh-jobs-local"
+
+[package.metadata.rutis-interop.mounts.commands]
+plugin = "@deepseek-ai/dsh-commands"
+
+# dsh-workspace needs storage and session persistence, which other plugins
+# provide: they are mounted together so the dependencies resolve natively.
+[package.metadata.rutis-interop.mounts.workspace]
+group = [
+    { name = "storage", plugin = "@deepseek-ai/dsh-storage" },
+    { name = "storage_json", plugin = "@deepseek-ai/dsh-storage-json" },
+    { name = "storage_domain", plugin = "@deepseek-ai/dsh-storage-domain" },
+    { name = "sessions", plugin = "@deepseek-ai/dsh-session-persistence-jsonl" },
+    { name = "workspace", plugin = "@deepseek-ai/dsh-workspace" },
+]
+
+# dsh-persona contributes prompt sections to `systemPrompt`, which this rutis
+# application provides; the host announces prompt changes like the registry.
+[package.metadata.rutis-interop.mounts.persona]
+plugin = "@deepseek-ai/dsh-persona"
+provide = ["systemPrompt"]
+emits = ["system-prompt/change"]

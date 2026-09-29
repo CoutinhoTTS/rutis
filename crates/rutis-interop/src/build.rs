@@ -186,3 +186,241 @@ fn generate(
     std::fs::write(output_dir.join(format!("{module}.rs")), generated.rust)?;
     Ok(())
 }
+
+/// Generate every mount configured in the package's `Cargo.toml`:
+///
+/// ```toml
+/// [package.metadata.rutis-interop]
+/// npm = "."                      # npm project with the plugins installed
+/// # runtime = "..."              # default: <npm>/node_modules/@rutis/interop
+///
+/// [package.metadata.rutis-interop.mounts.credentials]
+/// plugin = "@deepseek-ai/dsh-credentials-local"   # or path = "src/plugin.ts"
+/// version = "0.2.0-rc.1"         # optional: must match the installed package
+/// events = ["credentials/record-updated"]         # Cordis -> rutis
+/// emits = []                     # rutis -> Cordis
+/// provide = []                   # services the rutis application provides
+///
+/// [package.metadata.rutis-interop.mounts.workspace]
+/// group = [{ name = "storage", plugin = "@deepseek-ai/dsh-storage" }]
+/// ```
+///
+/// Each mount becomes a module; `rutis_interop::include_mounts!()` declares
+/// them all. The npm project is not installed by the build: a missing
+/// package is an error that names the install command.
+pub fn from_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
+    let manifest_path = root.join("Cargo.toml");
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    let manifest: toml::Table = std::fs::read_to_string(&manifest_path)?.parse()?;
+    let config = manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("rutis-interop"))
+        .and_then(toml::Value::as_table)
+        .ok_or("Cargo.toml has no [package.metadata.rutis-interop] section")?;
+    let text = |table: &toml::Table, key: &str| {
+        table
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+    };
+    let list = |table: &toml::Table, key: &str| -> Result<Vec<String>, String> {
+        match table.get(key) {
+            None => Ok(Vec::new()),
+            Some(toml::Value::Array(items)) => items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_owned)
+                        .ok_or(format!("{key} must list strings"))
+                })
+                .collect(),
+            Some(_) => Err(format!("{key} must be an array of strings")),
+        }
+    };
+
+    let npm = root.join(text(config, "npm").unwrap_or_else(|| ".".into()));
+    let modules = npm.join("node_modules");
+    let install = format!("npm --prefix {} ci", npm.display());
+    if !npm.join("package.json").exists() {
+        return Err(format!(
+            "{} has no package.json for the Cordis plugins",
+            npm.display()
+        )
+        .into());
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        npm.join("package-lock.json").display()
+    );
+    if !modules.exists() {
+        return Err(format!("the Cordis plugins are not installed: run `{install}`").into());
+    }
+    let runtime = match text(config, "runtime") {
+        Some(runtime) => root.join(runtime),
+        None => modules.join("@rutis/interop"),
+    };
+    check_runtime(&runtime, &install)?;
+
+    let resolve = |entry: &toml::Table,
+                   context: &str|
+     -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        match (text(entry, "plugin"), text(entry, "path")) {
+            (Some(package), None) => {
+                let directory = modules.join(&package);
+                if !directory.join("package.json").exists() {
+                    return Err(format!("{context}: {package} is not installed: add it to {} and run `{install}`", npm.join("package.json").display()).into());
+                }
+                if let Some(expected) = text(entry, "version") {
+                    let installed: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.join("package.json"))?)?;
+                    let installed = installed["version"].as_str().unwrap_or_default();
+                    if installed != expected {
+                        return Err(format!("{context}: {package} {installed} is installed, {expected} is required: run `{install}`").into());
+                    }
+                }
+                Ok(directory)
+            }
+            (None, Some(path)) => Ok(root.join(path)),
+            _ => Err(format!("{context}: set exactly one of `plugin` (an npm package) or `path` (a TypeScript source)").into()),
+        }
+    };
+
+    let mounts = config
+        .get("mounts")
+        .and_then(toml::Value::as_table)
+        .ok_or("[package.metadata.rutis-interop] declares no mounts")?;
+    let mut declarations = String::new();
+    for (name, mount) in mounts {
+        syn::parse_str::<syn::Ident>(name)
+            .map_err(|_| format!("mount name {name} is not a Rust identifier"))?;
+        let mount = mount
+            .as_table()
+            .ok_or(format!("mount {name} must be a table"))?;
+        let mut bindings = Bindings::new(name, &runtime);
+        match mount.get("group") {
+            Some(toml::Value::Array(members)) => {
+                for member in members {
+                    let member = member
+                        .as_table()
+                        .ok_or(format!("mount {name}: group members must be tables"))?;
+                    let member_name = text(member, "name")
+                        .ok_or(format!("mount {name}: every group member needs a name"))?;
+                    bindings = bindings.member(
+                        &member_name,
+                        resolve(member, &format!("mount {name}.{member_name}"))?,
+                    );
+                }
+            }
+            Some(_) => return Err(format!("mount {name}: group must be an array of tables").into()),
+            None => bindings = bindings.plugin(resolve(mount, &format!("mount {name}"))?),
+        }
+        for service in list(mount, "provide")? {
+            bindings = bindings.provide(&service);
+        }
+        for event in list(mount, "events")? {
+            bindings = bindings.event(&event);
+        }
+        for event in list(mount, "emits")? {
+            bindings = bindings.emit(&event);
+        }
+        bindings
+            .generate()
+            .map_err(|error| format!("mount {name}: {error}"))?;
+        declarations.push_str(&format!(
+            "#[cfg(unix)]\n#[allow(clippy::all, dead_code, unused_imports)]\npub mod {name} {{ include!(concat!(env!(\"OUT_DIR\"), \"/{name}.rs\")); }}\n"
+        ));
+    }
+    let output = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
+    std::fs::write(output.join("rutis_interop_mounts.rs"), declarations)?;
+    Ok(())
+}
+
+/// The Node runtime must speak this crate's protocol version.
+fn check_runtime(runtime: &Path, install: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = runtime.join("package.json");
+    if !manifest.exists() {
+        return Err(format!("the @rutis/interop runtime is missing at {}: add it to the npm project and run `{install}`", runtime.display()).into());
+    }
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    let package: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+    let protocol = package["rutisProtocol"].as_u64();
+    if protocol != Some(crate::PROTOCOL as u64) {
+        return Err(format!(
+            "{} speaks protocol {}, this rutis-interop speaks {}: install a matching @rutis/interop",
+            runtime.display(),
+            protocol.map_or("(unknown)".into(), |protocol| protocol.to_string()),
+            crate::PROTOCOL
+        )
+        .into());
+    }
+    if !runtime.join("node_modules").exists() && !runtime.join("../../typescript").exists() {
+        return Err(format!("the @rutis/interop runtime at {} has no dependencies installed: run `npm --prefix {} ci`", runtime.display(), runtime.display()).into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::from_manifest;
+    use std::fs;
+    use std::path::Path;
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn failure(root: &Path, manifest: &str) -> String {
+        write(&root.join("Cargo.toml"), manifest);
+        from_manifest().unwrap_err().to_string()
+    }
+
+    // Environment variables are process-wide, so the cases run in sequence.
+    #[test]
+    fn configuration_errors_name_the_cause_and_the_fix() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::env::set_var("CARGO_MANIFEST_DIR", root);
+        std::env::set_var("OUT_DIR", root.join("out"));
+        let config = r#"
+            [package]
+            name = "app"
+            [package.metadata.rutis-interop]
+            npm = "cordis"
+            [package.metadata.rutis-interop.mounts.store]
+            plugin = "store-plugin"
+            version = "2.0.0"
+        "#;
+
+        assert!(failure(root, "[package]\nname = \"app\"")
+            .contains("no [package.metadata.rutis-interop]"));
+
+        write(&root.join("cordis/package.json"), "{}");
+        let error = failure(root, config);
+        assert!(
+            error.contains("not installed") && error.contains("cordis ci"),
+            "{error}"
+        );
+
+        let runtime = root.join("cordis/node_modules/@rutis/interop");
+        write(&runtime.join("package.json"), r#"{ "rutisProtocol": 99 }"#);
+        let error = failure(root, config);
+        assert!(error.contains("speaks protocol 99"), "{error}");
+
+        write(&runtime.join("package.json"), r#"{ "rutisProtocol": 1 }"#);
+        fs::create_dir_all(runtime.join("node_modules")).unwrap();
+        let error = failure(root, config);
+        assert!(error.contains("store-plugin is not installed"), "{error}");
+
+        write(
+            &root.join("cordis/node_modules/store-plugin/package.json"),
+            r#"{ "version": "1.0.0" }"#,
+        );
+        let error = failure(root, config);
+        assert!(
+            error.contains("1.0.0 is installed, 2.0.0 is required"),
+            "{error}"
+        );
+    }
+}

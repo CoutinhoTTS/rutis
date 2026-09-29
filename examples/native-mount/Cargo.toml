@@ -14,3 +14,11 @@ tokio.workspace = true
 
 [build-dependencies]
 rutis-interop = { path = "../../crates/rutis-interop" }
+
+# The Cordis plugin this example mounts: a TypeScript source fixture.
+[package.metadata.rutis-interop]
+npm = "../../interop/node"
+runtime = "../../interop/node"
+
+[package.metadata.rutis-interop.mounts.bindings]
+path = "../../interop/node/test/fixtures/counter.ts"

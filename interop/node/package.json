@@ -2,6 +2,7 @@
   "name": "@rutis/interop",
   "version": "0.1.0",
   "private": true,
+  "rutisProtocol": 1,
   "type": "module",
   "scripts": {
     "test": "node --test --test-isolation=none test/*.test.mjs"

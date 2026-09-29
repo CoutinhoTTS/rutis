@@ -1,7 +1,4 @@
-#[cfg(unix)]
-mod bindings {
-    include!(concat!(env!("OUT_DIR"), "/cordis.rs"));
-}
+rutis_interop::include_mounts!();
 
 #[cfg(unix)]
 #[tokio::main]
