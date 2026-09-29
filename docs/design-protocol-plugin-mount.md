@@ -58,7 +58,7 @@ rutis 内核和 Cordis 都没有为兼容做任何修改。
 | 活对象：带方法的接口 / 对象，或类实例（例如 `Workspace`、`SessionHandle`） | 同名代理结构体（包着 `ObjectRef`）：数据属性生成 getter，每次读取都是实时值；方法按服务方法的规则生成；可嵌在数据结构、数组和参数里；两个代理指向同一对象时相等；传回 Cordis 时还原为原对象 |
 | JS 内置类型（`Map`、`Set`、迭代器等） | 不绑定 |
 
-方法：同步方法仍同步，返回 Promise 的生成 `async fn`，都返回 `Result<T, rutis_interop::Error>`。可选参数为 `Option<T>`，`None` 以 JS `undefined` 传递（不是 `null`）。可省略的 `AbortSignal` 参数和选项字段暂不暴露，调用时不带取消信号。
+方法：同步方法仍同步，返回 Promise 的生成 `async fn`，都返回 `Result<T, rutis_interop::Error>`。可选参数为 `Option<T>`，`None` 以 JS `undefined` 传递（不是 `null`）。`AbortSignal` 参数不出现在 Rust 签名里：Cordis 方法收到一个真实的 `AbortSignal`，丢弃返回的 future（例如 `tokio::time::timeout` 超时）即取消调用并中止这个信号。同步方法无法中途取消，它收到的信号永远不会中止。选项对象里的 `AbortSignal` 字段暂不支持，不传。
 
 **不支持的成员**：服务上的属性、重载、泛型方法、回调参数、返回函数、`Uint8Array`、流、JS 内置类型等，不生成对应方法。每一项都在构建时以 `cargo:warning` 报出源码位置和原因，并列在服务类型的文档注释里；插件的其他成员照常生成，不会因为一个成员而整体失败。
 
@@ -75,6 +75,7 @@ rutis 内核和 Cordis 都没有为兼容做任何修改。
 | `await { id, path, reference }` | 等待对端传来的异步结果 |
 | `return { id, value }` / `throw { id, error }` | 返回值 / 错误 |
 | `release { reference, count }` | 归还引用的授予次数 |
+| `cancel { id }` | 调用方放弃调用 `id`：中止被调方收到的 `AbortSignal`，或停止等待异步结果；迟到的应答被丢弃并计数 |
 
 - **值**：`undefined`、JSON 数据、列表、记录（字段里含引用的普通对象）、引用（函数、异步结果、对象）。函数、Promise / Future 和活对象（带方法的对象或类实例）以引用传递，保留身份，不序列化成快照；同一个对象无论出现几次都是同一个引用。目前只有 Node 侧导出对象引用，Rust 侧不导出对象。
 - **Rust 侧解码**：生成的类型用 serde。解码结果时，其中的对象引用先替换为标记，再由 `ObjectRef` 反序列化取回；编码参数时反过来处理。
@@ -88,6 +89,7 @@ rutis 内核和 Cordis 都没有为兼容做任何修改。
 - 异步方法返回 Future；Node 侧返回 Promise。调用与等待是两个操作：`invoke` 返回的异步结果以引用形式传回，需要时再 `await`。
 - **等待环**：如果同步调用链需要的结果只能由被它自己阻塞的执行器推进（Node 主线程上的定时器 / Promise，或 Rust `current_thread` 运行时上的 Future），直接返回 `SyncWaitCycle` 错误，不会卡死。
 - 适配器可以用 `Connection::independent_future` 把确认与调用方执行器无关的异步工作放到每连接一个的后台执行器上。`Send` 不代表可以迁移，只有显式声明的工作才会放过去。
+- **取消与超时**：异步调用的 future 在完成前被丢弃时，发送 `cancel`。Node 侧为带 `signal` 参数的调用创建 `AbortController`，调用返回 Promise 时控制器保留到 Promise 结束，所以在等待阶段取消也能中止原调用的信号；Rust 侧收到 `cancel` 时停止对应的异步等待。已取消调用的迟到应答被丢弃，并计入 `Connection::orphans()`，不会被当作协议错误而断开连接。超时由调用方用 `tokio::time::timeout` 等方式实现，协议不另设默认超时。
 
 ## 4. 服务投影
 
@@ -206,9 +208,10 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 - 只支持单文件中的公开具体插件、`&self` 方法和基本类型；遇到模块声明、宏、泛型、借用、公开字段时报错。
 - 导出对象在挂载时捕获，不跟随换值。
 
-## 9. 工程防护（待补）
+## 9. 工程防护
 
-以下做法已在 `rutis-cordis` 中验证，按路线图 W2 移植：调用超时与取消传播、迟到应答计数丢弃、握手时的能力协商与装载期缺失检查、断连时的在途调用记录。帧已经走独立 socket，插件向 stdout 打印不会破坏帧流。
+- **已完成**：取消传播和超时（§3.1）、迟到应答丢弃并计数、帧走独立 socket（插件向 stdout 打印不会破坏帧流）、断连时所有在途调用明确失败。
+- **推迟**：握手时的能力协商。生成器和 runner 目前在同一个 `interop/node` 包里一起发布，协议版本不会错配；W4 把插件包与运行时分开发布时再做。断连时逐个记录在途调用的方法名，等需要排障时再做。
 
 ## 10. 做不到或不支持的部分
 
