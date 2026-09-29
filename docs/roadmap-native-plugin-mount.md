@@ -107,6 +107,10 @@ W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设�
 
 未做：`@rutis/interop` 尚未发布到 npm，应用需要以 `file:` 依赖引用仓库中的 `interop/node`；生成代码中嵌入的是构建机上的绝对路径，二进制移动到其他机器前需要重新构建。
 
+### 实验：崩溃与调用开销（2026-09-29）
+
+Node 进程崩溃 / 卡住时 rutis 侧的表现，以及跨进程调用的开销，见 [实验记录](experiments-native-plugin-mount.md)。主要发现：崩溃后挂载仍为 Active、服务仍注册、使用方不停止，错误里没有退出码；卡住时同步调用和卸载都没有超时；每次调用约 30–70 µs，大批结构化数据的 Node 侧编码偏慢。
+
 ## 4. 验证
 
 ```sh
@@ -114,7 +118,7 @@ npm --prefix interop/node ci
 npm --prefix interop/node test
 npm --prefix interop/baseline ci
 cargo test -p rutis-interop -p native-mount-example -p dsh-baseline
-cargo clippy -p rutis-interop -p native-mount-example -p dsh-baseline --all-targets -- -D warnings
+cargo clippy -p rutis-interop -p native-mount-example -p dsh-baseline -p interop-experiments --all-targets -- -D warnings
 ```
 
 ## 5. 性能记录
