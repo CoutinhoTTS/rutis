@@ -388,11 +388,11 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
           if (parameterDeclaration?.dotDotDotToken) throw new Unsupported('rest parameter')
           const parameterType = checker.getTypeOfSymbolAtLocation(parameter, parameterDeclaration)
           const optional = !!(parameterDeclaration?.questionToken || parameterDeclaration?.initializer)
-          // An AbortSignal the method accepts as undefined is not exposed yet:
-          // the call runs without a signal (cancellation is a later step).
-          const { optional: nullable, members } = stripNullish(parameterType)
-          if ((optional || nullable) && members.length === 1 && members[0].getSymbol()?.getName() === 'AbortSignal') {
-            return { name: ident(snake(parameter.name)), js: parameter.name, omitted: true, index }
+          // An AbortSignal is not a Rust parameter: the method receives one
+          // that aborts when the returned future is dropped (a cancellation).
+          const { members } = stripNullish(parameterType)
+          if (members.length === 1 && members[0].getSymbol()?.getName() === 'AbortSignal') {
+            return { name: ident(snake(parameter.name)), js: parameter.name, signal: true, index }
           }
           let rustType = rust(parameterType, `${hint}${pascal(parameter.name)}`)
           if (optional && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
@@ -415,16 +415,17 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
 
   // One generated method; `target(method, args)` is the call expression.
   function methodCode(label, method, target) {
-    const exposed = method.params.filter(parameter => !parameter.omitted)
+    const exposed = method.params.filter(parameter => !parameter.signal)
     const signature = exposed.map(parameter => `${parameter.name}: ${borrowed(parameter.rustType)}`).join(', ')
-    // Trailing omitted parameters are left out; earlier ones pass undefined.
-    const passed = method.params.slice(0, method.params.findLastIndex(parameter => !parameter.omitted) + 1)
-    const args = passed.map(parameter => parameter.omitted
-      ? '::rutis_interop::rpc::Value::Undefined'
+    const args = method.params.map(parameter => parameter.signal
+      ? '::rutis_interop::rpc::Value::Signal'
       : parameter.rustType.startsWith('Option<')
         ? `::rutis_interop::optional(${parameter.name})?`
         : `::rutis_interop::arg(&${parameter.name})?`).join(', ')
-    const note = method.params.some(parameter => parameter.omitted) ? '\n      ///\n      /// Runs without an AbortSignal: cancellation is not bound yet.' : ''
+    const cancellable = method.params.some(parameter => parameter.signal)
+    const note = !cancellable ? ''
+      : method.async ? '\n      ///\n      /// Cancellable: dropping the returned future (for example on a timeout)\n      /// aborts the AbortSignal the Cordis method receives.'
+        : '\n      ///\n      /// The Cordis method receives an AbortSignal that is never aborted: a\n      /// synchronous call cannot be cancelled.'
     return `/// Calls \`${label}.${method.name}\` on the Cordis side.${note}
       pub ${method.async ? 'async ' : ''}fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> Result<${method.result}, ::rutis_interop::Error> {
         ${exposed.map(parameter => finite(parameter.name, parameter.rustType)).join('\n')}

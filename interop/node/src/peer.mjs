@@ -51,6 +51,10 @@ export class Peer {
   #closed; #handshake = false; #resolveReady; #rejectReady
   #context = new AsyncLocalStorage(); #syncPath; #waiting = []; #queued = new Set()
   #active = 0; #draining = []
+  // AbortControllers for incoming calls that received a signal argument.
+  // A signal lives until the call's result settles: a returned Promise keeps
+  // it (via its future export), and an `await` frame maps back to the call.
+  #signals = new Map(); #decodingFor; #promiseCalls = new WeakMap(); #awaits = new Map()
   constructor({ send, pump, dispatch, abort }) {
     this.#send = send; this.#pump = pump; this.#dispatch = dispatch; this.#abort = abort
     this.ready = new Promise((resolve, reject) => { this.#resolveReady = resolve; this.#rejectReady = reject })
@@ -85,7 +89,7 @@ export class Peer {
         id = ++this.#ref
         if (!Number.isSafeInteger(id)) throw new Error('reference identifiers exhausted')
         const kind = typeof value === 'function' ? 'function' : value instanceof Promise ? 'future' : 'object'
-        entry = { origin: [...this.#path()], value, kind, grants: 0, business }
+        entry = { origin: [...this.#path()], value, kind, grants: 0, business, call: kind === 'future' ? this.#promiseCalls.get(value) : undefined }
         this.#identities.set(value, id); this.#exports.set(id, entry)
         if (entry.kind === 'future') {
           if (business) this.#active++
@@ -112,6 +116,13 @@ export class Peer {
       case 'undefined': return undefined
       case 'data': return wire.value
       case 'list': return wire.value.map(value => this.#decode(value))
+      case 'signal': {
+        // The caller may cancel this call: the method sees a real AbortSignal.
+        if (!this.#decodingFor) throw new Error('a signal is only valid as a call argument')
+        let controller = this.#signals.get(this.#decodingFor)
+        if (!controller) this.#signals.set(this.#decodingFor, controller = new AbortController())
+        return controller.signal
+      }
       case 'record': {
         if (wire.value === null || typeof wire.value !== 'object' || Array.isArray(wire.value)) throw new Error('invalid record')
         return Object.fromEntries(Object.entries(wire.value).map(([key, value]) => [key, this.#decode(value)]))
@@ -207,6 +218,12 @@ export class Peer {
         if (!pending) throw new Error('response for unknown call')
         this.#pending.delete(frame.id); pending({ ok: frame.op === 'return', value }); return
       }
+      if (frame.op === 'cancel') {
+        // The caller gave up; the method decides how to honour its signal.
+        const call = this.#signals.has(frame.id) ? frame.id : this.#awaits.get(frame.id)
+        this.#signals.get(call)?.abort(new DOMException('The operation was cancelled by the caller', 'AbortError'))
+        return
+      }
       if (frame.op === 'release') {
         const entry = this.#export(frame.reference)
         if (!Number.isSafeInteger(frame.count) || frame.count <= 0 || frame.count > entry.grants) throw new Error('invalid reference release count')
@@ -219,7 +236,9 @@ export class Peer {
       this.#received = sequence
       if (frame.op === 'call' && frame.method !== undefined && typeof frame.method !== 'string') throw new Error('invalid method')
       if (frame.op === 'get' && typeof frame.property !== 'string') throw new Error('invalid property')
-      const args = frame.op === 'await' || frame.op === 'get' ? undefined : this.#decode(frame.args)
+      let args
+      this.#decodingFor = frame.id
+      try { args = frame.op === 'await' || frame.op === 'get' ? undefined : this.#decode(frame.args) } finally { this.#decodingFor = undefined }
       const kind = frame.op === 'await' ? 'future' : frame.op === 'get' || frame.method !== undefined ? 'object' : 'function'
       const entry = frame.op === 'invoke' ? undefined : this.#export(frame.reference, kind)
       const business = entry?.business ?? frame.target !== ''
@@ -244,6 +263,7 @@ export class Peer {
     try {
       this.#context.run(path, () => {
         if (frame.op === 'await') {
+          if (entry.call) this.#awaits.set(frame.id, entry.call)
           if (entry.result) this.#respond(frame.id, entry.result, business)
           else if (this.#waiting.length) this.#respond(frame.id, { ok: false, value: Object.assign(new Error(`await requires the Node thread occupied by its parent synchronous call; path: ${path.join(' -> ')}`), { name: 'SyncWaitCycle' }) }, business)
           else entry.value.then(value => this.#respond(frame.id, { ok: true, value }, business), value => this.#respond(frame.id, { ok: false, value }, business))
@@ -254,12 +274,20 @@ export class Peer {
             : frame.op === 'call' && frame.method !== undefined ? Reflect.apply(entry.value[frame.method], entry.value, args)
               : frame.op === 'call' ? Reflect.apply(entry.value, undefined, args)
                 : this.#dispatch(frame.target, frame.method, args)
+          // A returned Promise keeps the call's signal until it settles.
+          if (value instanceof Promise && this.#signals.has(frame.id)) {
+            const call = frame.id
+            this.#promiseCalls.set(value, call)
+            value.then(() => this.#signals.delete(call), () => this.#signals.delete(call))
+          }
           this.#respond(frame.id, { ok: true, value }, business)
         } catch (value) { this.#respond(frame.id, { ok: false, value }, business) }
       })
     } finally { this.#syncPath = previous }
   }
   #respond(id, result, business) {
+    this.#awaits.delete(id)
+    if (!(result.ok && result.value instanceof Promise && this.#promiseCalls.has(result.value))) this.#signals.delete(id)
     const grants = []
     try {
       if (this.#closed) return

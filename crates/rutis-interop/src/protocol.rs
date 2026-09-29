@@ -27,6 +27,9 @@ pub(crate) enum WireValue {
     List(Vec<WireValue>),
     /// A plain object whose fields contain references.
     Record(std::collections::BTreeMap<String, WireValue>),
+    /// An AbortSignal for the receiving call: it aborts when the caller
+    /// cancels the call.
+    Signal,
     Reference {
         id: u64,
         home: bool,
@@ -127,5 +130,10 @@ pub(crate) enum Frame {
     Release {
         reference: u64,
         count: u64,
+    },
+    /// The caller gave up on call `id`: abort its signal / stop awaiting.
+    /// A reply may still arrive and is then discarded.
+    Cancel {
+        id: String,
     },
 }

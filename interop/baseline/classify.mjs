@@ -21,7 +21,7 @@ export const CAPABILITIES = {
   callback: ['function-typed parameter', false, true],
   'returns-function': ['returns a function (e.g. a disposer)', false, true],
   'live-object': ['object with methods or class instance (by reference)', true, true],
-  'abort-signal': ['AbortSignal parameter (optional ones are omitted, not bound)', false, false],
+  'abort-signal': ['AbortSignal parameter (aborted when the Rust future is dropped)', true, true],
   bytes: ['Uint8Array / ArrayBuffer', false, false],
   'async-iterable': ['AsyncIterable / stream', false, false],
   property: ['public property', false, false],

@@ -113,6 +113,7 @@ fn marked(value: Value, references: &mut Vec<Reference>) -> Json {
                 .map(|(key, value)| (key, marked(value, references)))
                 .collect(),
         ),
+        Value::Signal => Json::Null,
         Value::Reference(reference) => {
             references.push(reference);
             let mut marker = Map::new();

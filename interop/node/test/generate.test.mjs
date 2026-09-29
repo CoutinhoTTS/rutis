@@ -85,6 +85,9 @@ test('a Service class provides the Context members typed as it or its bases', as
     assert.match(rust, /pub tags: Vec<String>/)
     assert.match(rust, /pub meta: Option<::std::collections::BTreeMap<String, f64>>/)
     assert.match(rust, /pub async fn get\(&self, key: &Key\) -> Result<Option<Entry>, ::rutis_interop::Error>/)
+    // The AbortSignal is not a Rust parameter: dropping the future aborts it.
+    assert.match(rust, /Cancellable: dropping the returned future/)
+    assert.match(rust, /vec!\[::rutis_interop::arg\(&key\)\?, ::rutis_interop::rpc::Value::Signal\]/)
     assert.match(rust, /pub fn put\(&self, entry: &Entry, overwrite: Option<bool>\)/)
     assert.match(rust, /::rutis_interop::optional\(overwrite\)\?/)
     assert.match(rust, /pub struct Config \{ #\[serde\(rename = "root"\)\] pub root: String,/)

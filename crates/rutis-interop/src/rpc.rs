@@ -32,6 +32,9 @@ pub enum Value {
     /// A plain object whose fields contain references.
     Record(std::collections::BTreeMap<String, Value>),
     Reference(Reference),
+    /// As an argument: an AbortSignal the callee receives, aborted when this
+    /// call is cancelled (its future dropped).
+    Signal,
 }
 impl Value {
     pub fn list(self) -> Result<Vec<Value>, Error> {
@@ -56,6 +59,7 @@ impl Value {
                 .collect::<Result<serde_json::Map<_, _>, _>>()
                 .map(Json::Object),
             Self::Reference(_) => Err(Error::Value("expected data, received a reference".into())),
+            Self::Signal => Err(Error::Value("expected data, received a signal".into())),
         }
     }
     pub fn reference(self) -> Result<Reference, Error> {
@@ -502,8 +506,29 @@ struct Calls {
     waiting: HashMap<String, Waiting>,
     incoming: HashMap<String, Incoming>,
     awaiting: HashMap<String, Awaiting>,
+    /// Calls this side cancelled; their late replies are discarded.
+    cancelled: std::collections::HashSet<String>,
+    /// Late replies discarded after a cancellation.
+    orphans: u64,
     received: u64,
     closed: Option<Error>,
+}
+
+/// Cancels an async call whose future is dropped before it completes.
+struct CancelOnDrop {
+    peer: Weak<Peer>,
+    id: String,
+    done: bool,
+}
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        if let Some(peer) = self.peer.upgrade() {
+            Connection(peer).cancel(&self.id);
+        }
+    }
 }
 struct Activity {
     count: Mutex<usize>,
@@ -810,8 +835,31 @@ impl Connection {
     }
     async fn request_async(&self, call: Operation) -> Reply {
         let (sender, receiver) = oneshot::channel();
-        self.send(call, Waiting::Async(sender))?;
-        receiver.await.map_err(transport)?
+        let id = self.send(call, Waiting::Async(sender))?;
+        let mut guard = CancelOnDrop {
+            peer: Arc::downgrade(&self.0),
+            id,
+            done: false,
+        };
+        let result = receiver.await.map_err(transport);
+        guard.done = true;
+        result?
+    }
+    /// Give up on an outstanding call: the callee's AbortSignal (if any) is
+    /// aborted and a late reply is discarded.
+    fn cancel(&self, id: &str) {
+        {
+            let mut calls = self.0.calls.lock().unwrap();
+            if calls.closed.is_some() || calls.waiting.remove(id).is_none() {
+                return;
+            }
+            calls.cancelled.insert(id.to_owned());
+        }
+        let _ = self.write(Frame::Cancel { id: id.to_owned() });
+    }
+    /// Late replies discarded after cancellations.
+    pub fn orphans(&self) -> u64 {
+        self.0.calls.lock().unwrap().orphans
     }
     fn encode(&self, value: &Value) -> Result<WireValue, Error> {
         let mut grants = Vec::new();
@@ -849,6 +897,7 @@ impl Connection {
                     .map(|(key, value)| Ok((key.clone(), self.encode_inner(value, grants)?)))
                     .collect::<Result<_, Error>>()?,
             ),
+            Value::Signal => WireValue::Signal,
             Value::Reference(Reference(ReferenceInner::Remote(import))) => {
                 if !Weak::ptr_eq(&import.peer, &Arc::downgrade(&self.0)) {
                     return Err(Error::Value(
@@ -910,6 +959,7 @@ impl Connection {
                     .map(|value| self.decode(value))
                     .collect::<Result<_, _>>()?,
             ),
+            WireValue::Signal => return Err(transport("Rust receives no AbortSignal values")),
             WireValue::Record(fields) => Value::Record(
                 fields
                     .into_iter()
@@ -966,6 +1016,18 @@ impl Connection {
             }
         })
     }
+    /// The waiter for a reply, `None` for a late reply to a cancelled call.
+    fn reply_target(&self, id: &str) -> Result<Option<Waiting>, Error> {
+        let mut calls = self.0.calls.lock().unwrap();
+        if let Some(waiting) = calls.waiting.remove(id) {
+            return Ok(Some(waiting));
+        }
+        if calls.cancelled.remove(id) {
+            calls.orphans += 1;
+            return Ok(None);
+        }
+        Err(transport("response for unknown call"))
+    }
     fn export(&self, id: u64) -> Result<Arc<Object>, Error> {
         self.0
             .exports
@@ -992,28 +1054,28 @@ impl Connection {
         }
         let (id, mut path, call) = match frame {
             Frame::Return { id, value } => {
+                // Decode first: a discarded late reply still releases the
+                // references it granted when its values drop.
                 let value = self.decode(value)?;
-                let waiting = self
-                    .0
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .waiting
-                    .remove(&id)
-                    .ok_or_else(|| transport("response for unknown call"))?;
-                finish(waiting, Ok(value));
+                if let Some(waiting) = self.reply_target(&id)? {
+                    finish(waiting, Ok(value));
+                }
                 return Ok(());
             }
             Frame::Throw { id, error } => {
-                let waiting = self
-                    .0
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .waiting
-                    .remove(&id)
-                    .ok_or_else(|| transport("response for unknown call"))?;
-                finish(waiting, Err(error.into()));
+                if let Some(waiting) = self.reply_target(&id)? {
+                    finish(waiting, Err(error.into()));
+                }
+                return Ok(());
+            }
+            Frame::Cancel { id } => {
+                // Stop awaiting on the caller's behalf; queued work is dropped.
+                // A synchronous call already running completes normally.
+                let (awaiting, incoming) = {
+                    let mut calls = self.0.calls.lock().unwrap();
+                    (calls.awaiting.remove(&id), calls.incoming.remove(&id))
+                };
+                drop((awaiting, incoming));
                 return Ok(());
             }
             Frame::Release { reference, count } => {
