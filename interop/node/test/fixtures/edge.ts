@@ -15,6 +15,10 @@ export interface Joiner { call(args: string[], suffix: string): string }
 
 export interface Label { text: string }
 
+export class Account { balance(): number { return 7 } }
+export interface First { account: Account; a: string }
+export interface Second { account: Account; b: string }
+
 export class Left { kind(): string { return 'left' } }
 export class Right { kind(): string { return 'right' } }
 
@@ -34,6 +38,13 @@ export class Edge {
   object(choice: boolean): Left | Right { return choice ? new Left() : new Right() }
   dynamic(): unknown { return { item: new Left() } }
   pick(choice: boolean): Left | Label { return choice ? new Left() : { text: 'label' } }
+  // Serde tries First before Second; the failed attempt must not use up the
+  // reference.
+  record(choice: boolean): First | Second {
+    return choice ? { account: new Account(), a: 'a' } : { account: new Account(), b: 'b' }
+  }
+  // First fails, the map variant would hold the reference as JSON.
+  loose(): First | Record<string, unknown> { return { account: new Account(), b: 'b' } }
   describeItem(item: Left | string): string { return item instanceof Left ? `object ${item.kind()}` : `text ${item}` }
 }
 

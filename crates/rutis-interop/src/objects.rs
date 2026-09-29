@@ -16,8 +16,7 @@ use crate::Error;
 const MARK: &str = "\u{0}rutis:reference";
 
 thread_local! {
-    /// The references of the value being decoded; taken as they are consumed.
-    static DECODING: RefCell<Vec<Option<Reference>>> = const { RefCell::new(Vec::new()) };
+    static DECODING: RefCell<Vec<Reference>> = const { RefCell::new(Vec::new()) };
     static ENCODING: RefCell<Option<Vec<Reference>>> = const { RefCell::new(None) };
 }
 
@@ -129,13 +128,10 @@ fn referenced<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Reference, D
         .and_then(|fields| fields.get(MARK))
         .and_then(Json::as_u64)
         .ok_or_else(|| de::Error::custom("expected a reference, received data"))?;
+    // Not consumed: serde may try the same input again, e.g. for the next
+    // variant of an untagged enum.
     DECODING
-        .with(|references| {
-            references
-                .borrow_mut()
-                .get_mut(index as usize)
-                .and_then(Option::take)
-        })
+        .with(|references| references.borrow().get(index as usize).cloned())
         .ok_or_else(|| de::Error::custom("reference outside of a decode"))
 }
 
@@ -157,24 +153,41 @@ fn mark<S: Serializer>(reference: &Reference, serializer: S) -> Result<S::Ok, S:
 /// Decode a call result into a generated type; object references in it
 /// become `ObjectRef`s.
 ///
-/// Every reference must end up in an `ObjectRef` or `RemoteFunction`: one
-/// that lands in dynamic JSON (or is ignored) would lose the object, so the
-/// decode fails instead of returning the internal marker as data.
-pub fn decode_value<T: de::DeserializeOwned>(value: Value) -> Result<T, Error> {
+/// Every reference must end up in an `ObjectRef` or `RemoteFunction` of the
+/// result: one that lands in dynamic JSON (or is ignored) would lose the
+/// object, so the decode fails instead of returning the internal marker as
+/// data. Which references the result holds is read back from the decoded
+/// value, so alternatives serde tried and discarded do not count.
+pub fn decode_value<T: de::DeserializeOwned + Serialize>(value: Value) -> Result<T, Error> {
     let mut references = Vec::new();
     let json = marked(value, &mut references);
-    let previous =
-        DECODING.with(|current| current.replace(references.into_iter().map(Some).collect()));
-    let result = serde_json::from_value(json);
-    let left = DECODING.with(|current| current.replace(previous));
+    if references.is_empty() {
+        return serde_json::from_value(json).map_err(|error| Error::Value(error.to_string()));
+    }
+    let previous = DECODING.with(|current| current.replace(references.clone()));
+    let result = serde_json::from_value::<T>(json);
+    DECODING.with(|current| current.replace(previous));
     let value = result.map_err(|error| Error::Value(error.to_string()))?;
-    if left.iter().any(Option::is_some) {
+    let held = held(&value)?;
+    if references.iter().any(|reference| !held.contains(reference)) {
         return Err(Error::Value(
             "the value holds a live Cordis object or function that its Rust type cannot represent"
                 .into(),
         ));
     }
     Ok(value)
+}
+
+/// The references a decoded value holds in its `ObjectRef`s and
+/// `RemoteFunction`s.
+fn held<T: Serialize>(value: &T) -> Result<Vec<Reference>, Error> {
+    let previous = ENCODING.with(|current| current.replace(Some(Vec::new())));
+    let result = serde_json::to_value(value);
+    let references = ENCODING
+        .with(|current| current.replace(previous))
+        .unwrap_or_default();
+    result.map_err(|error| Error::Value(error.to_string()))?;
+    Ok(references)
 }
 
 fn marked(value: Value, references: &mut Vec<Reference>) -> Json {

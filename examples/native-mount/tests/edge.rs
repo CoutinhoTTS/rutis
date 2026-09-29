@@ -74,6 +74,26 @@ async fn generated_bindings_keep_null_names_and_live_unions() {
             .unwrap(),
         "text x"
     );
+    // A variant tried and discarded does not use up the reference
+    // (PR #73 review of 6f6a421).
+    let edge::EdgeRecordResult::First(first) = service.record(true).unwrap() else {
+        panic!("expected First")
+    };
+    assert_eq!(first.account.balance().unwrap(), 7.0);
+    let edge::EdgeRecordResult::Second(second) = service.record(false).unwrap() else {
+        panic!("expected Second")
+    };
+    assert_eq!(
+        (second.account.balance().unwrap(), second.b.as_str()),
+        (7.0, "b")
+    );
+    let error = service.loose().unwrap_err();
+    assert!(
+        error.to_string().contains("live Cordis object or function"),
+        "{error}"
+    );
+    drop((first, second));
+
     // Dynamic JSON cannot hold a live object: the decode fails instead of
     // returning the internal marker as data.
     let error = service.dynamic().unwrap_err();

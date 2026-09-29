@@ -30,11 +30,11 @@ export function apply(ctx) {
 }
 "#;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Nested {
     items: Vec<Item>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Item {
     account: ObjectRef,
 }
