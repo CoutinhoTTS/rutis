@@ -10,6 +10,8 @@ pub(crate) const VERSION: u32 = 1;
 pub(crate) enum Kind {
     Function,
     Future,
+    /// An object with methods and live properties, addressed by reference.
+    Object,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -23,6 +25,8 @@ pub(crate) enum WireValue {
     Undefined,
     Data(Value),
     List(Vec<WireValue>),
+    /// A plain object whose fields contain references.
+    Record(std::collections::BTreeMap<String, WireValue>),
     Reference {
         id: u64,
         home: bool,
@@ -91,11 +95,21 @@ pub(crate) enum Frame {
         method: String,
         args: WireValue,
     },
+    /// Call a function reference, or a method of an object reference.
     Call {
         id: String,
         path: Vec<String>,
         reference: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
         args: WireValue,
+    },
+    /// Read a property of an object reference (a live read).
+    Get {
+        id: String,
+        path: Vec<String>,
+        reference: u64,
+        property: String,
     },
     Await {
         id: String,

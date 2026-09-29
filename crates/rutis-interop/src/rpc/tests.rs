@@ -54,6 +54,7 @@ async fn admitted_call_pins_its_target_before_a_following_counted_release() {
         send(
             &mut remote,
             Frame::Call {
+                method: None,
                 id: "node:1".into(),
                 path: vec![],
                 reference: *reference,
@@ -145,6 +146,7 @@ async fn an_old_release_does_not_remove_a_concurrent_new_grant() {
         send(
             &mut remote,
             Frame::Call {
+                method: None,
                 id: "node:1".into(),
                 path: vec![id.clone()],
                 reference,

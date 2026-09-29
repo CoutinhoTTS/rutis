@@ -29,6 +29,8 @@ pub enum Value {
     Undefined,
     Data(Json),
     List(Vec<Value>),
+    /// A plain object whose fields contain references.
+    Record(std::collections::BTreeMap<String, Value>),
     Reference(Reference),
 }
 impl Value {
@@ -48,6 +50,11 @@ impl Value {
                 .map(Self::json)
                 .collect::<Result<Vec<_>, _>>()
                 .map(Json::Array),
+            Self::Record(fields) => fields
+                .into_iter()
+                .map(|(key, value)| value.json().map(|value| (key, value)))
+                .collect::<Result<serde_json::Map<_, _>, _>>()
+                .map(Json::Object),
             Self::Reference(_) => Err(Error::Value("expected data, received a reference".into())),
         }
     }
@@ -110,6 +117,17 @@ impl std::fmt::Debug for Reference {
             .finish_non_exhaustive()
     }
 }
+/// Identity: the same exported object, or the same import of a remote one
+/// (repeated grants of one remote object share their import).
+impl PartialEq for Reference {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (ReferenceInner::Local(a), ReferenceInner::Local(b)) => Arc::ptr_eq(a, b),
+            (ReferenceInner::Remote(a), ReferenceInner::Remote(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
 #[derive(Clone)]
 enum ReferenceInner {
     Local(Arc<Object>),
@@ -122,12 +140,15 @@ impl Reference {
             ReferenceInner::Remote(import) => import.kind == Kind::Future,
         }
     }
+    pub fn is_object(&self) -> bool {
+        matches!(&self.0, ReferenceInner::Remote(import) if import.kind == Kind::Object)
+    }
     pub fn call(&self, args: Value) -> Reply {
         match &self.0 {
             ReferenceInner::Local(object) => object.call(args),
             ReferenceInner::Remote(import) => import
                 .connection()?
-                .request_sync(Operation::Call(import.id, args)),
+                .request_sync(Operation::Call(import.id, None, args)),
         }
     }
     pub async fn call_async(&self, args: Value) -> Reply {
@@ -136,10 +157,38 @@ impl Reference {
             ReferenceInner::Remote(import) => {
                 import
                     .connection()?
-                    .request_async(Operation::Call(import.id, args))
+                    .request_async(Operation::Call(import.id, None, args))
                     .await
             }
         }
+    }
+    fn remote_object(&self) -> Result<&Arc<Import>, Error> {
+        match &self.0 {
+            ReferenceInner::Remote(import) if import.kind == Kind::Object => Ok(import),
+            _ => Err(Error::Value("reference is not a remote object".into())),
+        }
+    }
+    /// Call a method of a remote object and wait for it to return.
+    pub fn call_method(&self, method: &str, args: Value) -> Reply {
+        let import = self.remote_object()?;
+        import
+            .connection()?
+            .request_sync(Operation::Call(import.id, Some(method.into()), args))
+    }
+    /// Call a method of a remote object without blocking the caller.
+    pub async fn call_method_async(&self, method: &str, args: Value) -> Reply {
+        let import = self.remote_object()?;
+        import
+            .connection()?
+            .request_async(Operation::Call(import.id, Some(method.into()), args))
+            .await
+    }
+    /// Read a property of a remote object; every read is live.
+    pub fn get(&self, property: &str) -> Reply {
+        let import = self.remote_object()?;
+        import
+            .connection()?
+            .request_sync(Operation::Get(import.id, property.into()))
     }
     pub async fn wait_async(&self) -> Reply {
         match &self.0 {
@@ -327,6 +376,14 @@ impl Object {
     }
 }
 
+/// Wait for a returned Promise / Future reference; other values pass through.
+pub async fn settle(value: Value) -> Reply {
+    match value {
+        Value::Reference(reference) if reference.is_future() => reference.wait_async().await,
+        value => Ok(value),
+    }
+}
+
 fn protected(call: impl FnOnce() -> Reply) -> Reply {
     catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|panic| Err(panic_error(panic)))
 }
@@ -419,7 +476,8 @@ enum Message {
 }
 enum Operation {
     Invoke(String, String, Value),
-    Call(u64, Value),
+    Call(u64, Option<String>, Value),
+    Get(u64, String),
     Await(u64, Vec<String>),
 }
 enum Accepted {
@@ -674,11 +732,18 @@ impl Connection {
                 method: method.clone(),
                 args: self.encode(args)?,
             },
-            Operation::Call(reference, args) => Frame::Call {
+            Operation::Call(reference, method, args) => Frame::Call {
                 id: id.clone(),
                 path,
                 reference: *reference,
+                method: method.clone(),
                 args: self.encode(args)?,
+            },
+            Operation::Get(reference, property) => Frame::Get {
+                id: id.clone(),
+                path,
+                reference: *reference,
+                property: property.clone(),
             },
             Operation::Await(reference, _) => Frame::Await {
                 id: id.clone(),
@@ -778,6 +843,12 @@ impl Connection {
                     .map(|value| self.encode_inner(value, grants))
                     .collect::<Result<_, _>>()?,
             ),
+            Value::Record(fields) => WireValue::Record(
+                fields
+                    .iter()
+                    .map(|(key, value)| Ok((key.clone(), self.encode_inner(value, grants)?)))
+                    .collect::<Result<_, Error>>()?,
+            ),
             Value::Reference(Reference(ReferenceInner::Remote(import))) => {
                 if !Weak::ptr_eq(&import.peer, &Arc::downgrade(&self.0)) {
                     return Err(Error::Value(
@@ -838,6 +909,12 @@ impl Connection {
                     .into_iter()
                     .map(|value| self.decode(value))
                     .collect::<Result<_, _>>()?,
+            ),
+            WireValue::Record(fields) => Value::Record(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| Ok((key, self.decode(value)?)))
+                    .collect::<Result<_, Error>>()?,
             ),
             WireValue::Reference {
                 id,
@@ -974,10 +1051,16 @@ impl Connection {
                 path,
                 Accepted::Invoke(target, method, self.decode(args)?),
             ),
+            // Rust exports functions and async results only, never objects.
+            Frame::Call {
+                method: Some(_), ..
+            }
+            | Frame::Get { .. } => return Err(transport("Rust does not export object references")),
             Frame::Call {
                 id,
                 path,
                 reference,
+                method: None,
                 args,
             } => (
                 id,

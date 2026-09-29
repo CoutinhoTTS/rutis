@@ -228,11 +228,15 @@ impl Process {
         self.peer.invoke(service, method, args.into())?.json()
     }
 
-    /// Call a method with protocol arguments (keeps `undefined` distinct).
-    pub fn invoke(&self, handle: &str, method: &str, args: Vec<RpcValue>) -> Result<Value, Error> {
-        self.peer
-            .invoke(handle, method, RpcValue::List(args))?
-            .json()
+    /// Call a method with protocol arguments (keeps `undefined` distinct);
+    /// the result may contain object references (see `decode_value`).
+    pub fn invoke(
+        &self,
+        handle: &str,
+        method: &str,
+        args: Vec<RpcValue>,
+    ) -> Result<RpcValue, Error> {
+        self.peer.invoke(handle, method, RpcValue::List(args))
     }
 
     /// Asynchronous form of [`Process::invoke`]: awaits a returned Promise.
@@ -241,22 +245,13 @@ impl Process {
         handle: &str,
         method: &str,
         args: Vec<RpcValue>,
-    ) -> Result<Value, Error> {
-        Self::settle(
+    ) -> Result<RpcValue, Error> {
+        crate::rpc::settle(
             self.peer
                 .invoke_async(handle, method, RpcValue::List(args))
                 .await?,
         )
         .await
-    }
-
-    async fn settle(value: RpcValue) -> Result<Value, Error> {
-        match value {
-            RpcValue::Reference(reference) if reference.is_future() => {
-                reference.wait_async().await?.json()
-            }
-            value => value.json(),
-        }
     }
 
     pub async fn call_async(
@@ -265,7 +260,9 @@ impl Process {
         method: &str,
         args: Value,
     ) -> Result<Value, Error> {
-        Self::settle(self.peer.invoke_async(service, method, args.into()).await?).await
+        crate::rpc::settle(self.peer.invoke_async(service, method, args.into()).await?)
+            .await?
+            .json()
     }
 
     pub async fn dispose(&self) -> Result<(), Error> {

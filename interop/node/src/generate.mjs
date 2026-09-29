@@ -196,11 +196,15 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
       const declaration = property.valueDeclaration ?? property.declarations?.[0]
       return declaration && checker.getTypeOfSymbolAtLocation(property, declaration).getCallSignatures().length
     })
-    if (methods.length || (type.getSymbol()?.flags & ts.SymbolFlags.Class)) {
-      throw new Unsupported(`${checker.typeToString(type)} is a live object with methods (object references are not bound yet)`)
-    }
     const index = checker.getIndexInfoOfType(type, ts.IndexKind.String)
-    if (index && !properties.length) return `::std::collections::BTreeMap<String, ${rust(index.type, `${hint}Value`)}>`
+    if (index && !properties.length && !methods.length) return `::std::collections::BTreeMap<String, ${rust(index.type, `${hint}Value`)}>`
+    // Built-in JS types (Map, Set, iterators, ...) are not plugin objects:
+    // they neither cross as data nor as object references.
+    const declared = type.getSymbol()?.declarations?.[0]?.getSourceFile()
+    if (declared && program.isSourceFileDefaultLibrary(declared) && (methods.length || type.getSymbol()?.flags & ts.SymbolFlags.Class)) {
+      throw new Unsupported(`${checker.typeToString(type)} (built-in type is not bound)`)
+    }
+    if (methods.length || (type.getSymbol()?.flags & ts.SymbolFlags.Class)) return liveObject(type, hint)
     const name = claim(typeName(type, hint))
     named.set(type, name)
     building.add(type)
@@ -338,7 +342,16 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
   for (const [serviceName, { type, node }] of services) {
     const structName = claim(typeName(type, serviceName))
     structs.set(serviceName, structName)
-    const methods = [], unavailable = []
+    const { methods, unavailable } = bindMembers(type, serviceName, structName, { properties: false })
+    manifest[serviceName] = methods.map(method => method.name)
+    serviceCode.push(serviceStruct(serviceName, structName, methods, unavailable))
+  }
+
+  // Bind the members of a service or live object type. Methods keep their
+  // sync / async shape; with `properties`, data properties become live
+  // getters. Members that cannot be bound are reported, not dropped silently.
+  function bindMembers(type, label, rustOwner, { properties }) {
+    const methods = [], getters = [], unavailable = []
     const rustNames = new Set()
     for (const member of checker.getPropertiesOfType(type)) {
       const declaration = member.valueDeclaration ?? member.declarations?.[0]
@@ -349,19 +362,27 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
       if (memberName.startsWith('_') || memberName.startsWith('__@')) continue
       const skip = reason => {
         unavailable.push([memberName, reason])
-        diagnostics.push(`${location(declaration)}: ${serviceName}.${memberName} is not bound: ${reason}`)
+        diagnostics.push(`${location(declaration)}: ${label}.${memberName} is not bound: ${reason}`)
       }
       const memberType = checker.getTypeOfSymbolAtLocation(member, declaration)
       const signatures = memberType.getCallSignatures()
-      if (!signatures.length) { skip('property (properties are not bound yet)'); continue }
-      if (signatures.length !== 1) { skip('overloaded method'); continue }
-      const signature = signatures[0]
-      if (signature.typeParameters?.length) { skip('generic method'); continue }
-      const hint = `${structName}${pascal(memberName)}`
-      mapping = `${location(declaration)}: ${serviceName}.${memberName}`
+      const hint = `${rustOwner}${pascal(memberName)}`
+      const saved = mapping
+      mapping = `${location(declaration)}: ${label}.${memberName}`
       try {
         const rustName = ident(snake(memberName))
-        if (rustNames.has(rustName)) throw new Unsupported(`method name collides with another as ${rustName}`)
+        if (rustNames.has(rustName)) throw new Unsupported(`member name collides with another as ${rustName}`)
+        if (!signatures.length) {
+          if (!properties) throw new Unsupported('property (properties are not bound yet)')
+          const { members } = stripNullish(memberType)
+          if (members.some(member => member.getCallSignatures().length)) throw new Unsupported('function-valued property')
+          getters.push({ name: memberName, rustName, result: rust(memberType, hint) })
+          rustNames.add(rustName)
+          continue
+        }
+        if (signatures.length !== 1) throw new Unsupported('overloaded method')
+        const signature = signatures[0]
+        if (signature.typeParameters?.length) throw new Unsupported('generic method')
         const params = signature.parameters.map((parameter, index) => {
           const parameterDeclaration = parameter.valueDeclaration
           if (parameterDeclaration?.dotDotDotToken) throw new Unsupported('rest parameter')
@@ -385,10 +406,62 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
       } catch (error) {
         if (!(error instanceof Unsupported)) throw error
         skip(error.message)
+      } finally {
+        mapping = saved
       }
     }
-    manifest[serviceName] = methods.map(method => method.name)
-    serviceCode.push(serviceStruct(serviceName, structName, methods, unavailable))
+    return { methods, getters, unavailable }
+  }
+
+  // One generated method; `target(method, args)` is the call expression.
+  function methodCode(label, method, target) {
+    const exposed = method.params.filter(parameter => !parameter.omitted)
+    const signature = exposed.map(parameter => `${parameter.name}: ${borrowed(parameter.rustType)}`).join(', ')
+    // Trailing omitted parameters are left out; earlier ones pass undefined.
+    const passed = method.params.slice(0, method.params.findLastIndex(parameter => !parameter.omitted) + 1)
+    const args = passed.map(parameter => parameter.omitted
+      ? '::rutis_interop::rpc::Value::Undefined'
+      : parameter.rustType.startsWith('Option<')
+        ? `::rutis_interop::optional(${parameter.name})?`
+        : `::rutis_interop::arg(&${parameter.name})?`).join(', ')
+    const note = method.params.some(parameter => parameter.omitted) ? '\n      ///\n      /// Runs without an AbortSignal: cancellation is not bound yet.' : ''
+    return `/// Calls \`${label}.${method.name}\` on the Cordis side.${note}
+      pub ${method.async ? 'async ' : ''}fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> Result<${method.result}, ::rutis_interop::Error> {
+        ${exposed.map(parameter => finite(parameter.name, parameter.rustType)).join('\n')}
+        ::rutis_interop::decode_value(${target(method, `vec![${args}]`)})
+      }`
+  }
+
+  function unboundDocs(unavailable) {
+    return unavailable.length
+      ? `///\n/// Members not bound yet:\n${unavailable.map(([name, reason]) => `/// - \`${name}\`: ${reason}`).join('\n')}\n`
+      : ''
+  }
+
+  // An object with methods, or a class instance, crosses by reference: the
+  // proxy reads its properties live and calls its methods on the original.
+  function liveObject(type, hint) {
+    if (named.has(type)) return named.get(type)
+    const label = typeName(type, hint)
+    const name = claim(label)
+    named.set(type, name)
+    const { methods, getters, unavailable } = bindMembers(type, label, name, { properties: true })
+    const getterCode = getters.map(getter => `/// Reads \`${label}.${getter.name}\` from the live object.
+      pub fn ${getter.rustName}(&self) -> Result<${getter.result}, ::rutis_interop::Error> {
+        ::rutis_interop::decode_value(self.0.get(${literal(getter.name)})?)
+      }`).join('\n')
+    const code = methods.map(method => methodCode(label, method, (method, args) => method.async
+      ? `self.0.call_async(${literal(method.name)}, ${args}).await?`
+      : `self.0.call(${literal(method.name)}, ${args})?`)).join('\n')
+    items.push(`/// Live Cordis object \`${label}\`: property reads and method calls reach the
+    /// original object; passing it back hands Cordis that same object. Two
+    /// proxies are equal when they address the same object.
+    ${unboundDocs(unavailable)}#[derive(Debug, Clone, PartialEq, ::rutis_interop::serde::Serialize, ::rutis_interop::serde::Deserialize)]
+    #[serde(crate = "rutis_interop::serde", transparent)]
+    pub struct ${name}(pub ::rutis_interop::ObjectRef);
+    impl ${name} { ${getterCode}
+    ${code} }`)
+    return name
   }
 
   function borrowed(rustType) {
@@ -408,29 +481,10 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
     return ''
   }
   function serviceStruct(serviceName, structName, methods, unavailable) {
-    const code = methods.map(method => {
-      const exposed = method.params.filter(parameter => !parameter.omitted)
-      const signature = exposed.map(parameter => `${parameter.name}: ${borrowed(parameter.rustType)}`).join(', ')
-      // Trailing omitted parameters are left out; earlier ones pass undefined.
-      const passed = method.params.slice(0, method.params.findLastIndex(parameter => !parameter.omitted) + 1)
-      const args = passed.map(parameter => parameter.omitted
-        ? '::rutis_interop::rpc::Value::Undefined'
-        : parameter.rustType.startsWith('Option<')
-          ? `::rutis_interop::optional(${parameter.name})?`
-          : `::rutis_interop::arg(&${parameter.name})?`).join(', ')
-      const call = method.async
-        ? `self.process.invoke_async(&self.handle, ${literal(method.name)}, vec![${args}]).await?`
-        : `self.process.invoke(&self.handle, ${literal(method.name)}, vec![${args}])?`
-      const note = method.params.some(parameter => parameter.omitted) ? '\n      ///\n      /// Runs without an AbortSignal: cancellation is not bound yet.' : ''
-      return `/// Calls \`${serviceName}.${method.name}\` on the Cordis side.${note}
-      pub ${method.async ? 'async ' : ''}fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> Result<${method.result}, ::rutis_interop::Error> {
-        ${exposed.map(parameter => finite(parameter.name, parameter.rustType)).join('\n')}
-        ::rutis_interop::decode(${call})
-      }`
-    }).join('\n')
-    const missing = unavailable.length
-      ? `///\n/// Members not bound yet:\n${unavailable.map(([name, reason]) => `/// - \`${name}\`: ${reason}`).join('\n')}\n`
-      : ''
+    const code = methods.map(method => methodCode(serviceName, method, (method, args) => method.async
+      ? `self.process.invoke_async(&self.handle, ${literal(method.name)}, ${args}).await?`
+      : `self.process.invoke(&self.handle, ${literal(method.name)}, ${args})?`)).join('\n')
+    const missing = unboundDocs(unavailable)
     // One proxy per handle: it keeps addressing the object it was created
     // for, and releases that object when the last Arc snapshot is dropped.
     return `/// Native proxy for the Cordis service \`ctx.${serviceName}\`.
@@ -522,7 +576,7 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
     const arms = methods.map(method => {
       const decode = method.params.map(parameter => parameter.omitted ? 'args.next();'
         : parameter.raw ? `let ${parameter.name} = args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined);`
-          : `let ${parameter.name}: ${parameter.rustType} = ::rutis_interop::decode(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined).json()?)?;`).join('\n')
+          : `let ${parameter.name}: ${parameter.rustType} = ::rutis_interop::decode_value(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?;`).join('\n')
       const call = `${method.rustName}(${method.params.filter(parameter => !parameter.omitted).map(parameter => parameter.name).join(', ')})`
       return method.async
         ? `${literal(method.name)} => { ${decode} let host = self.0.clone(); Ok(::rutis_interop::rpc::Value::future(async move { let result = host.${call}.await?; ${encode(method)} })) }`

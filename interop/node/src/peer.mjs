@@ -2,6 +2,24 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { encode } from './wire.mjs'
 import { encodeError, decodeError } from './errors.mjs'
 
+// Values with behaviour cross by reference, so their identity and state stay
+// with the owner: objects with methods and class instances become object
+// references. Built-in value types are not objects of this kind.
+const builtins = [Date, RegExp, Map, Set, WeakMap, WeakSet, ArrayBuffer, DataView, Error, Promise]
+function isLive(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || ArrayBuffer.isView(value)) return false
+  if (builtins.some(type => value instanceof type)) return false
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return true
+  return Object.values(value).some(item => typeof item === 'function')
+}
+// A plain object is encoded field by field when a field needs a reference.
+function needsRecord(value) {
+  return Object.values(value).some(item => typeof item === 'function' || item instanceof Promise || isLive(item)
+    || (Array.isArray(item) && item.some(element => typeof element === 'function' || element instanceof Promise || isLive(element)))
+    || (item !== null && typeof item === 'object' && !Array.isArray(item) && !isLive(item) && Object.getPrototypeOf(item) === Object.prototype && needsRecord(item)))
+}
+
 function checkData(value, seen = new Set()) {
   if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') throw new TypeError('value requires an unsupported binding')
   if (value === null || typeof value !== 'object') return
@@ -61,12 +79,13 @@ export class Peer {
       if (imported.released) throw new Error('reference released')
       return { type: 'reference', value: { id: imported.id, kind: imported.kind, home: true, origin: imported.origin } }
     }
-    if (typeof value === 'function' || value instanceof Promise) {
+    if (typeof value === 'function' || value instanceof Promise || isLive(value)) {
       let id = this.#identities.get(value), entry = this.#exports.get(id)
       if (!entry) {
         id = ++this.#ref
         if (!Number.isSafeInteger(id)) throw new Error('reference identifiers exhausted')
-        entry = { origin: [...this.#path()], value, kind: typeof value === 'function' ? 'function' : 'future', grants: 0, business }
+        const kind = typeof value === 'function' ? 'function' : value instanceof Promise ? 'future' : 'object'
+        entry = { origin: [...this.#path()], value, kind, grants: 0, business }
         this.#identities.set(value, id); this.#exports.set(id, entry)
         if (entry.kind === 'future') {
           if (business) this.#active++
@@ -79,6 +98,9 @@ export class Peer {
       return { type: 'reference', value: { id, kind: entry.kind, home: false, origin: entry.origin } }
     }
     if (Array.isArray(value)) return { type: 'list', value: value.map(value => this.#encode(value, grants, business)) }
+    if (value !== null && typeof value === 'object' && needsRecord(value)) {
+      return { type: 'record', value: Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.#encode(item, grants, business)])) }
+    }
     checkData(value)
     return { type: 'data', value }
   }
@@ -90,10 +112,16 @@ export class Peer {
       case 'undefined': return undefined
       case 'data': return wire.value
       case 'list': return wire.value.map(value => this.#decode(value))
+      case 'record': {
+        if (wire.value === null || typeof wire.value !== 'object' || Array.isArray(wire.value)) throw new Error('invalid record')
+        return Object.fromEntries(Object.entries(wire.value).map(([key, value]) => [key, this.#decode(value)]))
+      }
       case 'reference': {
         const { id, home, kind, origin } = wire.value
-        if (!Number.isSafeInteger(id) || id <= 0 || !['function', 'future'].includes(kind) || typeof home !== 'boolean' || !Array.isArray(origin) || origin.some(id => !/^(node|rust):[1-9][0-9]*$/.test(id))) throw new Error('invalid reference')
+        if (!Number.isSafeInteger(id) || id <= 0 || !['function', 'future', 'object'].includes(kind) || typeof home !== 'boolean' || !Array.isArray(origin) || origin.some(id => !/^(node|rust):[1-9][0-9]*$/.test(id))) throw new Error('invalid reference')
         if (home) return this.#export(id, kind).value
+        // Rust does not export objects; only JS objects travel back home.
+        if (kind === 'object') throw new Error('object references exported by Rust are not supported')
         let proxy = this.#imports.get(id)?.deref()
         if (proxy) {
           const record = this.#proxies.get(proxy)
@@ -185,12 +213,15 @@ export class Peer {
         if ((entry.grants -= frame.count) === 0) this.#exports.delete(frame.reference)
         return
       }
-      if (!['invoke', 'call', 'await'].includes(frame.op) || typeof frame.id !== 'string' || !frame.id.startsWith('rust:') || !Array.isArray(frame.path) || frame.path.some(id => typeof id !== 'string') || frame.path.includes(frame.id)) throw new Error('invalid invocation')
+      if (!['invoke', 'call', 'get', 'await'].includes(frame.op) || typeof frame.id !== 'string' || !frame.id.startsWith('rust:') || !Array.isArray(frame.path) || frame.path.some(id => typeof id !== 'string') || frame.path.includes(frame.id)) throw new Error('invalid invocation')
       const sequence = Number(frame.id.slice(5))
       if (!/^rust:[1-9][0-9]*$/.test(frame.id) || !Number.isSafeInteger(sequence) || sequence <= this.#received) throw new Error('invalid or repeated invocation identity')
       this.#received = sequence
-      const args = frame.op === 'await' ? undefined : this.#decode(frame.args)
-      const entry = frame.op === 'invoke' ? undefined : this.#export(frame.reference, frame.op === 'call' ? 'function' : 'future')
+      if (frame.op === 'call' && frame.method !== undefined && typeof frame.method !== 'string') throw new Error('invalid method')
+      if (frame.op === 'get' && typeof frame.property !== 'string') throw new Error('invalid property')
+      const args = frame.op === 'await' || frame.op === 'get' ? undefined : this.#decode(frame.args)
+      const kind = frame.op === 'await' ? 'future' : frame.op === 'get' || frame.method !== undefined ? 'object' : 'function'
+      const entry = frame.op === 'invoke' ? undefined : this.#export(frame.reference, kind)
       const business = entry?.business ?? frame.target !== ''
       if (business) this.#active++
       const job = { frame, args, entry, business }
@@ -219,7 +250,10 @@ export class Peer {
           return
         }
         try {
-          const value = frame.op === 'call' ? Reflect.apply(entry.value, undefined, args) : this.#dispatch(frame.target, frame.method, args)
+          const value = frame.op === 'get' ? entry.value[frame.property]
+            : frame.op === 'call' && frame.method !== undefined ? Reflect.apply(entry.value[frame.method], entry.value, args)
+              : frame.op === 'call' ? Reflect.apply(entry.value, undefined, args)
+                : this.#dispatch(frame.target, frame.method, args)
           this.#respond(frame.id, { ok: true, value }, business)
         } catch (value) { this.#respond(frame.id, { ok: false, value }, business) }
       })

@@ -19,15 +19,32 @@ async function fixture(body, run) {
 
 test('unsupported members are reported with their source location, not dropped silently', async () => {
   await fixture(`import type { Context } from '@deepseek-ai/cordis'
-    class Service { session(): { close(): void } { return { close() {} } } ping(): number { return 1 } }
+    class Service { bytes(): Uint8Array { return new Uint8Array() } ping(): number { return 1 } }
     export function apply(ctx: Context) { ctx.provide('session', new Service()) }
   `, file => {
     const { rust, diagnostics } = generate(file, root)
     assert.equal(diagnostics.length, 1)
-    assert.match(diagnostics[0], /plugin\.ts:\d+:\d+: session\.session is not bound: .*live object/)
+    assert.match(diagnostics[0], /plugin\.ts:\d+:\d+: session\.bytes is not bound: Uint8Array/)
     assert.match(rust, /pub fn ping\(&self\)/)
-    assert.match(rust, /Members not bound yet:\n\/\/\/ - `session`/)
-    assert.doesNotMatch(rust, /fn session\(/)
+    assert.match(rust, /Members not bound yet:\n\/\/\/ - `bytes`/)
+    assert.doesNotMatch(rust, /fn bytes\(/)
+  })
+})
+
+test('objects with methods become live object proxies with getters and methods', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    export interface Session { readonly id: string; readonly turns: number; close(): Promise<void>; rename(title: string): Session }
+    class Service { open(title: string): Session { throw new Error() } list(): Session[] { return [] } }
+    export function apply(ctx: Context) { ctx.provide('sessions', new Service()) }
+  `, file => {
+    const { rust, diagnostics } = generate(file, root)
+    assert.deepEqual(diagnostics, [])
+    assert.match(rust, /pub struct Session\(pub ::rutis_interop::ObjectRef\);/)
+    assert.match(rust, /pub fn id\(&self\) -> Result<String, ::rutis_interop::Error> \{\s*::rutis_interop::decode_value\(self\.0\.get\("id"\)\?\)/)
+    assert.match(rust, /pub async fn close\(&self\) -> Result<\(\), ::rutis_interop::Error>/)
+    assert.match(rust, /pub fn rename\(&self, title: &str\) -> Result<Session, ::rutis_interop::Error>/)
+    assert.match(rust, /pub fn open\(&self, title: &str\) -> Result<Session, ::rutis_interop::Error>/)
+    assert.match(rust, /pub fn list\(&self\) -> Result<Vec<Session>, ::rutis_interop::Error>/)
   })
 })
 

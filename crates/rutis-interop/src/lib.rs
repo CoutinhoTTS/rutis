@@ -8,6 +8,8 @@
 
 pub mod build;
 #[cfg(unix)]
+mod objects;
+#[cfg(unix)]
 mod process;
 #[cfg(unix)]
 mod projection;
@@ -18,6 +20,8 @@ pub mod rpc;
 #[cfg(unix)]
 pub mod server;
 
+#[cfg(unix)]
+pub use objects::{arg, decode_value, ObjectRef};
 #[cfg(unix)]
 pub use process::{Host, HostDispatch, Process, ServiceEvents};
 #[cfg(unix)]
@@ -49,14 +53,6 @@ impl From<Error> for rutis::CordisError {
 
 pub fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, Error> {
     serde_json::from_value(value).map_err(|error| Error::Value(error.to_string()))
-}
-
-/// Encode a required argument for a generated call.
-#[cfg(unix)]
-pub fn arg<T: serde::Serialize + ?Sized>(value: &T) -> Result<rpc::Value, Error> {
-    serde_json::to_value(value)
-        .map(rpc::Value::Data)
-        .map_err(|error| Error::Value(error.to_string()))
 }
 
 /// Encode an optional argument: `None` is passed as JS `undefined`, not

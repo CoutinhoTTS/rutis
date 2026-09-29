@@ -20,7 +20,7 @@ export const CAPABILITIES = {
   optional: ['optional or rest parameter', true, true],
   callback: ['function-typed parameter', false, true],
   'returns-function': ['returns a function (e.g. a disposer)', false, true],
-  'live-object': ['object with methods or class instance', false, false],
+  'live-object': ['object with methods or class instance (by reference)', true, true],
   'abort-signal': ['AbortSignal parameter (optional ones are omitted, not bound)', false, false],
   bytes: ['Uint8Array / ArrayBuffer', false, false],
   'async-iterable': ['AsyncIterable / stream', false, false],

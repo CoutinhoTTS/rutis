@@ -72,7 +72,35 @@ async fn published_plugins_through_typed_bindings() {
         .delete(&workspace::WorkspaceId::from("missing"))
         .await
         .unwrap());
-    drop((registry, sessions));
+
+    // Workspaces are live objects: returned by reference, read live, and the
+    // same object whichever call returns it.
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let created = registry
+        .create(project.to_str().unwrap(), Some("demo"))
+        .await
+        .unwrap();
+    let id = created.id().unwrap();
+    assert_eq!(created.title().unwrap(), "demo");
+    assert_eq!(
+        created.path().unwrap(),
+        project.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert!(created.session_ids().unwrap().is_empty());
+    assert_eq!(registry.get(&id).unwrap().as_ref(), Some(&created));
+    assert_eq!(registry.list().unwrap(), vec![created.clone()]);
+    assert_eq!(
+        registry
+            .resolve_by_path(project.to_str().unwrap())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&created)
+    );
+    assert!(registry.delete(&id).await.unwrap());
+    assert!(registry.get(&id).unwrap().is_none());
+    drop((registry, sessions, created));
 
     // L1: typed calls.
     let credentials = ctx.get::<credentials::CredentialProvider>().unwrap();

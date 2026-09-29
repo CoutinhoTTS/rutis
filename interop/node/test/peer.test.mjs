@@ -81,11 +81,42 @@ test('explicit release accounts repeated live imports without relying on GC', as
 test('unsupported nested references fail explicitly and roll back partial grants', async () => {
   const callback = () => 42
   const { peer, sent, incoming, fault } = harness(() => {})
-  assert.throws(() => peer.invoke('test', 'bad', [callback, { nested: callback }]), /unsupported binding/)
+  // An object with methods crosses as an object reference; a symbol cannot cross.
+  assert.throws(() => peer.invoke('test', 'bad', [callback, { nested: Symbol('x') }]), /unsupported binding/)
   // Failed encoding consumes the invocation id, but publishes no reference.
   incoming.push({ op: 'return', id: 'node:2', value: data(7) })
   assert.equal(peer.invoke('test', 'good', []), 7)
   assert.equal(sent.length, 1)
+  assert.equal(fault(), undefined)
+  peer.close()
+})
+
+test('objects with behaviour cross as live object references', async () => {
+  class Account {
+    #balance = 5
+    get balance() { return this.#balance }
+    deposit(amount) { this.#balance += amount; return this.#balance }
+  }
+  const account = new Account()
+  const plain = { id: 'a', tags: ['x'] }
+  const { peer, sent, fault } = harness((target, method) => method === 'open' ? { account, plain, again: account } : undefined)
+  peer.receive(invoke(1, 'open'))
+  await new Promise(resolve => setImmediate(resolve))
+  const reply = sent.find(frame => frame.op === 'return')
+  // A plain object holding a live one is a record; data stays data; the same
+  // object is one reference however often it appears.
+  assert.equal(reply.value.type, 'record')
+  assert.deepEqual(reply.value.value.plain, data(plain))
+  const { id, kind, home } = reply.value.value.account.value
+  assert.deepEqual([kind, home], ['object', false])
+  assert.equal(reply.value.value.again.value.id, id)
+  // Property reads and method calls reach the original object.
+  peer.receive({ op: 'get', id: 'rust:2', path: [], reference: id, property: 'balance' })
+  peer.receive({ op: 'call', id: 'rust:3', path: [], reference: id, method: 'deposit', args: { type: 'list', value: [data(2)] } })
+  await new Promise(resolve => setImmediate(resolve))
+  const results = sent.filter(frame => frame.op === 'return').map(frame => frame.value)
+  assert.deepEqual(results.slice(1), [data(5), data(7)])
+  assert.equal(account.balance, 7)
   assert.equal(fault(), undefined)
   peer.close()
 })
