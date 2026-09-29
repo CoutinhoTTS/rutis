@@ -50,20 +50,9 @@ impl ObjectRef {
 
 impl<'de> Deserialize<'de> for ObjectRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let marker = Json::deserialize(deserializer)?;
-        let index = marker
-            .as_object()
-            .filter(|fields| fields.len() == 1)
-            .and_then(|fields| fields.get(MARK))
-            .and_then(Json::as_u64)
-            .ok_or_else(|| de::Error::custom("expected a live object, received data"))?;
-        let reference = DECODING
-            .with(|references| references.borrow().get(index as usize).cloned())
-            .ok_or_else(|| de::Error::custom("object reference outside of a decode"))?;
+        let reference = referenced(deserializer)?;
         if !reference.is_object() {
-            return Err(de::Error::custom(
-                "expected a live object, received a function",
-            ));
+            return Err(de::Error::custom("expected a live object"));
         }
         Ok(Self(reference))
     }
@@ -71,19 +60,92 @@ impl<'de> Deserialize<'de> for ObjectRef {
 
 impl Serialize for ObjectRef {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let index = ENCODING.with(|references| {
-            references.borrow_mut().as_mut().map(|references| {
-                references.push(self.0.clone());
-                references.len() - 1
-            })
-        });
-        let index = index.ok_or_else(|| {
-            ser::Error::custom("a live object can only be serialized as a call argument")
-        })?;
-        let mut marker = Map::new();
-        marker.insert(MARK.into(), index.into());
-        Json::Object(marker).serialize(serializer)
+        mark(&self.0, serializer)
     }
+}
+
+/// A function owned by the Cordis side, for example a disposer a method
+/// returned. Calling it runs the original function; equal when it is the
+/// same function.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteFunction(Reference);
+
+impl RemoteFunction {
+    /// Call it and wait for it to return.
+    pub fn call(&self, args: Vec<Value>) -> Result<Value, Error> {
+        self.0.call(Value::List(args))
+    }
+
+    /// Call it; a returned Promise is awaited.
+    pub async fn call_async(&self, args: Vec<Value>) -> Result<Value, Error> {
+        rpc::settle(self.0.call_async(Value::List(args)).await?).await
+    }
+
+    pub fn reference(&self) -> &Reference {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RemoteFunction {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let reference = referenced(deserializer)?;
+        if !reference.is_function() {
+            return Err(de::Error::custom("expected a function"));
+        }
+        Ok(Self(reference))
+    }
+}
+
+impl Serialize for RemoteFunction {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        mark(&self.0, serializer)
+    }
+}
+
+/// A JS `Error` passed as a value (for example to a callback): its name,
+/// message and stack cross as data.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JsError {
+    pub name: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+}
+
+impl std::fmt::Display for JsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.name, self.message)
+    }
+}
+
+impl std::error::Error for JsError {}
+
+fn referenced<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Reference, D::Error> {
+    let marker = Json::deserialize(deserializer)?;
+    let index = marker
+        .as_object()
+        .filter(|fields| fields.len() == 1)
+        .and_then(|fields| fields.get(MARK))
+        .and_then(Json::as_u64)
+        .ok_or_else(|| de::Error::custom("expected a reference, received data"))?;
+    DECODING
+        .with(|references| references.borrow().get(index as usize).cloned())
+        .ok_or_else(|| de::Error::custom("reference outside of a decode"))
+}
+
+fn mark<S: Serializer>(reference: &Reference, serializer: S) -> Result<S::Ok, S::Error> {
+    let index = ENCODING.with(|references| {
+        references.borrow_mut().as_mut().map(|references| {
+            references.push(reference.clone());
+            references.len() - 1
+        })
+    });
+    let index = index.ok_or_else(|| {
+        ser::Error::custom("a reference can only be serialized as a call argument")
+    })?;
+    let mut marker = Map::new();
+    marker.insert(MARK.into(), index.into());
+    Json::Object(marker).serialize(serializer)
 }
 
 /// Decode a call result into a generated type; object references in it

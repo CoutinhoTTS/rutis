@@ -157,3 +157,22 @@ test('a host-provided service becomes a trait, a dispatcher and an injected depe
     assert.throws(() => generate(file, root, { provide: ['missing'] }), /no Cordis Context declaration found for the host-provided service missing/)
   })
 })
+
+test('callback parameters take Rust closures and returned functions stay remote', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    class Service {
+      watch(path: string, changed: (error?: Error) => void): () => Promise<void> { return async () => {} }
+      update(mutate: (current: number | undefined) => Promise<number>): Promise<number> { return mutate(undefined) }
+      install(installer: (ctx: Context) => void | Promise<void>): () => void { return () => {} }
+      maybe(hook?: () => void): void {}
+    }
+    export function apply(ctx: Context) { ctx.provide('hooks', new Service()) }
+  `, file => {
+    const { rust, diagnostics } = generate(file, root)
+    assert.match(rust, /pub fn watch\(&self, path: &str, changed: impl Fn\(Option<::rutis_interop::JsError>\) -> Result<\(\), ::rutis_interop::Error> \+ Send \+ Sync \+ 'static\) -> Result<::rutis_interop::RemoteFunction, ::rutis_interop::Error>/)
+    assert.match(rust, /pub async fn update\(&self, mutate: impl Fn\(Option<f64>\) -> ::rutis::BoxFuture<'static, Result<f64, ::rutis_interop::Error>> \+ Send \+ Sync \+ 'static\)/)
+    assert.match(rust, /install\(&self, installer: impl Fn\(Context\) -> ::rutis::BoxFuture<'static, Result<\(\), ::rutis_interop::Error>>/)
+    assert.match(rust, /let changed = ::rutis_interop::rpc::Value::callback\(move \|args\|/)
+    assert.match(diagnostics.join('\n'), /hooks\.maybe is not bound: optional callback parameter/)
+  })
+})

@@ -144,6 +144,12 @@ impl Reference {
             ReferenceInner::Remote(import) => import.kind == Kind::Future,
         }
     }
+    pub fn is_function(&self) -> bool {
+        match &self.0 {
+            ReferenceInner::Local(object) => object.kind() == Kind::Function,
+            ReferenceInner::Remote(import) => import.kind == Kind::Function,
+        }
+    }
     pub fn is_object(&self) -> bool {
         matches!(&self.0, ReferenceInner::Remote(import) if import.kind == Kind::Object)
     }

@@ -119,6 +119,9 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
       throw new Unsupported(`intersection ${checker.typeToString(type)}`)
     }
     const symbol = type.getSymbol()?.getName()
+    // JS errors passed as values cross as { name, message, stack }.
+    const lib = type.getSymbol()?.declarations?.[0]?.getSourceFile()
+    if (symbol?.endsWith('Error') && lib && program.isSourceFileDefaultLibrary(lib)) return '::rutis_interop::JsError'
     if (symbol === 'AbortSignal') throw new Unsupported('AbortSignal parameter (cancellation is not bound yet)')
     if (['Uint8Array', 'ArrayBuffer', 'Buffer', 'DataView'].includes(symbol)) throw new Unsupported(`${symbol} (binary data is not bound yet)`)
     if (['AsyncIterable', 'AsyncIterableIterator', 'AsyncGenerator', 'ReadableStream', 'Iterable'].includes(symbol)) throw new Unsupported(`${symbol} (streams are not bound yet)`)
@@ -394,13 +397,22 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
           if (members.length === 1 && members[0].getSymbol()?.getName() === 'AbortSignal') {
             return { name: ident(snake(parameter.name)), js: parameter.name, signal: true, index }
           }
+          // A function parameter takes a Rust closure; Cordis calls it back.
+          if (members.length === 1 && members[0].getCallSignatures().length) {
+            if (optional || stripNullish(parameterType).optional) throw new Unsupported('optional callback parameter')
+            return { name: ident(snake(parameter.name)), js: parameter.name, callback: callbackSignature(members[0], `${hint}${pascal(parameter.name)}`), index }
+          }
           let rustType = rust(parameterType, `${hint}${pascal(parameter.name)}`)
           if (optional && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
           return { name: ident(snake(parameter.name)), js: parameter.name, rustType, index }
         })
         const returned = checker.getReturnTypeOfSignature(signature)
         const promised = checker.getPromisedTypeOfPromise(returned)
-        const result = rust(promised ?? returned, `${hint}Result`)
+        const awaited = promised ?? returned
+        // A returned function (e.g. a disposer) stays on the Cordis side.
+        const result = !awaited.isUnion() && awaited.getCallSignatures().length
+          ? '::rutis_interop::RemoteFunction'
+          : rust(awaited, `${hint}Result`)
         rustNames.add(rustName)
         methods.push({ name: memberName, rustName, params, async: !!promised, result })
       } catch (error) {
@@ -413,12 +425,67 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
     return { methods, getters, unavailable }
   }
 
+  // The Rust closure type for a callback parameter. Arguments decode like
+  // results; functions and AbortSignals the callback receives stay raw
+  // protocol values. `void | Promise<void>` callbacks are asynchronous.
+  function callbackSignature(type, hint) {
+    const signatures = type.getCallSignatures()
+    if (signatures.length !== 1) throw new Unsupported('overloaded callback')
+    const signature = signatures[0]
+    if (signature.typeParameters?.length) throw new Unsupported('generic callback')
+    const params = signature.parameters.map(parameter => {
+      const declaration = parameter.valueDeclaration
+      if (declaration?.dotDotDotToken) throw new Unsupported('rest parameter in callback')
+      const parameterType = checker.getTypeOfSymbolAtLocation(parameter, declaration)
+      const { members } = stripNullish(parameterType)
+      if (members.length === 1 && (members[0].getCallSignatures().length || members[0].getSymbol()?.getName() === 'AbortSignal')) {
+        return { rustType: '::rutis_interop::rpc::Value', raw: true }
+      }
+      let rustType = rust(parameterType, `${hint}${pascal(parameter.name)}`)
+      if (declaration?.questionToken && !rustType.startsWith('Option<')) rustType = `Option<${rustType}>`
+      return { rustType }
+    })
+    const returned = checker.getReturnTypeOfSignature(signature)
+    const parts = returned.isUnion() ? returned.types : [returned]
+    const promise = parts.find(part => checker.getPromisedTypeOfPromise(part))
+    const awaited = promise ? checker.getPromisedTypeOfPromise(promise) : returned
+    if (promise && parts.some(part => part !== promise && !(part.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined)))) {
+      throw new Unsupported('callback returning a value or a Promise')
+    }
+    const nothing = awaited.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined | ts.TypeFlags.Never)
+    const result = nothing ? '()' : rust(awaited, `${hint}Result`)
+    const output = promise
+      ? `::rutis::BoxFuture<'static, Result<${result}, ::rutis_interop::Error>>`
+      : `Result<${result}, ::rutis_interop::Error>`
+    return { params, async: !!promise, result, rustFn: `impl Fn(${params.map(param => param.rustType).join(', ')}) -> ${output} + Send + Sync + 'static` }
+  }
+
+  // Wrap a Rust closure as a protocol callback the Cordis side can call.
+  function callbackValue(name, callback) {
+    const decode = callback.params.map((param, index) => param.raw
+      ? `let a${index} = args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined);`
+      : `let a${index}: ${param.rustType} = ::rutis_interop::decode_value(args.next().unwrap_or(::rutis_interop::rpc::Value::Undefined))?;`).join(' ')
+    const values = callback.params.map((_, index) => `a${index}`).join(', ')
+    const encode = callback.result === '()' ? 'Ok(::rutis_interop::rpc::Value::Undefined)' : '::rutis_interop::arg(&result)'
+    const call = callback.async
+      ? `let pending = ${name}(${values}); Ok(::rutis_interop::rpc::Value::future(async move { #[allow(unused_variables)] let result = pending.await?; ${encode} }))`
+      : `#[allow(unused_variables)] let result = ${name}(${values})?; ${encode}`
+    return `let ${name} = ::rutis_interop::rpc::Value::callback(move |args| {
+          #[allow(unused_mut, unused_variables)]
+          let mut args = args.list()?.into_iter();
+          ${decode}
+          ${call}
+        });`
+  }
+
   // One generated method; `target(method, args)` is the call expression.
   function methodCode(label, method, target) {
     const exposed = method.params.filter(parameter => !parameter.signal)
-    const signature = exposed.map(parameter => `${parameter.name}: ${borrowed(parameter.rustType)}`).join(', ')
+    const signature = exposed.map(parameter => `${parameter.name}: ${parameter.callback ? parameter.callback.rustFn : borrowed(parameter.rustType)}`).join(', ')
+    const callbacks = exposed.filter(parameter => parameter.callback).map(parameter => callbackValue(parameter.name, parameter.callback)).join('\n')
     const args = method.params.map(parameter => parameter.signal
       ? '::rutis_interop::rpc::Value::Signal'
+      : parameter.callback ? parameter.name
       : parameter.rustType.startsWith('Option<')
         ? `::rutis_interop::optional(${parameter.name})?`
         : `::rutis_interop::arg(&${parameter.name})?`).join(', ')
@@ -428,7 +495,8 @@ export function generate(plugins, nodePackage, { provide = [] } = {}) {
         : '\n      ///\n      /// The Cordis method receives an AbortSignal that is never aborted: a\n      /// synchronous call cannot be cancelled.'
     return `/// Calls \`${label}.${method.name}\` on the Cordis side.${note}
       pub ${method.async ? 'async ' : ''}fn ${method.rustName}(&self${signature ? ', ' + signature : ''}) -> Result<${method.result}, ::rutis_interop::Error> {
-        ${exposed.map(parameter => finite(parameter.name, parameter.rustType)).join('\n')}
+        ${exposed.filter(parameter => !parameter.callback).map(parameter => finite(parameter.name, parameter.rustType)).join('\n')}
+        ${callbacks}
         ::rutis_interop::decode_value(${target(method, `vec![${args}]`)})
       }`
   }

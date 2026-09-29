@@ -21,7 +21,7 @@ pub mod rpc;
 pub mod server;
 
 #[cfg(unix)]
-pub use objects::{arg, decode_value, ObjectRef};
+pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
 pub use process::{Host, HostDispatch, Process, ServiceEvents};
 #[cfg(unix)]
