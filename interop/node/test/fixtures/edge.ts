@@ -19,6 +19,8 @@ export class Account { balance(): number { return 7 } }
 export interface First { account: Account; a: string }
 export interface Second { account: Account; b: string }
 
+export interface Pair { typed: Account; raw: unknown }
+
 export class Left { kind(): string { return 'left' } }
 export class Right { kind(): string { return 'right' } }
 
@@ -45,6 +47,11 @@ export class Edge {
   }
   // First fails, the map variant would hold the reference as JSON.
   loose(): First | Record<string, unknown> { return { account: new Account(), b: 'b' } }
+  // The same object held typed and dropped into JSON (PR #73 review of 73d1518).
+  pair(same: boolean): Pair {
+    const account = new Account()
+    return { typed: account, raw: same ? account : new Account() }
+  }
   describeItem(item: Left | string): string { return item instanceof Left ? `object ${item.kind()}` : `text ${item}` }
 }
 

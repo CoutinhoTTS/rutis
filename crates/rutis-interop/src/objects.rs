@@ -157,7 +157,8 @@ fn mark<S: Serializer>(reference: &Reference, serializer: S) -> Result<S::Ok, S:
 /// result: one that lands in dynamic JSON (or is ignored) would lose the
 /// object, so the decode fails instead of returning the internal marker as
 /// data. Which references the result holds is read back from the decoded
-/// value, so alternatives serde tried and discarded do not count.
+/// value, so alternatives serde tried and discarded do not count, and each
+/// occurrence of a reference needs its own holder.
 pub fn decode_value<T: de::DeserializeOwned + Serialize>(value: Value) -> Result<T, Error> {
     let mut references = Vec::new();
     let json = marked(value, &mut references);
@@ -168,8 +169,19 @@ pub fn decode_value<T: de::DeserializeOwned + Serialize>(value: Value) -> Result
     let result = serde_json::from_value::<T>(json);
     DECODING.with(|current| current.replace(previous));
     let value = result.map_err(|error| Error::Value(error.to_string()))?;
-    let held = held(&value)?;
-    if references.iter().any(|reference| !held.contains(reference)) {
+    // Per occurrence: the same object may appear several times, and a typed
+    // occurrence must not cover one that landed in JSON.
+    let mut held = held(&value)?;
+    let unheld = references.iter().any(|reference| {
+        match held.iter().position(|holder| holder == reference) {
+            Some(index) => {
+                held.swap_remove(index);
+                false
+            }
+            None => true,
+        }
+    });
+    if unheld {
         return Err(Error::Value(
             "the value holds a live Cordis object or function that its Rust type cannot represent"
                 .into(),

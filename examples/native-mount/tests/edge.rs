@@ -94,6 +94,16 @@ async fn generated_bindings_keep_null_names_and_live_unions() {
     );
     drop((first, second));
 
+    // Each occurrence needs its own holder: a typed occurrence of the same
+    // object does not cover one that landed in JSON (review of 73d1518).
+    for same in [false, true] {
+        let error = service.pair(same).unwrap_err();
+        assert!(
+            error.to_string().contains("live Cordis object or function"),
+            "{same}: {error}"
+        );
+    }
+
     // Dynamic JSON cannot hold a live object: the decode fails instead of
     // returning the internal marker as data.
     let error = service.dynamic().unwrap_err();
