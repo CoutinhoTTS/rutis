@@ -6,39 +6,54 @@
 //! unavailable slot withdraws the binding, which lets native dependency
 //! gating stop and restart consumers.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, Weak};
 
-use rutis::{CordisError, Ctx, Disposer, ServiceWriter, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Disposer, ServiceWriter, TypeKey};
 
 use crate::process::ServiceEvents;
 use crate::{Error, Process};
 
-type Apply = Box<dyn FnMut(&Ctx, &Arc<Process>, Option<String>) -> Result<(), Error> + Send>;
+/// Moves the native binding to `handle`. A withdrawal returns the future that
+/// completes it: no new registration may start before it finishes.
+type Apply = Box<
+    dyn FnMut(&Ctx, &Arc<Process>, Option<String>) -> Result<Option<BoxFuture<'static, ()>>, Error>
+        + Send,
+>;
 
 struct Slot {
+    /// Newest handle reported by the Cordis side.
     handle: Option<String>,
+    /// Handle the native binding currently holds.
     applied: Option<String>,
+    /// Handle whose proxy is being published outside the lock.
+    publishing: Option<String>,
+    /// A withdrawal is still completing.
+    withdrawing: bool,
     apply: Option<Apply>,
 }
 
 #[derive(Default)]
 struct State {
     target: Option<(Ctx, Arc<Process>)>,
+    runtime: Option<tokio::runtime::Handle>,
     applying: bool,
     slots: HashMap<String, Slot>,
 }
 
 /// Declared before launching, attached once the mounting plugin has a
 /// process, closed when that plugin is disposed.
-#[derive(Default)]
 pub struct Projection {
     state: Mutex<State>,
+    me: Weak<Projection>,
 }
 
 impl Projection {
     pub fn new() -> Arc<Self> {
-        Arc::default()
+        Arc::new_cyclic(|me| Self {
+            state: Mutex::default(),
+            me: me.clone(),
+        })
     }
 
     /// Declare an exported slot. `make` builds the native proxy for one handle.
@@ -61,17 +76,21 @@ impl Projection {
                 }
                 (None, Some(_)) => {
                     let (disposer, _) = binding.take().unwrap();
-                    tokio::runtime::Handle::current().spawn(disposer.dispose());
+                    return Ok(Some(Box::pin(async move {
+                        let _ = disposer.dispose().await;
+                    })));
                 }
                 (None, None) => {}
             }
-            Ok(())
+            Ok(None)
         });
         self.state.lock().unwrap().slots.insert(
             name.to_owned(),
             Slot {
                 handle: None,
                 applied: None,
+                publishing: None,
+                withdrawing: false,
                 apply: Some(apply),
             },
         );
@@ -85,13 +104,20 @@ impl Projection {
                 slot.handle = process.service(name);
             }
             state.target = Some((ctx.clone(), process));
+            state.runtime = Some(tokio::runtime::Handle::current());
         }
         self.publish().map_err(Into::into)
     }
 
-    /// Stop following changes; the plugin's own effects withdraw bindings.
+    /// Stop following changes and drop the bindings' writers, which hold the
+    /// process; the plugin's own effects withdraw the registrations.
     pub fn close(&self) {
-        self.state.lock().unwrap().target = None;
+        let slots = {
+            let mut state = self.state.lock().unwrap();
+            state.target = None;
+            std::mem::take(&mut state.slots)
+        };
+        drop(slots);
     }
 
     /// Apply pending handles outside the lock: registering or replacing a
@@ -99,6 +125,10 @@ impl Projection {
     /// A reentrant or concurrent change is left to the active publisher.
     fn publish(&self) -> Result<(), Error> {
         let mut failure = None;
+        // Each (slot, handle) is attempted at most once per pass: a failure
+        // keeps the slot pending for the next change, while a newer handle
+        // that arrived meanwhile is still published in this pass.
+        let mut attempted = HashSet::new();
         {
             let mut state = self.state.lock().unwrap();
             if state.applying {
@@ -109,21 +139,25 @@ impl Projection {
         loop {
             let work = {
                 let mut state = self.state.lock().unwrap();
-                let target = state.target.clone();
-                let next = target.and_then(|target| {
+                let next = state.target.clone().and_then(|target| {
                     state
                         .slots
                         .iter_mut()
-                        .find_map(|(name, slot)| {
-                            (slot.handle != slot.applied && slot.apply.is_some()).then(|| {
-                                (
-                                    name.clone(),
-                                    slot.handle.clone(),
-                                    slot.apply.take().unwrap(),
-                                )
-                            })
+                        .find(|(name, slot)| {
+                            slot.handle != slot.applied
+                                && !slot.withdrawing
+                                && slot.apply.is_some()
+                                && !attempted.contains(&(name.to_string(), slot.handle.clone()))
                         })
-                        .map(|work| (target, work))
+                        .map(|(name, slot)| {
+                            slot.publishing = slot.handle.clone();
+                            let work = (
+                                name.clone(),
+                                slot.handle.clone(),
+                                slot.apply.take().unwrap(),
+                            );
+                            (target, work)
+                        })
                 });
                 if next.is_none() {
                     state.applying = false;
@@ -133,17 +167,45 @@ impl Projection {
             let Some(((ctx, process), (name, handle, mut apply))) = work else {
                 return failure.map_or(Ok(()), Err);
             };
+            attempted.insert((name.clone(), handle.clone()));
             let result = apply(&ctx, &process, handle.clone());
             let mut state = self.state.lock().unwrap();
-            let slot = state.slots.get_mut(&name).unwrap();
+            let runtime = state.runtime.clone();
+            let Some(slot) = state.slots.get_mut(&name) else {
+                continue; // closed meanwhile
+            };
             slot.apply = Some(apply);
+            slot.publishing = None;
             match result {
-                Ok(()) => slot.applied = handle,
-                Err(error) => {
-                    // Do not retry the same failing handle in this pass.
-                    slot.applied = slot.handle.clone();
-                    failure = failure.or(Some(error));
+                Ok(None) => slot.applied = handle,
+                Ok(Some(withdrawal)) => {
+                    slot.applied = None;
+                    slot.withdrawing = true;
+                    let me = self.me.clone();
+                    let name = name.clone();
+                    let finish = async move {
+                        withdrawal.await;
+                        if let Some(me) = me.upgrade() {
+                            if let Some(slot) = me.state.lock().unwrap().slots.get_mut(&name) {
+                                slot.withdrawing = false;
+                            }
+                            if let Err(error) = me.publish() {
+                                eprintln!(
+                                    "rutis-interop: cannot publish Cordis service {name}: {error}"
+                                );
+                            }
+                        }
+                    };
+                    match runtime {
+                        Some(runtime) => {
+                            runtime.spawn(finish);
+                        }
+                        None => {
+                            tokio::spawn(finish);
+                        }
+                    }
                 }
+                Err(error) => failure = failure.or(Some(error)),
             }
         }
     }
@@ -159,9 +221,12 @@ impl ServiceEvents for Projection {
             };
             let previous = std::mem::replace(&mut slot.handle, handle);
             // A handle replaced before it got a native proxy is released here;
-            // published proxies release their handle when dropped.
+            // applied or in-flight proxies release their handle when dropped.
             previous
-                .filter(|previous| slot.applied.as_ref() != Some(previous))
+                .filter(|previous| {
+                    slot.applied.as_ref() != Some(previous)
+                        && slot.publishing.as_ref() != Some(previous)
+                })
                 .zip(process)
         };
         if let Some((handle, process)) = skipped {

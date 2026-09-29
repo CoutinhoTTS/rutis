@@ -23,11 +23,37 @@ let version = 0
 // A handle always addresses the object it was created for; when the slot
 // changes, the Rust side receives a new handle and replaces its native proxy.
 // The first object of a slot uses the service name as its handle.
-const slots = new Map() // name -> { methods, object, handle, generation }
+const slots = new Map() // name -> { methods, scope, object, identity, handle, generation, exporter }
 const handles = new Map() // handle -> { name, object, current, released }
 
-function read(name) {
-  try { return ctx.get(name) } catch { return undefined }
+// Cordis wraps Service instances in a new tracing proxy on every read; the
+// proxy reports its target under this symbol. Compare targets, not wrappers.
+const ORIGINAL = Symbol.for('cordis.original')
+const identity = value => (value !== null && (typeof value === 'object' || typeof value === 'function')) ? (value[ORIGINAL] ?? value) : value
+
+// Every exported service is read through its own exporter fiber that injects
+// it, like any native consumer: Cordis gates it on availability including
+// Service.check(), and effects that service methods create through the
+// caller's context belong to this fiber and are disposed with it.
+function exporter(name, slot) {
+  return ctx.plugin({
+    name: `interop-export:${name}`,
+    inject: [name],
+    apply(scope) {
+      slot.scope = scope
+      refresh()
+      scope.effect(() => () => {
+        if (slot.scope !== scope) return
+        slot.scope = undefined
+        refresh()
+      })
+    },
+  })
+}
+
+function read(slot, name) {
+  if (!slot.scope) return undefined
+  try { return slot.scope.get(name) } catch { return undefined }
 }
 
 function retire(handle) {
@@ -43,10 +69,17 @@ function retire(handle) {
 // is observed after the next call into this process.
 function refresh() {
   for (const [name, slot] of slots) {
-    const object = read(name)
-    if (object === slot.object) continue
+    const object = read(slot, name)
+    const current = identity(object)
+    if (current === slot.identity) {
+      // Same service, possibly read through a new exporter scope: calls must
+      // use the live scope, but the handle and Rust proxy stay.
+      if (object !== undefined && slot.handle) handles.get(slot.handle).object = object
+      continue
+    }
     retire(slot.handle)
     slot.object = object
+    slot.identity = current
     slot.handle = null
     if (object !== undefined) {
       slot.generation++
@@ -67,9 +100,11 @@ ctx.on('internal/set', (_ctx, _name, _value, _error, next) => {
   return result
 })
 
-// Dispose in reverse load order, like a native composition unwinding.
+// Exporters go first (they consume the services), then the plugins in
+// reverse load order, like a native composition unwinding.
 function dispose() {
   return disposing ??= (async () => {
+    for (const slot of slots.values()) await slot.exporter?.dispose()
     for (const fiber of [...(fibers ?? [])].reverse()) await fiber.dispose()
   })()
 }
@@ -82,7 +117,7 @@ function mount(args) {
   fibers = []
   for (const [name, methods] of Object.entries(args.services)) {
     if (name.includes('#')) throw new Error(`service name ${name} cannot be projected`)
-    slots.set(name, { methods: new Set(methods), object: undefined, handle: null, generation: 0, version: 0 })
+    slots.set(name, { methods: new Set(methods), scope: undefined, object: undefined, identity: undefined, handle: null, generation: 0, version: 0 })
   }
   const plugins = args.plugins ?? [{ entry: pluginPath, config: args.config }]
   return (async () => {
@@ -99,7 +134,8 @@ function mount(args) {
       const plugin = typeof module.apply === 'function' ? module : (module.default ?? module)
       fibers.push(ctx.plugin(plugin, config))
     }
-    await Promise.all(fibers.map(fiber => fiber.await()))
+    for (const [name, slot] of slots) slot.exporter = exporter(name, slot)
+    await Promise.all([...fibers, ...[...slots.values()].map(slot => slot.exporter)].map(fiber => fiber.await()))
     // Only this group runs in the process, and rutis cannot provide services
     // to it yet, so a dependency unresolved within the group never resolves.
     const unresolved = fibers.flatMap((fiber, index) => fiber.store ? [] : [
@@ -132,9 +168,14 @@ function dispatch(target, method, args) {
   if (!entry) throw new Error(`unknown or released service object ${target}`)
   if (!slots.get(entry.name).methods.has(method)) throw new Error(`unknown service method ${entry.name}.${method}`)
   if (!Array.isArray(args)) throw new TypeError('method arguments must be an array')
-  const result = Reflect.apply(entry.object[method], entry.object, args)
+  let result
+  try {
+    result = Reflect.apply(entry.object[method], entry.object, args)
+  } finally {
+    // Also after a throw: the method may have replaced the service first.
+    if (!(result instanceof Promise)) refresh()
+  }
   if (result instanceof Promise) result.then(refresh, refresh)
-  else refresh()
   return result
 }
 
