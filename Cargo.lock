@@ -962,6 +962,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-baseline"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-interop",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1735,6 +1745,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "interop-experiments"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-interop",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1966,6 +1986,16 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "native-mount-example"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-interop",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2844,6 +2874,23 @@ name = "rutis-greeter-fixture-v2"
 version = "2.0.0"
 dependencies = [
  "rutis-sdk",
+]
+
+[[package]]
+name = "rutis-interop"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "proc-macro2",
+ "quote",
+ "rutis",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

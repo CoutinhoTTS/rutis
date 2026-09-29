@@ -1,0 +1,29 @@
+[package]
+name = "native-mount-example"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+default-run = "native-mount-example"
+
+[dependencies]
+rutis = { path = "../../crates/rutis" }
+rutis-interop = { path = "../../crates/rutis-interop" }
+serde_json = "1"
+tokio.workspace = true
+
+[build-dependencies]
+rutis-interop = { path = "../../crates/rutis-interop" }
+
+# The Cordis plugin this example mounts: a TypeScript source fixture.
+[package.metadata.rutis-interop]
+npm = "../../interop/node"
+runtime = "../../interop/node"
+
+[package.metadata.rutis-interop.mounts.bindings]
+path = "../../interop/node/test/fixtures/counter.ts"
+
+# Edge cases of the generated bindings, mounted by tests/edge.rs.
+[package.metadata.rutis-interop.mounts.edge]
+path = "../../interop/node/test/fixtures/edge.ts"
+provide = ["edgeHost"]

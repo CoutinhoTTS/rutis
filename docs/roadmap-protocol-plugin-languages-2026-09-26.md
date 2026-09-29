@@ -1,5 +1,7 @@
 # 协议插件语言扩展路线图（2026-09-26）
 
+> 历史方案参考，不作为本分支的需求或实施依据。当前定义见[协议插件需求](requirements-protocol-plugins.md)，新设计见[跨进程挂载设计](design-protocol-plugin-mount.md)。下文的具体机制、路线与验收门槛不沿用。
+
 > 状态：Rust/rutis 与 TS/Cordis 优先；其余语言为后续验证方向，尚未实现，不属于基础版本的交付门槛。
 > 核心协议、M0–M5 阶段及 T01–T24 见[协议插件设计](design-protocol-plugins-2026-09-25.md)。
 > 执行模型为候选方案；每个 runner 实施前需根据核心原型结果复核，不因列入路线图而冻结 API。
