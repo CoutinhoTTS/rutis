@@ -135,27 +135,33 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 
 挂载插件卸载时，`Projection::close()` 丢弃持有 `ServiceWriter` 的发布闭包，断开 `Process → Projection → ServiceWriter → 代理 → Process` 的引用环，使 `Process` 能被回收。
 
-## 5. 宿主向 Cordis 插件提供服务（待实现）
+## 5. 宿主向 Cordis 插件提供服务
 
-被挂载的 Cordis 插件可以依赖 rutis 应用提供的服务，例如宿主把 aimux-llm 作为 `llm` 交给 dsh 插件。这与 §4 方向相反，但仍是 rutis 应用做宿主，不属于 §8 冻结的反方向。
+被挂载的 Cordis 插件可以依赖 rutis 应用提供的服务，例如宿主把 `systemPrompt`、llm、存储交给插件使用。这与 §4 方向相反，但仍是 rutis 应用做宿主，不属于 §8 冻结的反方向。
 
-**声明与类型**：应用在生成绑定时列出由 rutis 提供的服务名。服务的接口取自插件自己的 Context 声明（插件声明了 `llm: LlmRuntime`，接口就是 `LlmRuntime`）。生成器从这个 TS 接口生成：
+**声明**：`build.rs` 中用 `Bindings::new(模块, interop/node).plugin(插件).provide("systemPrompt").generate()`（组合挂载用 `.member(名字, 插件)`）。服务接口取自插件能看到的 Context 声明：`dsh-persona` 依赖 `systemPrompt`，接口来自它导入的 `dsh-system-prompt` 中的 `systemPrompt: SystemPrompt`。找不到声明、或与组内插件提供的服务同名时，构建报错。
+
+**生成物**：
 
 | 生成物 | 作用 |
 | --- | --- |
-| Rust trait（例如 `LlmRuntimeHost`） | 应用实现它；同步方法为 `fn`，返回 Promise 的方法为 `async fn`；类型映射同 §2 |
-| 分发代码 | 把来自 Node 的调用路由到应用注册的 trait 对象 |
-| 挂载插件的依赖声明 | 挂载插件 `injects` 这些服务；rutis 侧未就绪时挂载插件按原生规则等待 |
+| trait `{接口}Host`（例如 `SystemPromptHost`） | 应用实现它；同步方法为 `fn`，返回 Promise 的方法返回 `BoxFuture<'static, …>`；每个方法默认返回"宿主未实现"错误，只需实现插件实际用到的方法 |
+| `provide_{服务名}(ctx, host)` | 把实现注册为普通 rutis 服务（以 `dyn {接口}Host` 为键） |
+| `{接口}HostDispatch` | 把来自 Node 的调用路由到应用注册的实现 |
+| 挂载插件的 `injects` | 包含这些宿主服务；rutis 侧未就绪时挂载插件按原生规则等待 |
 
-不支持的成员沿用 §2 的规则：构建时警告，不生成 trait 方法；Node 侧调用这些成员时明确报错。
+**类型**：数据参数和返回值沿用 §2 的映射。函数类型的参数以 `rpc::Value` 引用传入，宿主可以调用它；返回函数（例如 Cordis 服务常见的注销函数）时，宿主返回 `rpc::Value::callback(...)`，Cordis 侧拿到的是可调用的函数。联合类型中的函数成员（例如 `text: string | ((ctx) => string)`）不绑定，只绑定数据成员，并给出构建警告。其他不支持的成员沿用 §2 的规则：构建时警告，不生成 trait 方法；Cordis 侧调用这些成员时明确报错"未由 rutis 宿主提供"。
 
-**Node 侧**：runner 在装载插件组之前，用 `ctx.provide(名字, 代理)` 注册代理对象，代理的方法经协议调用 Rust；Cordis 的依赖按原生规则解析。代理不是插件声明的那个类的实例（边界规则 7）。
+**Node 侧**：runner 在装载插件之前，用 `ctx.provide(名字, 代理)` 注册代理对象，代理的方法经协议调用 Rust（控制目标为 `host:{服务名}`）；Cordis 的依赖按原生规则解析。代理不是插件声明的那个类的实例（边界规则 7）。
 
 **变化与清理**：
 
-- rutis 侧服务撤销或换成新实例时，挂载插件作为依赖方按 rutis 原生规则停止或重启，Node 进程随之关闭或重建。第一版不做单个服务的就地替换。
-- 清理顺序由两边的原生依赖自然保证：rutis 侧的提供者在它的依赖方（挂载插件）清理完之后才撤掉；挂载插件清理时先卸载 Cordis 插件组，再撤掉 Node 侧的代理，所以 Cordis 插件的 disposer 仍能调用 rutis 服务。
-- JS 同步调用 rutis 服务时，Node 主线程同步等待 Rust 返回，沿用 §3.1 的同步规则和 `SyncWaitCycle` 检测。
+- rutis 侧服务撤销时，挂载插件作为依赖方按 rutis 原生规则停止，Node 进程随之关闭；重新提供后挂载插件重启。第一版不做单个宿主服务的就地替换。
+- 清理顺序由两边的原生依赖自然保证：宿主服务的提供者在它的依赖方（挂载插件）清理完之后才撤掉；挂载插件清理时先卸载 Cordis 插件，插件的 effect 调用宿主返回的注销函数时，宿主仍在。
+- JS 同步调用宿主服务时，Node 主线程同步等待 Rust 返回，沿用 §3.1 的同步规则和 `SyncWaitCycle` 检测。
+- 已知差异：插件在 effect 之外调用、并把返回的注销函数丢弃的注册（例如 `dsh-persona` 在关闭运行时上下文时调用 `suppressRuntimeContext()`），原生 Cordis 会把它绑定到插件的生命周期并自动撤销；由宿主实现时，宿主不知道调用方插件的生命周期，需要自行处理（最迟在挂载卸载时统一撤销）。
+
+验收：`examples/dsh-baseline/tests/host.rs` 用 `dsh-persona` 验证：宿主未提供时挂载等待，提供后插件注册两个提示词片段，宿主服务撤销后插件停止并撤销片段，重新提供后恢复，卸载时 Cordis 调用宿主返回的注销函数。协议层测试见 `crates/rutis-interop/tests/host_services.rs`。
 
 ## 6. 生命周期与故障
 

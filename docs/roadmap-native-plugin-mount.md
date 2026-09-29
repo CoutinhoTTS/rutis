@@ -24,6 +24,9 @@
 | 协议 v1：invoke / await 分离、函数与异步结果引用、计数释放、同步调用链内的反向调用、`SyncWaitCycle`、后台执行器 | `crates/rutis-interop/tests/rpc_callbacks.rs`、`src/rpc/tests.rs`、`interop/node/test/peer.test.mjs` |
 | 错误对象图往返 | `crates/rutis-interop/tests/error_shape.rs`、`interop/node/test/errors.test.mjs` |
 | 已发布 dsh 插件：协议层与原生逐项对照；生成的类型化绑定装载与调用 | `crates/rutis-interop/tests/dsh_baseline.rs`、`examples/dsh-baseline/tests/typed.rs` |
+| 组合挂载：组内依赖解析、缺失依赖点名 | `crates/rutis-interop/tests/group_mount.rs` |
+| 宿主向插件提供服务：依赖门控、调用、注销函数、撤销与恢复 | `crates/rutis-interop/tests/host_services.rs`、`examples/dsh-baseline/tests/host.rs` |
+| 投影与导出生命周期（评审回归） | `crates/rutis-interop/tests/projection_lifecycle.rs` |
 
 ## 3. 后续工作
 
@@ -69,15 +72,13 @@ node interop/baseline/classify.mjs
 
 W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设计成组合使用，单独挂载时依赖无法满足（`dsh-workspace` 在原生 Cordis 中单独装载同样起不来）。现在一次挂载可以是一组插件，装进同一个 Cordis Context，依赖按原生规则解析；绑定用 `cordis_group` 生成。`dsh-workspace` + `dsh-storage` + `dsh-storage-json` + `dsh-storage-domain` + `dsh-session-persistence-jsonl` 作为一组挂载后，协议层与原生一致，类型化绑定可调用。测试：`crates/rutis-interop/tests/group_mount.rs`、`dsh_baseline.rs`、`examples/dsh-baseline/tests/typed.rs`。
 
-### W1.6 宿主向 Cordis 插件提供服务（下一步）
+### W1.6 宿主向 Cordis 插件提供服务（已完成）
 
-被挂载的 Cordis 插件依赖 rutis 应用提供的服务（设计 §5）。这项需求原本在需求文档中，2026-09-29 改写需求时被误删，现已补回。它和组合挂载同属"真实插件能否跑起来"一级的问题，排在活对象之前。
+被挂载的 Cordis 插件依赖 rutis 应用提供的服务（设计 §5）。这项需求原本在需求文档中，2026-09-29 改写需求时被误删，已补回并实现。`Bindings::provide` 为宿主服务生成 trait、`provide_*` 注册函数和分发代码；挂载插件 `injects` 这些服务；runner 在装载插件前注册代理。
 
-- 生成器：按插件的 Context 声明，为宿主提供的服务生成 Rust trait 和分发代码；挂载插件 `injects` 这些服务。
-- runner：装载插件组前在 Cordis 中注册代理，代理经协议调用 Rust。
-- 验收：一个依赖宿主服务的 Cordis 插件在 rutis 服务就绪前保持等待、就绪后可用；rutis 服务撤销时插件按原生规则停止；Cordis 插件的 disposer 仍能调用宿主服务。选一个真实的 dsh 插件作为目标（优先需要 `llm` 或存储的插件）。
+验收目标为 `dsh-persona` 依赖 `systemPrompt`：宿主未提供时挂载等待，提供后注册提示词片段，撤销后插件停止并清理，重新提供后恢复，卸载时 Cordis 调用宿主返回的注销函数（`examples/dsh-baseline/tests/host.rs`、`crates/rutis-interop/tests/host_services.rs`）。
 
-不支持的依赖关系：Cordis 插件依赖另一次挂载里的 Cordis 服务（需要把它们放进同一组）。
+仍不支持：Cordis 插件依赖另一次挂载里的 Cordis 服务（需要放进同一组）；宿主服务的就地替换（撤销后按依赖重启整个挂载）。
 
 ### W2 工程防护（与 W1 并行）
 
