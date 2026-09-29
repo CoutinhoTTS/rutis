@@ -69,7 +69,15 @@ node interop/baseline/classify.mjs
 
 W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设计成组合使用，单独挂载时依赖无法满足（`dsh-workspace` 在原生 Cordis 中单独装载同样起不来）。现在一次挂载可以是一组插件，装进同一个 Cordis Context，依赖按原生规则解析；绑定用 `cordis_group` 生成。`dsh-workspace` + `dsh-storage` + `dsh-storage-json` + `dsh-storage-domain` + `dsh-session-persistence-jsonl` 作为一组挂载后，协议层与原生一致，类型化绑定可调用。测试：`crates/rutis-interop/tests/group_mount.rs`、`dsh_baseline.rs`、`examples/dsh-baseline/tests/typed.rs`。
 
-跨进程依赖（Cordis 插件依赖 rutis 侧提供的服务）仍不支持，等有实际需求时再做。
+### W1.6 宿主向 Cordis 插件提供服务（下一步）
+
+被挂载的 Cordis 插件依赖 rutis 应用提供的服务（设计 §5）。这项需求原本在需求文档中，2026-09-29 改写需求时被误删，现已补回。它和组合挂载同属"真实插件能否跑起来"一级的问题，排在活对象之前。
+
+- 生成器：按插件的 Context 声明，为宿主提供的服务生成 Rust trait 和分发代码；挂载插件 `injects` 这些服务。
+- runner：装载插件组前在 Cordis 中注册代理，代理经协议调用 Rust。
+- 验收：一个依赖宿主服务的 Cordis 插件在 rutis 服务就绪前保持等待、就绪后可用；rutis 服务撤销时插件按原生规则停止；Cordis 插件的 disposer 仍能调用宿主服务。选一个真实的 dsh 插件作为目标（优先需要 `llm` 或存储的插件）。
+
+不支持的依赖关系：Cordis 插件依赖另一次挂载里的 Cordis 服务（需要把它们放进同一组）。
 
 ### W2 工程防护（与 W1 并行）
 
@@ -88,7 +96,7 @@ W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设�
 3. **取消**：`AbortSignal` 参数映射为取消（与 W2 的取消传播共用机制），13 个成员。
 4. **回调参数、返回函数**：生成器接入协议已有的函数引用，10 个成员。
 5. **活对象与属性**：协议增加 object 引用类型，17 个成员；先确认实际用法再定范围。
-6. **事件**：纯通知事件按设计 §6 转发；waterfall 事件暂不转发。
+6. **事件**：纯通知事件按设计 §7 转发；waterfall 事件暂不转发。
 7. `Uint8Array`、`AsyncIterable`：按需。
 
 ### W4 包级接入
