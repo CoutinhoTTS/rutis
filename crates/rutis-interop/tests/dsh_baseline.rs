@@ -13,11 +13,16 @@ use serde_json::{json, Map, Value};
 #[derive(Deserialize)]
 struct Scenario {
     name: String,
-    entry: PathBuf,
+    plugins: Vec<Member>,
     service: String,
     methods: Vec<String>,
-    config: Value,
     calls: Vec<Call>,
+}
+
+#[derive(Deserialize)]
+struct Member {
+    entry: PathBuf,
+    config: Value,
 }
 
 #[derive(Deserialize)]
@@ -70,13 +75,17 @@ fn outcome(result: Result<Value, Error>) -> Value {
 
 async fn mounted(package: &Path, scenario: &Scenario) -> Value {
     let manifest = json!({ &scenario.service: scenario.methods });
-    let process =
-        match Process::launch(package, &scenario.entry, scenario.config.clone(), manifest).await {
-            Ok(process) => process,
-            Err(error) => {
-                return json!({ "available": false, "results": [], "error": error.to_string() })
-            }
-        };
+    let plugins: Vec<_> = scenario
+        .plugins
+        .iter()
+        .map(|member| (member.entry.as_path(), member.config.clone()))
+        .collect();
+    let process = match Process::launch_group(package, &plugins, manifest, None).await {
+        Ok(process) => process,
+        Err(error) => {
+            return json!({ "available": false, "results": [], "error": error.to_string() })
+        }
+    };
     let handle = process.service(&scenario.service);
     let mut results = Vec::new();
     let mut captured = Map::new();

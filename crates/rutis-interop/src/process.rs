@@ -75,6 +75,25 @@ impl Process {
         services: Value,
         events: Option<Arc<dyn ServiceEvents>>,
     ) -> Result<Arc<Self>, Error> {
+        Self::launch_group(node_package, &[(plugin, config)], services, events).await
+    }
+
+    /// Launch a group of plugins in one Cordis Context, loaded in order, so
+    /// dependencies between them resolve natively. `services` lists the
+    /// exported service slots and their methods.
+    pub async fn launch_group(
+        node_package: &Path,
+        plugins: &[(&Path, Value)],
+        services: Value,
+        events: Option<Arc<dyn ServiceEvents>>,
+    ) -> Result<Arc<Self>, Error> {
+        let Some((plugin, _)) = plugins.first() else {
+            return Err(Error::Value("a mount needs at least one plugin".into()));
+        };
+        let plugins: Vec<Value> = plugins
+            .iter()
+            .map(|(entry, config)| json!({ "entry": entry, "config": config }))
+            .collect();
         let directory = tempfile::Builder::new()
             .prefix("rutis-mount-")
             .tempdir()
@@ -123,7 +142,7 @@ impl Process {
             .call_async(
                 "",
                 "mount",
-                json!({ "config": config, "services": services }),
+                json!({ "plugins": plugins, "services": services }),
             )
             .await?;
         let slots: HashMap<String, (Option<String>, u64)> =

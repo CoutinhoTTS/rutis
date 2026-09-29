@@ -89,3 +89,22 @@ test('ordinary imported interfaces participate in Cargo regeneration', async () 
     assert.throws(() => generate(file, root), /not assignable to type 'number'/)
   })
 })
+
+test('a group gets one Config field per member and rejects a service provided twice', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    export interface Config { now: number }
+    export function apply(ctx: Context, config: Config) { ctx.provide('clock', { now(): number { return config.now } }) }
+  `, async (clock, temporary) => {
+    const greeter = join(temporary, 'greeter.ts')
+    await writeFile(greeter, `import type { Context } from '@deepseek-ai/cordis'
+      export const inject = ['clock']
+      export function apply(ctx: Context) { ctx.provide('greeter', { greet(name: string): string { return name } }) }
+    `)
+    const { rust } = generate([{ name: 'clock', path: clock }, { name: 'greeter', path: greeter }], root)
+    assert.match(rust, /pub struct Config \{ pub clock: ClockConfig, pub greeter: GreeterConfig, \}/)
+    assert.match(rust, /pub struct ClockConfig \{ #\[serde\(rename = "now"\)\] pub now: f64,/)
+    assert.match(rust, /Process::launch_group\(/)
+    assert.match(rust, /self\.config\.clock\.now\.is_finite\(\)/)
+    assert.throws(() => generate([{ name: 'a', path: clock }, { name: 'b', path: clock }], root), /service clock is provided by both/)
+  })
+})

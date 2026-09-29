@@ -22,9 +22,37 @@ pub fn cordis_module(
     module: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let plugin = plugin.as_ref().canonicalize()?;
-    let node_package = node_package.as_ref().canonicalize()?;
-    let generator = node_package.join("src/generate.mjs");
     println!("cargo:rerun-if-changed={}", plugin.display());
+    generate(vec![plugin.into_os_string()], node_package.as_ref(), module)
+}
+
+/// Generate one binding module for a group of Cordis plugins that are
+/// mounted together, in the given order, in one Cordis Context: dependencies
+/// between them resolve natively. Each `(name, plugin)` becomes a field of
+/// the generated `Config`; the services of all members are exported.
+pub fn cordis_group(
+    module: &str,
+    plugins: &[(&str, &Path)],
+    node_package: impl AsRef<Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut members = Vec::new();
+    for (name, plugin) in plugins {
+        let plugin = plugin.canonicalize()?;
+        println!("cargo:rerun-if-changed={}", plugin.display());
+        let mut member = std::ffi::OsString::from(format!("{name}="));
+        member.push(plugin);
+        members.push(member);
+    }
+    generate(members, node_package.as_ref(), module)
+}
+
+fn generate(
+    members: Vec<std::ffi::OsString>,
+    node_package: &Path,
+    module: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let node_package = node_package.canonicalize()?;
+    let generator = node_package.join("src/generate.mjs");
     println!("cargo:rerun-if-changed={}", generator.display());
     println!(
         "cargo:rerun-if-changed={}",
@@ -32,8 +60,8 @@ pub fn cordis_module(
     );
     let output = std::process::Command::new("node")
         .arg(&generator)
-        .arg(&plugin)
         .arg(&node_package)
+        .args(&members)
         .output()?;
     if !output.status.success() {
         return Err(format!(

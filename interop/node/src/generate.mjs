@@ -32,9 +32,21 @@ function locate(pluginPath) {
   return { analysed: pluginPath, entry: pluginPath, packageDir: dirname(pluginPath) }
 }
 
-export function generate(pluginPath, nodePackage) {
-  const { analysed, entry, packageDir } = locate(pluginPath)
-  const program = ts.createProgram([analysed], {
+// `plugins` is one plugin path, or a group [{ name, path }] mounted together
+// in one Cordis Context (dependencies between them resolve natively). Group
+// members get one `Config` field each, named by `name`.
+export function generate(plugins, nodePackage) {
+  const single = !Array.isArray(plugins)
+  const group = (single ? [{ path: plugins }] : plugins).map(plugin => ({ ...plugin, ...locate(plugin.path) }))
+  if (!group.length) throw new Error('a mount needs at least one plugin')
+  if (!single) {
+    const names = new Set()
+    for (const { name } of group) {
+      if (!/^[a-z][a-z0-9_]*$/.test(name ?? '') || keywords.has(name) || names.has(name)) throw new Error(`invalid or duplicate group member name ${JSON.stringify(name)}`)
+      names.add(name)
+    }
+  }
+  const program = ts.createProgram(group.map(plugin => plugin.analysed), {
     target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
     strict: true, skipLibCheck: true, noEmit: true,
@@ -46,8 +58,10 @@ export function generate(pluginPath, nodePackage) {
     }))
   }
   const checker = program.getTypeChecker()
-  const source = program.getSourceFile(analysed)
-  if (!source) throw new Error(`source not found: ${analysed}`)
+  for (const plugin of group) {
+    plugin.source = program.getSourceFile(plugin.analysed)
+    if (!plugin.source) throw new Error(`source not found: ${plugin.analysed}`)
+  }
   const isCordis = node => node.getSourceFile().fileName.replaceAll('\\', '/').includes('/@deepseek-ai/cordis/')
   const location = node => {
     const { line, character } = node.getSourceFile().getLineAndCharacterOfPosition(node.getStart())
@@ -209,15 +223,6 @@ export function generate(pluginPath, nodePackage) {
   // ---------------------------------------------------------------------
   // Plugin shape: a function plugin (`apply`) or a Service class export.
   // ---------------------------------------------------------------------
-  const moduleSymbol = checker.getSymbolAtLocation(source)
-  if (!moduleSymbol) throw new Error(`${analysed}: not a module`)
-  const exports = checker.getExportsOfModule(moduleSymbol)
-  const resolveAlias = symbol => symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol
-  const applyExport = exports.find(symbol => symbol.name === 'apply')
-  const defaultExport = exports.find(symbol => symbol.name === 'default')
-  const pluginClass = !applyExport && defaultExport && resolveAlias(defaultExport).flags & ts.SymbolFlags.Class ? resolveAlias(defaultExport) : undefined
-  if (!applyExport && !pluginClass) throw new Error(`${analysed}: expected an apply function or a default-exported Service class`)
-
   // Context augmentations anywhere in the program: service name -> type.
   const augmentations = new Map()
   for (const file of program.getSourceFiles()) {
@@ -234,51 +239,73 @@ export function generate(pluginPath, nodePackage) {
     })
   }
 
-  const services = new Map() // name -> { type, node }
-  let configType
-  if (pluginClass) {
-    // A Service class provides the Context members typed as itself or one of
-    // its base classes (a seam declares `credentials: CredentialProvider`,
-    // an implementation extends CredentialProvider).
-    const instance = checker.getDeclaredTypeOfSymbol(pluginClass)
-    const lineage = new Set()
-    for (let queue = [instance]; queue.length;) {
-      const current = queue.pop()
-      const symbol = current.getSymbol()
-      if (!symbol || lineage.has(symbol)) continue
-      lineage.add(symbol)
-      if (current.isClassOrInterface()) queue.push(...(checker.getBaseTypes(current) ?? []))
-    }
-    for (const [name, entry] of augmentations) {
-      const symbol = entry.type.getSymbol()
-      if (symbol && lineage.has(symbol) && !isCordis(symbol.declarations[0])) services.set(name, entry)
-    }
-    const construct = checker.getTypeOfSymbolAtLocation(pluginClass, pluginClass.valueDeclaration).getConstructSignatures()[0]
-    const configParameter = construct?.parameters[1]
-    if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
-  } else {
-    const applyType = checker.getTypeOfSymbolAtLocation(applyExport, applyExport.valueDeclaration)
-    const configParameter = applyType.getCallSignatures()[0]?.parameters[1]
-    if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
-    // Source plugins: literal ctx.provide calls. Declaration-only packages:
-    // the Context members the package itself declares.
-    ts.forEachChild(source, function visit(node) {
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'provide') {
-        const declaration = checker.getResolvedSignature(node)?.declaration
-        if (declaration && isCordis(declaration)) {
-          const [name, value] = node.arguments
-          if (!name || !ts.isStringLiteral(name) || !value) fail(node, 'service discovery requires a literal native service name and a value')
-          if (services.has(name.text)) fail(node, `multiple declarations for service ${name.text} require further scope analysis`)
-          services.set(name.text, augmentations.get(name.text) ?? { type: checker.getTypeAtLocation(value), node })
-        }
+  function discover({ source, analysed, packageDir }) {
+    const moduleSymbol = checker.getSymbolAtLocation(source)
+    if (!moduleSymbol) throw new Error(`${analysed}: not a module`)
+    const exports = checker.getExportsOfModule(moduleSymbol)
+    const resolveAlias = symbol => symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol
+    const applyExport = exports.find(symbol => symbol.name === 'apply')
+    const defaultExport = exports.find(symbol => symbol.name === 'default')
+    const pluginClass = !applyExport && defaultExport && resolveAlias(defaultExport).flags & ts.SymbolFlags.Class ? resolveAlias(defaultExport) : undefined
+    if (!applyExport && !pluginClass) throw new Error(`${analysed}: expected an apply function or a default-exported Service class`)
+
+    const services = new Map() // name -> { type, node }
+    let configType
+    if (pluginClass) {
+      // A Service class provides the Context members typed as itself or one of
+      // its base classes (a seam declares `credentials: CredentialProvider`,
+      // an implementation extends CredentialProvider).
+      const instance = checker.getDeclaredTypeOfSymbol(pluginClass)
+      const lineage = new Set()
+      for (let queue = [instance]; queue.length;) {
+        const current = queue.pop()
+        const symbol = current.getSymbol()
+        if (!symbol || lineage.has(symbol)) continue
+        lineage.add(symbol)
+        if (current.isClassOrInterface()) queue.push(...(checker.getBaseTypes(current) ?? []))
       }
-      ts.forEachChild(node, visit)
-    })
-    if (!services.size) {
-      for (const [name, entry] of augmentations) if (entry.file.startsWith(packageDir)) services.set(name, entry)
+      for (const [name, entry] of augmentations) {
+        const symbol = entry.type.getSymbol()
+        if (symbol && lineage.has(symbol) && !isCordis(symbol.declarations[0])) services.set(name, entry)
+      }
+      const construct = checker.getTypeOfSymbolAtLocation(pluginClass, pluginClass.valueDeclaration).getConstructSignatures()[0]
+      const configParameter = construct?.parameters[1]
+      if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
+    } else {
+      const applyType = checker.getTypeOfSymbolAtLocation(applyExport, applyExport.valueDeclaration)
+      const configParameter = applyType.getCallSignatures()[0]?.parameters[1]
+      if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
+      // Source plugins: literal ctx.provide calls. Declaration-only packages:
+      // the Context members the package itself declares.
+      ts.forEachChild(source, function visit(node) {
+        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'provide') {
+          const declaration = checker.getResolvedSignature(node)?.declaration
+          if (declaration && isCordis(declaration)) {
+            const [name, value] = node.arguments
+            if (!name || !ts.isStringLiteral(name) || !value) fail(node, 'service discovery requires a literal native service name and a value')
+            if (services.has(name.text)) fail(node, `multiple declarations for service ${name.text} require further scope analysis`)
+            services.set(name.text, augmentations.get(name.text) ?? { type: checker.getTypeAtLocation(value), node })
+          }
+        }
+        ts.forEachChild(node, visit)
+      })
+      if (!services.size) {
+        for (const [name, entry] of augmentations) if (entry.file.startsWith(packageDir)) services.set(name, entry)
+      }
+    }
+    return { services, configType }
+  }
+
+  const services = new Map() // name -> { type, node, plugin }
+  for (const plugin of group) {
+    const found = discover(plugin)
+    plugin.configType = found.configType
+    for (const [name, entry] of found.services) {
+      if (services.has(name)) throw new Error(`service ${name} is provided by both ${services.get(name).plugin.path} and ${plugin.path}`)
+      services.set(name, { ...entry, plugin })
     }
   }
-  if (!services.size) throw new Error(`${analysed}: no native Cordis service registrations found`)
+  if (!services.size) throw new Error(`${group.map(plugin => plugin.analysed).join(', ')}: no native Cordis service registrations found`)
 
   // ---------------------------------------------------------------------
   // Services and their members.
@@ -392,39 +419,59 @@ export function generate(pluginPath, nodePackage) {
   // ---------------------------------------------------------------------
   // Configuration.
   // ---------------------------------------------------------------------
-  let configCode = `#[derive(Debug, Clone, Default, ::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct Config {}`
-  let configChecks = ''
-  if (configType) {
+  function configFor(configType, structName, accessor) {
+    const empty = { code: `#[derive(Debug, Clone, Default, ::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct ${structName} {}`, defaultable: true, checks: [] }
+    if (!configType) return empty
     const stripped = stripNullish(configType).members
     const configObject = stripped.length === 1 ? stripped[0] : undefined
     if (!configObject || !(configObject.flags & ts.TypeFlags.Object) || checker.isArrayType(configObject)) {
-      configCode = `pub type Config = ::rutis_interop::serde_json::Value;`
-    } else {
-      const fields = [], checks = []
-      let defaultable = true
-      for (const property of checker.getPropertiesOfType(configObject)) {
-        const declaration = property.valueDeclaration ?? property.declarations?.[0]
-        const field = ident(snake(property.getName()))
-        let fieldType
-        try {
-          fieldType = rust(checker.getTypeOfSymbolAtLocation(property, declaration), `Config${pascal(property.getName())}`)
-        } catch (error) {
-          if (!(error instanceof Unsupported)) throw error
-          fieldType = '::rutis_interop::serde_json::Value'
-          diagnostics.push(`${location(declaration)}: config.${property.getName()} is dynamic JSON: ${error.message}`)
-        }
-        const optional = !!(property.flags & ts.SymbolFlags.Optional)
-        if (optional && !fieldType.startsWith('Option<')) fieldType = `Option<${fieldType}>`
-        if (!fieldType.startsWith('Option<')) defaultable = false
-        const attributes = [`rename = ${literal(property.getName())}`]
-        if (fieldType.startsWith('Option<')) attributes.push('skip_serializing_if = "Option::is_none"')
-        fields.push(`#[serde(${attributes.join(', ')})] pub ${field}: ${fieldType},`)
-        const check = finite(`self.config.${field}`, fieldType)
-        if (check) checks.push(check.replace('::rutis_interop::Error::Value("non-finite number".into())', '::rutis_interop::Error::Value("non-finite number".into()).into()'))
-      }
-      configCode = `#[derive(Debug, Clone, ${defaultable ? 'Default, ' : ''}::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct Config { ${fields.join('\n')} }`
-      configChecks = checks.join('\n')
+      return { code: `pub type ${structName} = ::rutis_interop::serde_json::Value;`, defaultable: true, checks: [] }
     }
+    const fields = [], checks = []
+    let defaultable = true
+    for (const property of checker.getPropertiesOfType(configObject)) {
+      const declaration = property.valueDeclaration ?? property.declarations?.[0]
+      const field = ident(snake(property.getName()))
+      let fieldType
+      try {
+        fieldType = rust(checker.getTypeOfSymbolAtLocation(property, declaration), `${structName}${pascal(property.getName())}`)
+      } catch (error) {
+        if (!(error instanceof Unsupported)) throw error
+        fieldType = '::rutis_interop::serde_json::Value'
+        diagnostics.push(`${location(declaration)}: config.${property.getName()} is dynamic JSON: ${error.message}`)
+      }
+      const optional = !!(property.flags & ts.SymbolFlags.Optional)
+      if (optional && !fieldType.startsWith('Option<')) fieldType = `Option<${fieldType}>`
+      if (!fieldType.startsWith('Option<')) defaultable = false
+      const attributes = [`rename = ${literal(property.getName())}`]
+      if (fieldType.startsWith('Option<')) attributes.push('skip_serializing_if = "Option::is_none"')
+      fields.push(`#[serde(${attributes.join(', ')})] pub ${field}: ${fieldType},`)
+      const check = finite(`${accessor}.${field}`, fieldType)
+      if (check) checks.push(check.replace('::rutis_interop::Error::Value("non-finite number".into())', '::rutis_interop::Error::Value("non-finite number".into()).into()'))
+    }
+    return {
+      code: `#[derive(Debug, Clone, ${defaultable ? 'Default, ' : ''}::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct ${structName} { ${fields.join('\n')} }`,
+      defaultable, checks,
+    }
+  }
+  let configCode, configChecks, launched
+  const toValue = accessor => `::rutis_interop::serde_json::to_value(&${accessor}).map_err(|e| ::rutis::CordisError::PluginFailed(Box::new(e)))?`
+  if (single) {
+    const config = configFor(group[0].configType, 'Config', 'self.config')
+    configCode = config.code
+    configChecks = config.checks.join('\n')
+    launched = [`(::std::path::Path::new(${literal(group[0].entry)}), ${toValue('self.config')})`]
+  } else {
+    // One Config field per group member, each with that plugin's own type.
+    const parts = group.map(plugin => ({ plugin, ...configFor(plugin.configType, claim(`${plugin.name}Config`), `self.config.${plugin.name}`) }))
+    parts.forEach(part => { part.structName = part.code.match(/pub (?:struct|type) (\w+)/)[1] })
+    const defaultable = parts.every(part => part.defaultable)
+    configCode = `${parts.map(part => part.code).join('\n')}
+  /// Configuration for each plugin of the group, in load order.
+  #[derive(Debug, Clone${defaultable ? ', Default' : ''})]
+  pub struct Config { ${parts.map(part => `pub ${part.plugin.name}: ${part.structName},`).join(' ')} }`
+    configChecks = parts.flatMap(part => part.checks).join('\n')
+    launched = group.map(plugin => `(::std::path::Path::new(${literal(plugin.entry)}), ${toValue(`self.config.${plugin.name}`)})`)
   }
 
   const serviceNames = [...services.keys()]
@@ -444,9 +491,9 @@ export function generate(pluginPath, nodePackage) {
       Box::pin(async move {
         let projection = ::rutis_interop::Projection::new();
         ${[...structs].map(([name, struct]) => `projection.service::<${struct}>(${literal(name)}, |process, handle| ${struct} { process, handle });`).join('\n')}
-        let process = ::rutis_interop::Process::launch_observed(
-          ::std::path::Path::new(${literal(nodePackage)}), ::std::path::Path::new(${literal(entry)}),
-          ::rutis_interop::serde_json::to_value(&self.config).map_err(|e| ::rutis::CordisError::PluginFailed(Box::new(e)))?,
+        let process = ::rutis_interop::Process::launch_group(
+          ::std::path::Path::new(${literal(nodePackage)}),
+          &[${launched.join(',\n            ')}],
           ::rutis_interop::serde_json::json!(${JSON.stringify(manifest)}),
           Some(projection.clone()),
         ).await?;
@@ -467,7 +514,14 @@ export function generate(pluginPath, nodePackage) {
   return { rust: rust_, inputs: program.getSourceFiles().map(file => file.fileName), diagnostics }
 }
 
+// `node generate.mjs <node package> <plugin>` or, for a group,
+// `node generate.mjs <node package> <name>=<plugin> ...`.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { process.stdout.write(JSON.stringify(generate(resolve(process.argv[2]), resolve(process.argv[3])))) }
-  catch (error) { console.error(error.message); process.exitCode = 1 }
+  try {
+    const [nodePackage, ...members] = process.argv.slice(2)
+    const plugins = members.length === 1 && !members[0].includes('=')
+      ? resolve(members[0])
+      : members.map(member => { const at = member.indexOf('='); return { name: member.slice(0, at), path: resolve(member.slice(at + 1)) } })
+    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage))))
+  } catch (error) { console.error(error.message); process.exitCode = 1 }
 }

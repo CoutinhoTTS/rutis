@@ -4,20 +4,16 @@ import { Process } from './client.mjs'
 
 const [socketPath, pluginPath] = process.argv.slice(2)
 
-// The plugin's Service classes must come from the same Cordis instance as the
-// Context, so prefer the Cordis that the plugin itself resolves.
-async function loadCordis() {
-  try {
-    return await import(pathToFileURL(createRequire(pluginPath).resolve('@deepseek-ai/cordis')).href)
-  } catch {
-    return await import('@deepseek-ai/cordis')
-  }
+// The plugins' Service classes must come from the same Cordis instance as the
+// Context, so prefer the Cordis that the (first) plugin itself resolves.
+function cordisOf(entry) {
+  try { return createRequire(entry).resolve('@deepseek-ai/cordis') } catch { return undefined }
 }
-
-const { Context } = await loadCordis()
+const cordisPath = cordisOf(pluginPath)
+const { Context } = await import(cordisPath ? pathToFileURL(cordisPath).href : '@deepseek-ai/cordis')
 let peer
 const ctx = new Context()
-let pluginFiber
+let fibers
 let mounted = false
 let closing = false
 let disposing
@@ -71,31 +67,45 @@ ctx.on('internal/set', (_ctx, _name, _value, _error, next) => {
   return result
 })
 
+// Dispose in reverse load order, like a native composition unwinding.
 function dispose() {
   return disposing ??= (async () => {
-    if (pluginFiber) await pluginFiber.dispose()
+    for (const fiber of [...(fibers ?? [])].reverse()) await fiber.dispose()
   })()
 }
 
+// A mount is a group of plugins sharing one Context, so dependencies between
+// them resolve natively. `args.plugins` lists [{ entry, config }] in load
+// order; a single-plugin mount passes only `args.config`.
 function mount(args) {
-  if (pluginFiber) throw new Error('plugin is already mounted')
+  if (fibers) throw new Error('plugins are already mounted')
+  fibers = []
   for (const [name, methods] of Object.entries(args.services)) {
     if (name.includes('#')) throw new Error(`service name ${name} cannot be projected`)
     slots.set(name, { methods: new Set(methods), object: undefined, handle: null, generation: 0, version: 0 })
   }
+  const plugins = args.plugins ?? [{ entry: pluginPath, config: args.config }]
   return (async () => {
-    const module = await import(pathToFileURL(pluginPath).href)
-    // An `apply` export is a function plugin; otherwise use the default
-    // export, which is how packaged plugins ship their Service class.
-    const plugin = typeof module.apply === 'function' ? module : (module.default ?? module)
-    pluginFiber = ctx.plugin(plugin, args.config)
-    await pluginFiber.await()
-    // This process hosts only the mounted plugin, and rutis cannot provide
-    // its dependencies yet, so an unresolved dependency can never resolve.
-    if (!pluginFiber.store) {
-      const missing = Object.keys(pluginFiber.inject ?? {}).filter(name => ctx.get(name, false) === undefined)
-      throw new Error(`native plugin dependencies are unresolved: ${missing.join(', ') || 'unknown'}`)
+    for (const { entry } of plugins) {
+      const own = cordisOf(entry)
+      if (cordisPath && own && own !== cordisPath) {
+        throw new Error(`${entry} resolves a different Cordis (${own}) than ${pluginPath} (${cordisPath})`)
+      }
     }
+    for (const { entry, config } of plugins) {
+      const module = await import(pathToFileURL(entry).href)
+      // An `apply` export is a function plugin; otherwise use the default
+      // export, which is how packaged plugins ship their Service class.
+      const plugin = typeof module.apply === 'function' ? module : (module.default ?? module)
+      fibers.push(ctx.plugin(plugin, config))
+    }
+    await Promise.all(fibers.map(fiber => fiber.await()))
+    // Only this group runs in the process, and rutis cannot provide services
+    // to it yet, so a dependency unresolved within the group never resolves.
+    const unresolved = fibers.flatMap((fiber, index) => fiber.store ? [] : [
+      `${plugins[index].entry} (${Object.keys(fiber.inject ?? {}).filter(name => ctx.get(name, false) === undefined).join(', ') || 'unknown'})`,
+    ])
+    if (unresolved.length) throw new Error(`native plugin dependencies are unresolved: ${unresolved.join('; ')}`)
     refresh()
     mounted = true
     return { services: Object.fromEntries([...slots].map(([name, slot]) => [name, [slot.handle, slot.version]])) }

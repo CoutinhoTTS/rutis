@@ -42,17 +42,37 @@ async fn published_plugins_through_typed_bindings() {
     .await;
     mount(&ctx, jobs::Plugin::new(Default::default())).await;
     mount(&ctx, commands::Plugin::new(Default::default())).await;
-    // Its storage dependencies are provided by nothing in its process, so the
-    // mount fails and names them instead of pending forever.
-    let pending = ctx.plugin(workspace::Plugin::new(Default::default()));
-    let error = (&pending).await.unwrap_err().to_string();
-    assert!(
-        error.contains("storageDomain") && error.contains("sessionPersistence"),
-        "{error}"
-    );
+    // dsh-workspace mounted alone cannot resolve its storage dependencies.
+    // Mounted as a group with its providers, they resolve inside Cordis.
+    mount(
+        &ctx,
+        workspace::Plugin::new(workspace::Config {
+            storage_json: workspace::StorageJsonConfig {
+                root: format!("{home}/kv"),
+            },
+            storage_domain: workspace::StorageDomainConfig {
+                backend: "json".into(),
+                routes: None,
+            },
+            sessions: workspace::SessionsConfig {
+                root: format!("{home}/sessions"),
+                compression: None,
+            },
+            storage: Default::default(),
+            workspace: Default::default(),
+        }),
+    )
+    .await;
     assert!(ctx.get::<invariants::InvariantRegistry>().is_some());
     assert!(ctx.get::<commands::CommandRuntime>().is_some());
-    assert!(ctx.get::<workspace::WorkspaceRegistry>().is_none());
+    let registry = ctx.get::<workspace::WorkspaceRegistry>().unwrap();
+    let sessions = ctx.get::<workspace::SessionPersistence>().unwrap();
+    assert!(sessions.list(None).await.unwrap().is_empty());
+    assert!(!registry
+        .delete(&workspace::WorkspaceId::from("missing"))
+        .await
+        .unwrap());
+    drop((registry, sessions));
 
     // L1: typed calls.
     let credentials = ctx.get::<credentials::CredentialProvider>().unwrap();

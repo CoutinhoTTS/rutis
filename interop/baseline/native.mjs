@@ -11,10 +11,13 @@ for (const target of targets) {
   const ctx = new Context()
   const entry = { available: false, results: [] }
   try {
-    const module = await import(target.package)
-    const fiber = ctx.plugin(module.default, scenario.config)
+    const fibers = []
+    for (const plugin of scenario.plugins) {
+      const module = await import(plugin.package)
+      fibers.push(ctx.plugin(typeof module.apply === 'function' ? module : module.default, plugin.config))
+    }
     // A plugin with unresolved dependencies stays pending; do not wait for it.
-    await Promise.race([fiber.await(), new Promise(resolve => setTimeout(resolve, 500))])
+    await Promise.race([Promise.all(fibers.map(fiber => fiber.await())), new Promise(resolve => setTimeout(resolve, 500))])
     const service = ctx.get(scenario.service)
     entry.available = service !== undefined
     const captured = {}

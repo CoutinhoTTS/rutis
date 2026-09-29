@@ -72,13 +72,22 @@ export const targets = [
     calls: [],
   },
   {
-    // Requires storageDomain and sessionPersistence, which nothing provides:
-    // natively the plugin stays pending and publishes no service.
+    // dsh-workspace needs storageDomain and sessionPersistence: mount it as a
+    // group with the plugins that provide them, in one Cordis Context.
     name: 'workspace',
     package: '@deepseek-ai/dsh-workspace',
+    group: [
+      ['@deepseek-ai/dsh-storage', () => ({})],
+      ['@deepseek-ai/dsh-storage-json', dir => ({ root: join(dir, 'kv') })],
+      ['@deepseek-ai/dsh-storage-domain', () => ({ backend: 'json' })],
+      ['@deepseek-ai/dsh-session-persistence-jsonl', dir => ({ root: join(dir, 'sessions') })],
+    ],
     service: 'workspaceRegistry',
     config: () => ({}),
-    calls: [],
+    calls: [
+      ['delete', ['missing']],
+      ['unpinSession', ['missing']],
+    ],
   },
 ]
 
@@ -86,12 +95,13 @@ export function prepare(target, root) {
   const dir = join(root, target.name)
   mkdirSync(dir, { recursive: true })
   target.setup?.(dir)
+  // Group members load first, in order; the target plugin loads last.
+  const plugins = [...(target.group ?? []), [target.package, target.config]]
   return {
     name: target.name,
-    entry: require.resolve(target.package),
+    plugins: plugins.map(([name, config]) => ({ package: name, entry: require.resolve(name), config: config(dir) })),
     service: target.service,
     methods: [...new Set(target.calls.map(([method]) => method))],
-    config: target.config(dir),
     calls: target.calls.map(([method, args, capture]) => ({ method, args, capture })),
     dir,
   }
