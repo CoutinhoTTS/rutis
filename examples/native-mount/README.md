@@ -7,7 +7,7 @@
 ```sh
 npm --prefix interop/node ci
 cargo run -p native-mount-example
-# 反方向（次要）：Cordis 应用挂载 src/lib.rs 中的 rutis 插件。
+# 反方向（已冻结，不再增加能力）：Cordis 应用挂载 src/lib.rs 中的 rutis 插件。
 cargo test -p native-mount-example --test cordis_mount -- --nocapture
 ```
 
@@ -16,7 +16,7 @@ cargo test -p native-mount-example --test cordis_mount -- --nocapture
 | 方向 | 原插件 | 消费方式 |
 | --- | --- | --- |
 | rutis 挂载 Cordis（主） | [counter.ts](../../interop/node/test/fixtures/counter.ts) | `ctx.plugin(bindings::Plugin::new(config))`，之后 `ctx.require::<bindings::Counter>()?` |
-| Cordis 挂载 rutis（次） | [src/lib.rs](src/lib.rs) | `ctx.plugin(plugin(executable), config)`，之后 `ctx.counter.add(1)` |
+| Cordis 挂载 rutis（冻结） | [src/lib.rs](src/lib.rs) | `ctx.plugin(plugin(executable), config)`，之后 `ctx.counter.add(1)` |
 
 原插件没有协议导入或注解。
 
