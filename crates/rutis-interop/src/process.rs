@@ -1,22 +1,58 @@
 use crate::rpc::{Connection, Dispatch, Reply, Value as RpcValue};
 use crate::Error;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-struct NoExports;
-impl Dispatch for NoExports {
-    fn invoke(&self, _: &Connection, _: &str, _: &str, _: RpcValue) -> Reply {
-        Err(Error::Value(
-            "application has no exported service target".into(),
-        ))
+/// Receives changes of exported Cordis service slots. `handle` addresses the
+/// object now in the slot (`None` when it is unavailable); `version` orders
+/// changes, so an older notification must not override a newer one.
+pub trait ServiceEvents: Send + Sync + 'static {
+    fn changed(&self, name: &str, handle: Option<String>, version: u64);
+}
+
+type Slots = Arc<Mutex<HashMap<String, (Option<String>, u64)>>>;
+
+/// Records the newest handle per slot and forwards newer changes.
+struct Imports {
+    slots: Slots,
+    events: Option<Arc<dyn ServiceEvents>>,
+}
+impl Imports {
+    fn update(&self, name: String, handle: Option<String>, version: u64) {
+        {
+            let mut slots = self.slots.lock().unwrap();
+            let entry = slots.entry(name.clone()).or_insert((None, 0));
+            if version <= entry.1 {
+                return;
+            }
+            *entry = (handle.clone(), version);
+        }
+        if let Some(events) = &self.events {
+            events.changed(&name, handle, version);
+        }
+    }
+}
+impl Dispatch for Imports {
+    fn invoke(&self, _: &Connection, target: &str, method: &str, args: RpcValue) -> Reply {
+        if !(target.is_empty() && method == "service") {
+            return Err(Error::Value(
+                "application has no exported service target".into(),
+            ));
+        }
+        let (name, handle, version): (String, Option<String>, u64) = crate::decode(args.json()?)?;
+        self.update(name, handle, version);
+        Ok(RpcValue::Undefined)
     }
 }
 
 /// Owns one native Cordis process and its generated service bindings.
 pub struct Process {
     peer: Connection,
+    imports: Arc<Imports>,
+    runtime: tokio::runtime::Handle,
     child: tokio::sync::Mutex<tokio::process::Child>,
     _directory: tempfile::TempDir,
 }
@@ -27,6 +63,17 @@ impl Process {
         plugin: &Path,
         config: Value,
         services: Value,
+    ) -> Result<Arc<Self>, Error> {
+        Self::launch_observed(node_package, plugin, config, services, None).await
+    }
+
+    /// Launch and report every later change of the exported service slots.
+    pub async fn launch_observed(
+        node_package: &Path,
+        plugin: &Path,
+        config: Value,
+        services: Value,
+        events: Option<Arc<dyn ServiceEvents>>,
     ) -> Result<Arc<Self>, Error> {
         let directory = tempfile::Builder::new()
             .prefix("rutis-mount-")
@@ -59,21 +106,54 @@ impl Process {
         stream
             .set_nonblocking(false)
             .map_err(|error| Error::Transport(error.to_string()))?;
-        let peer = Connection::connect(stream, Arc::new(NoExports))?;
+        let imports = Arc::new(Imports {
+            slots: Slots::default(),
+            events,
+        });
+        let peer = Connection::connect(stream, imports.clone())?;
         peer.ready().await?;
         let process = Arc::new(Self {
             peer,
+            imports,
+            runtime: tokio::runtime::Handle::current(),
             child: tokio::sync::Mutex::new(child),
             _directory: directory,
         });
-        process
+        let mounted = process
             .call_async(
                 "",
                 "mount",
                 json!({ "config": config, "services": services }),
             )
             .await?;
+        let slots: HashMap<String, (Option<String>, u64)> =
+            crate::decode(mounted["services"].clone())?;
+        for (name, (handle, version)) in slots {
+            process.imports.update(name, handle, version);
+        }
         Ok(process)
+    }
+
+    /// The handle of the object currently in an exported slot, if available.
+    pub fn service(&self, name: &str) -> Option<String> {
+        self.imports
+            .slots
+            .lock()
+            .unwrap()
+            .get(name)
+            .and_then(|(handle, _)| handle.clone())
+    }
+
+    /// Tell the Cordis side that no Rust proxy uses `handle` any longer.
+    /// Best effort: a closed session has already released everything.
+    pub fn release(&self, handle: &str) {
+        let peer = self.peer.clone();
+        let handle = handle.to_owned();
+        self.runtime.spawn(async move {
+            let _ = peer
+                .invoke_async("", "release", json!([handle]).into())
+                .await;
+        });
     }
 
     pub fn connection(&self) -> &Connection {

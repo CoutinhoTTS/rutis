@@ -54,7 +54,7 @@ async fn cleanup_releases_an_in_flight_call() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn exported_object_does_not_follow_a_replaced_service_slot() {
+async fn a_handle_keeps_its_object_after_the_slot_is_replaced() {
     let mut plugin = tempfile::Builder::new().suffix(".mjs").tempfile().unwrap();
     plugin
         .write_all(
@@ -85,9 +85,14 @@ async fn exported_object_does_not_follow_a_replaced_service_slot() {
     process.call("counter", "replace", json!([])).unwrap();
     let current = process.call("counter", "current", json!([]));
     let native_current = process.call("counter", "nativeCurrent", json!([]));
+    // The slot now has a new handle for the replacement object.
+    let replaced = process.service("counter").unwrap();
+    let replaced_current = process.call(&replaced, "current", json!([]));
     process.dispose().await.unwrap();
     assert_eq!(current.unwrap(), json!(1));
     assert_eq!(native_current.unwrap(), json!(2));
+    assert_ne!(replaced, "counter");
+    assert_eq!(replaced_current.unwrap(), json!(2));
 }
 
 #[tokio::test(flavor = "current_thread")]

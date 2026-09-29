@@ -105,11 +105,14 @@ export function generate(pluginFile, nodePackage) {
       const values = method.params.map(parameter => parameter.name).join(', ')
       return `pub ${method.async ? 'async ' : ''}fn ${method.rustName}(&self${args ? ', ' + args : ''}) -> Result<${method.result}, ::rutis_interop::Error> {
         ${method.params.map(parameter => validateNumber(parameter.name, parameter.type)).join('\n')}
-        ::rutis_interop::decode(self.process.${method.async ? 'call_async' : 'call'}(${literal(service.name)}, ${literal(method.name)}, ::rutis_interop::serde_json::json!([${values}]))${method.async ? '.await' : ''}?)
+        ::rutis_interop::decode(self.process.${method.async ? 'call_async' : 'call'}(&self.handle, ${literal(method.name)}, ::rutis_interop::serde_json::json!([${values}]))${method.async ? '.await' : ''}?)
       }`
     }).join('\n')
-    return `#[derive(Clone)] pub struct ${service.type} { process: ::std::sync::Arc<::rutis_interop::Process> }
-    impl ${service.type} { ${methods} }`
+    // One proxy per handle: it keeps addressing the object it was created
+    // for, and releases that object when the last Arc snapshot is dropped.
+    return `pub struct ${service.type} { process: ::std::sync::Arc<::rutis_interop::Process>, handle: String }
+    impl ${service.type} { ${methods} }
+    impl Drop for ${service.type} { fn drop(&mut self) { self.process.release(&self.handle); } }`
   }).join('\n')
   const rust = `// Generated from the original Cordis plugin. Do not edit.
   #[derive(Clone, ::rutis_interop::serde::Serialize)]
@@ -129,14 +132,23 @@ export function generate(pluginFile, nodePackage) {
     }
     fn apply<'a>(&'a self, ctx: &'a ::rutis::Ctx) -> ::rutis::BoxFuture<'a, Result<::rutis::Effect, ::rutis::CordisError>> {
       Box::pin(async move {
-        let process = ::rutis_interop::Process::launch(
+        let projection = ::rutis_interop::Projection::new();
+        ${[...services.values()].map(service => `projection.service::<${service.type}>(${literal(service.name)}, |process, handle| ${service.type} { process, handle });`).join('\n')}
+        let process = ::rutis_interop::Process::launch_observed(
           ::std::path::Path::new(${literal(nodePackage)}), ::std::path::Path::new(${literal(pluginFile)}),
           ::rutis_interop::serde_json::to_value(&self.config).map_err(|e| ::rutis::CordisError::PluginFailed(Box::new(e)))?,
-          ::rutis_interop::serde_json::json!(${JSON.stringify(methodManifest)})
+          ::rutis_interop::serde_json::json!(${JSON.stringify(methodManifest)}),
+          Some(projection.clone()),
         ).await?;
+        // Registered before any service binding, so native cleanup withdraws
+        // the services and runs their consumers' disposers first.
         let owner = process.clone();
-        ctx.effect(move || ::rutis::Effect::AsyncDisposer(Box::new(move || Box::pin(async move { owner.dispose().await.map_err(Into::into) }))))?;
-        ${[...services.values()].map(service => `ctx.provide(${service.type} { process: process.clone() })?;`).join('\n')}
+        let followed = projection.clone();
+        ctx.effect(move || ::rutis::Effect::AsyncDisposer(Box::new(move || Box::pin(async move {
+          followed.close();
+          owner.dispose().await.map_err(Into::into)
+        }))))?;
+        projection.attach(ctx, process)?;
         Ok(::rutis::Effect::Done)
       })
     }

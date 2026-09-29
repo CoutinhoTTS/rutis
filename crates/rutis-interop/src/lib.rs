@@ -1,12 +1,16 @@
-//! Generated native bindings for cross-process Cordis and rutis plugins.
+//! Compatibility layer for mounting Cordis plugins in rutis applications.
 //!
-//! Generated bindings cover typed value methods; the shared RPC layer also
-//! supports owned callbacks and async results. Automatic callback bindings and
-//! complete plugin interoperability remain under development.
+//! Everything here uses public rutis API only. Generated bindings cover typed
+//! value methods and follow service replacement; the shared RPC layer also
+//! supports owned callbacks and async results. See
+//! `docs/design-protocol-plugin-mount.md` for the covered surface and the
+//! boundary rules for Cordis plugins.
 
 pub mod build;
 #[cfg(unix)]
 mod process;
+#[cfg(unix)]
+mod projection;
 #[cfg(unix)]
 mod protocol;
 #[cfg(unix)]
@@ -15,7 +19,9 @@ pub mod rpc;
 pub mod server;
 
 #[cfg(unix)]
-pub use process::Process;
+pub use process::{Process, ServiceEvents};
+#[cfg(unix)]
+pub use projection::Projection;
 pub use serde;
 pub use serde_json;
 
