@@ -23,6 +23,7 @@
 | 句柄固定指向原对象；先清理后排空；进程退出后调用失败 | `crates/rutis-interop/tests/process_exit.rs` |
 | 协议 v1：invoke / await 分离、函数与异步结果引用、计数释放、同步调用链内的反向调用、`SyncWaitCycle`、后台执行器 | `crates/rutis-interop/tests/rpc_callbacks.rs`、`src/rpc/tests.rs`、`interop/node/test/peer.test.mjs` |
 | 错误对象图往返 | `crates/rutis-interop/tests/error_shape.rs`、`interop/node/test/errors.test.mjs` |
+| 已发布 dsh 插件：协议层与原生逐项对照；生成的类型化绑定装载与调用 | `crates/rutis-interop/tests/dsh_baseline.rs`、`examples/dsh-baseline/tests/typed.rs` |
 
 ## 3. 后续工作
 
@@ -76,8 +77,8 @@ node interop/baseline/classify.mjs
 
 ### W3 按缺口补能力（顺序由 W1 数据决定）
 
-1. **服务发现改为读取类型声明**：从 `Context` 接口扩展取服务名与类型，支持 `Service` 子类；用 `package.json` 的 `types` 找声明文件。这是 6 个插件都卡在 L0 的原因。
-2. **数据类型**：品牌类型、数据对象（生成 serde 结构体）、字面量联合、可空、可选参数。只需要生成器，协议已支持；完成后预计 28 个成员可用。
+1. ~~**服务发现改为读取类型声明**~~（已完成）：从 `Context` 声明取服务，支持 `Service` 子类和 npm 包目录。
+2. ~~**数据类型**~~（已完成）：品牌类型、数据对象、字面量联合、可空、可选参数、`Record`、动态 JSON；可省略的 `AbortSignal` 暂不暴露。结果：6 个插件全部生成类型化绑定并通过 L0；55 个成员中绑定 32 个（此前 1 个），`examples/dsh-baseline` 用生成的类型调用 credentials、fs、jobs，与原生行为一致。
 3. **取消**：`AbortSignal` 参数映射为取消（与 W2 的取消传播共用机制），13 个成员。
 4. **回调参数、返回函数**：生成器接入协议已有的函数引用，10 个成员。
 5. **活对象与属性**：协议增加 object 引用类型，17 个成员；先确认实际用法再定范围。
@@ -93,8 +94,9 @@ node interop/baseline/classify.mjs
 ```sh
 npm --prefix interop/node ci
 npm --prefix interop/node test
-cargo test -p rutis-interop -p native-mount-example
-cargo clippy -p rutis-interop -p native-mount-example --all-targets -- -D warnings
+npm --prefix interop/baseline ci
+cargo test -p rutis-interop -p native-mount-example -p dsh-baseline
+cargo clippy -p rutis-interop -p native-mount-example -p dsh-baseline --all-targets -- -D warnings
 ```
 
 ## 5. 性能记录

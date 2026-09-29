@@ -29,15 +29,34 @@ rutis 内核和 Cordis 都没有为兼容做任何修改。
 
 ## 2. 构建期生成
 
-`build.rs` 调用 `rutis_interop::build::cordis_plugin(插件路径, interop/node)`，生成结果写入 `OUT_DIR/cordis.rs`，由应用 `include!`。生成器读取的内容：
+`build.rs` 调用 `rutis_interop::build::cordis_module(插件, interop/node, 模块名)`，生成结果写入 `OUT_DIR/{模块名}.rs`，由应用 `include!`（`cordis_plugin` 是模块名为 `cordis` 的简写）。插件可以是 TypeScript 源文件，也可以是已安装的 npm 包目录；包按 `package.json` 的 `types` 分析，按运行时入口加载。
 
-| 来源 | 生成 |
+**服务发现**
+
+| 插件形式 | 服务来源 |
 | --- | --- |
-| `apply(ctx, config)` 的 config 类型 | `Config` 结构体（必填字段） |
-| `ctx.provide('名字', 值)`（名字为字面量，调用解析到 Cordis） | 每个服务一个 Rust 代理类型，名字首字母大写 |
-| 服务的公开方法 | 同名 snake_case 方法；同步方法仍同步，返回 Promise 的方法生成 `async fn`；均返回 `Result<T, rutis_interop::Error>` |
+| 默认导出 `Service` 子类（已发布插件的常见形式） | `declare module '@deepseek-ai/cordis' { interface Context { ... } }` 中类型为该类或其基类的成员；接口层声明 `credentials: CredentialProvider`，实现包继承它即可被发现 |
+| 导出 `apply` 的函数插件，TypeScript 源码 | 字面量服务名的 `ctx.provide('名字', 值)`，类型优先取 Context 声明 |
+| 导出 `apply` 的函数插件，只有声明文件 | 包自己声明的 Context 成员 |
 
-目前支持的类型：`number` / `string` / `boolean` / `void` 及其数组。以下情况在构建时报错并指出源码位置，不会静默丢掉成员：公开属性、重载、泛型方法、可选 / 默认 / 剩余参数、其他类型。生成器把原插件导入的文件都登记为 Cargo 的重新构建依赖。
+配置类型取 `Service` 子类构造函数或 `apply` 的第二个参数；全部字段可选时 `Config` 实现 `Default`。
+
+**类型映射**
+
+| TypeScript | Rust |
+| --- | --- |
+| `number` / `string` / `boolean` / `void` | `f64` / `String` / `bool` / `()` |
+| 品牌类型 `string & { __brand }`（带别名） | 同名 newtype，`#[serde(transparent)]`，可 `From<&str>` |
+| 字符串字面量联合 | 同名枚举，变体按原字符串重命名 |
+| 数据接口 / 对象字面量 | 同名结构体，字段 snake_case，按原名序列化；可选字段为 `Option` 且不序列化 `None` |
+| `T \| undefined` / `T \| null` | `Option<T>` |
+| 数组 / 只读数组 | `Vec<T>`；参数位置借用为 `&[T]` |
+| `Record<string, T>` | `BTreeMap<String, T>` |
+| `any` / `unknown`，以及其他联合（如带判别字段的对象联合） | `serde_json::Value`：数据原样过线，只是没有生成静态结构 |
+
+方法：同步方法仍同步，返回 Promise 的生成 `async fn`，都返回 `Result<T, rutis_interop::Error>`。可选参数为 `Option<T>`，`None` 以 JS `undefined` 传递（不是 `null`）。可省略的 `AbortSignal` 参数和选项字段暂不暴露，调用时不带取消信号。
+
+**不支持的成员**：属性、重载、泛型方法、回调参数、返回函数、活对象（带方法的对象或类实例）、`Uint8Array`、流等，不生成对应方法。每一项都在构建时以 `cargo:warning` 报出源码位置和原因，并列在服务类型的文档注释里；插件的其他成员照常生成，不会因为一个成员而整体失败。
 
 ## 3. 线协议
 
@@ -103,7 +122,7 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 
 ## 5. 生命周期与故障
 
-- **启动**：挂载插件启动 Node 进程，握手后发 `mount`；Node 侧加载原插件并等待 `fiber.await()`。runner 使用插件自己解析到的 Cordis（插件的 `Service` 子类与 `Context` 必须来自同一模块实例），插件入口可以导出 `apply`，也可以默认导出 `Service` 子类。原插件启动失败时挂载失败，不注册任何服务；服务暂不可用时挂载成功但不注册，依赖方保持等待。
+- **启动**：挂载插件启动 Node 进程，握手后发 `mount`；Node 侧加载原插件并等待 `fiber.await()`。runner 使用插件自己解析到的 Cordis（插件的 `Service` 子类与 `Context` 必须来自同一模块实例），插件入口可以导出 `apply`，也可以默认导出 `Service` 子类。原插件启动失败时挂载失败，不注册任何服务。每个 Node 进程只运行被挂载的这一个插件，rutis 侧也暂不能为它提供依赖，所以原插件的必需依赖无法满足时挂载直接失败，错误列出缺少的服务；挂载之后服务变为不可用（例如被插件自己撤销）时，按 §4.2 撤销注册。
 - **清理顺序**：挂载插件先注册自己的清理 effect，再注册服务。rutis 逆序清理，所以先撤销服务、执行消费者的 disposer（此时仍可调用远端服务），最后才关闭 Node 进程。
 - **先清理后排空**：`dispose` 同时启动 Cordis 插件卸载和在途调用排空，不先等调用结束；disposer 可能正是解除在途等待的动作。
 - **故障**：Node 进程退出或连接断开时，所有在途调用和后续调用都返回 `Transport` 错误。不重试，不返回默认值，已发送但未返回的调用视为结果未知。
@@ -153,6 +172,6 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 | Cordis `emit` 返回时 rutis 监听已执行完 | 跨进程的语言栈差异 | 采用发出即忘（边界规则 2） |
 | 跨侧逐个交错的监听顺序 | 两侧各有一张监听表 | 按组转发（边界规则 3、4） |
 | 返回值含义不同的同名事件契约 | 框架契约不同 | 按签名显式转换，无法转换时报不兼容 |
-| 未支持的类型（对象、回调参数等） | 生成器尚未实现 | 构建期报错，列入路线图 |
+| 未支持的成员（回调参数、活对象、属性、二进制、流等） | 生成器或协议尚未实现 | 构建期警告并跳过该成员，其余成员照常生成；列入路线图 |
 
 以下不再建设：共享内存版本页、提交边界审计、跨框架统一事件队列（[#74](https://github.com/arcships/rutis/pull/74)，已停止推进）、从 Rust 源码自动提取完整接口的 rustdoc / 编译器方案、分布式 GC。
