@@ -14,12 +14,16 @@ function isLive(value) {
   if (prototype !== Object.prototype && prototype !== null) return true
   return Object.values(value).some(item => typeof item === 'function')
 }
-// A plain object is encoded field by field when a field needs a reference.
-function needsRecord(value) {
-  return Object.values(value).some(item => typeof item === 'function' || item instanceof Promise || isLive(item)
-    || (Array.isArray(item) && item.some(element => typeof element === 'function' || element instanceof Promise || isLive(element)))
-    || (item !== null && typeof item === 'object' && !Array.isArray(item) && !isLive(item) && Object.getPrototypeOf(item) === Object.prototype && needsRecord(item)))
+// Whether a value holds a reference anywhere: itself, or inside the arrays
+// and plain objects it contains. Such plain objects are encoded field by field.
+function holdsReference(value, seen = new Set()) {
+  if (typeof value === 'function' || value instanceof Promise || isLive(value)) return true
+  if (value === null || typeof value !== 'object' || seen.has(value)) return false
+  if (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false
+  seen.add(value)
+  return Object.values(value).some(item => holdsReference(item, seen))
 }
+const needsRecord = value => holdsReference(value)
 
 // The protocol version this runtime speaks; builds check it against the
 // rutis-interop crate (package.json `rutisProtocol`).
@@ -50,7 +54,7 @@ class RemotePromise extends Promise {
 // The transport owns I/O; every decoder, reference table and callback stays on
 // the owning JS thread, including while a synchronous caller pumps its chain.
 export class Peer {
-  #send; #pump; #dispatch; #abort
+  #send; #pump; #dispatch; #abort; #settled
   #next = 0; #received = 0; #ref = 0; #pending = new Map(); #exports = new Map(); #identities = new WeakMap()
   #imports = new Map(); #proxies = new WeakMap(); #finalizer
   #closed; #handshake = false; #resolveReady; #rejectReady
@@ -60,8 +64,11 @@ export class Peer {
   // A signal lives until the call's result settles: a returned Promise keeps
   // it (via its future export), and an `await` frame maps back to the call.
   #signals = new Map(); #decodingFor; #promiseCalls = new WeakMap(); #awaits = new Map()
-  constructor({ send, pump, dispatch, abort }) {
-    this.#send = send; this.#pump = pump; this.#dispatch = dispatch; this.#abort = abort
+  // `settled` runs after a call or property read on an exported reference
+  // returns (or its Promise settles): the owner may have changed state that
+  // invoke dispatch would otherwise observe, such as replaced services.
+  constructor({ send, pump, dispatch, abort, settled }) {
+    this.#send = send; this.#pump = pump; this.#dispatch = dispatch; this.#abort = abort; this.#settled = settled
     this.ready = new Promise((resolve, reject) => { this.#resolveReady = resolve; this.#rejectReady = reject })
     this.#finalizer = new FinalizationRegistry(record => this.#release(record))
   }
@@ -277,10 +284,16 @@ export class Peer {
           return
         }
         try {
-          const value = frame.op === 'get' ? entry.value[frame.property]
-            : frame.op === 'call' && frame.method !== undefined ? Reflect.apply(entry.value[frame.method], entry.value, args)
-              : frame.op === 'call' ? Reflect.apply(entry.value, undefined, args)
-                : this.#dispatch(frame.target, frame.method, args)
+          let value
+          try {
+            value = frame.op === 'get' ? entry.value[frame.property]
+              : frame.op === 'call' && frame.method !== undefined ? Reflect.apply(entry.value[frame.method], entry.value, args)
+                : frame.op === 'call' ? Reflect.apply(entry.value, undefined, args)
+                  : this.#dispatch(frame.target, frame.method, args)
+          } finally {
+            if (frame.op !== 'invoke' && !(value instanceof Promise)) this.#settled?.()
+          }
+          if (frame.op !== 'invoke' && value instanceof Promise) value.then(() => this.#settled?.(), () => this.#settled?.())
           // A returned Promise keeps the call's signal until it settles.
           if (value instanceof Promise && this.#signals.has(frame.id)) {
             const call = frame.id

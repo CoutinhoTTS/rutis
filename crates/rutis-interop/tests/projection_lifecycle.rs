@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, ServiceIntercept, TypeKey};
-use rutis_interop::{decode, Error, Process, Projection};
+use rutis_interop::{decode, decode_value, Error, Process, Projection};
 use serde_json::{json, Value};
 
 fn package() -> PathBuf {
@@ -233,4 +233,138 @@ async fn a_service_failing_its_check_is_not_exported() {
     .unwrap();
     assert_eq!(process.service("ticker"), None);
     process.dispose().await.unwrap();
+}
+
+// PR #73 review of 85ae6e7 / 6794a3a: a publication that failed and is
+// retried keeps its handle; calls on exported objects refresh the slots.
+const PAIR: &str = r#"
+export function apply(ctx) {
+  const make = value => ({ current() { return value } })
+  ctx.provide('counter', make(1))
+  ctx.provide('other', make(0))
+  ctx.provide('control', {
+    swap(value) { ctx.set('counter', make(value)) },
+    bump(value) { ctx.set('other', make(value)) },
+    // A live object whose method replaces the counter.
+    remote() { return { swap(value) { ctx.set('counter', make(value)) } } },
+  })
+}
+"#;
+
+struct Other {
+    process: Arc<Process>,
+    handle: String,
+}
+impl Drop for Other {
+    fn drop(&mut self) {
+        self.process.release(&self.handle);
+    }
+}
+
+struct PairMount {
+    plugin: PathBuf,
+    process: Shared,
+}
+
+impl Plugin for PairMount {
+    fn name(&self) -> &str {
+        "projection-pair"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let projection = Projection::new();
+            projection.service::<Counter>("counter", |process, handle| Counter { process, handle });
+            projection.service::<Other>("other", |process, handle| Other { process, handle });
+            let process = Process::launch_observed(
+                &package(),
+                &self.plugin,
+                json!({}),
+                json!({ "counter": ["current"], "other": ["current"], "control": ["swap", "bump", "remote"] }),
+                Some(projection.clone()),
+            )
+            .await?;
+            let owner = process.clone();
+            let followed = projection.clone();
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        followed.close();
+                        owner.dispose().await.map_err(Into::into)
+                    })
+                }))
+            })?;
+            *self.process.lock().unwrap() = Some(process.clone());
+            projection.attach(ctx, process)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+async fn pair() -> (tempfile::NamedTempFile, Ctx, rutis::FiberView, Arc<Process>) {
+    let mut file = tempfile::Builder::new().suffix(".mjs").tempfile().unwrap();
+    file.write_all(PAIR.as_bytes()).unwrap();
+    let ctx = Ctx::root().unwrap();
+    let shared = Shared::default();
+    let view = ctx.plugin(PairMount {
+        plugin: file.path().to_owned(),
+        process: shared.clone(),
+    });
+    (&view).await.unwrap();
+    let process = shared.lock().unwrap().clone().unwrap();
+    (file, ctx, view, process)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_retried_publication_keeps_its_handle() {
+    let (_file, ctx, view, process) = pair().await;
+    let denied = Arc::new(Mutex::new(false));
+    let first = denied.clone();
+    ctx.intercept_set_as::<Counter>(TypeKey::of::<Counter>(), move |_| {
+        let mut first = first.lock().unwrap();
+        if *first {
+            ServiceIntercept::Continue
+        } else {
+            *first = true;
+            ServiceIntercept::Deny
+        }
+    })
+    .unwrap();
+
+    // The first publication of the value-2 object is denied...
+    process.call("control", "swap", json!([2])).unwrap();
+    settle().await;
+    assert_eq!(ctx.get::<Counter>().unwrap().current().unwrap(), 1.0);
+    // ...and retried when another slot changes.
+    process.call("control", "bump", json!([5])).unwrap();
+    settle().await;
+    let kept = ctx.get::<Counter>().unwrap();
+    assert_eq!(kept.current().unwrap(), 2.0);
+    // Replacing it again must not invalidate the retried proxy's handle.
+    process.call("control", "swap", json!([3])).unwrap();
+    settle().await;
+    assert_eq!(ctx.get::<Counter>().unwrap().current().unwrap(), 3.0);
+    assert_eq!(kept.current().unwrap(), 2.0);
+    drop((kept, process));
+    view.dispose().await.unwrap();
+    ctx.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_call_on_an_exported_object_refreshes_the_slots() {
+    let (_file, ctx, view, process) = pair().await;
+    let remote: rutis_interop::ObjectRef =
+        decode_value(process.invoke("control", "remote", vec![]).unwrap()).unwrap();
+    remote
+        .call("swap", vec![rutis_interop::arg(&9).unwrap()])
+        .unwrap();
+    settle().await;
+    assert_eq!(ctx.get::<Counter>().unwrap().current().unwrap(), 9.0);
+    let handle = process.service("counter").unwrap();
+    assert_eq!(
+        process.call(&handle, "current", json!([])).unwrap(),
+        json!(9)
+    );
+    drop((remote, process));
+    view.dispose().await.unwrap();
+    ctx.shutdown().await.unwrap();
 }

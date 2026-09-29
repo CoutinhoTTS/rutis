@@ -23,10 +23,21 @@ export function apply(ctx) {
   ctx.provide('bank', {
     open(owner) { const account = new Account(owner, 0); accounts.push(account); return account },
     summary() { return { first: accounts[0], count: accounts.length } },
+    // Objects inside records inside arrays (PR #73 review of 6794a3a).
+    nested() { return { items: [{ account: accounts[0] }, { account: accounts[0] }] } },
     same(account, index) { return account === accounts[index] },
   })
 }
 "#;
+
+#[derive(Deserialize)]
+struct Nested {
+    items: Vec<Item>,
+}
+#[derive(Deserialize)]
+struct Item {
+    account: ObjectRef,
+}
 
 #[derive(Deserialize, Serialize)]
 struct Summary {
@@ -42,7 +53,7 @@ async fn live_objects_keep_identity_and_state() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/node"),
         plugin.path(),
         json!({}),
-        json!({ "bank": ["open", "summary", "same"] }),
+        json!({ "bank": ["open", "summary", "same", "nested"] }),
     )
     .await
     .unwrap();
@@ -86,6 +97,11 @@ async fn live_objects_keep_identity_and_state() {
         json!(5)
     );
 
+    let nested: Nested = decode_value(process.invoke(&bank, "nested", vec![]).unwrap()).unwrap();
+    assert_eq!(nested.items.len(), 2);
+    assert_eq!(nested.items[0].account, summary.first);
+    assert_eq!(nested.items[1].account, summary.first);
+
     // Passing an object back gives Cordis the original instance.
     let same = |object: &ObjectRef, index: u32| -> bool {
         let value = process
@@ -104,6 +120,6 @@ async fn live_objects_keep_identity_and_state() {
     let nested = arg(&summary).unwrap();
     assert!(matches!(nested, Value::Record(_)));
 
-    drop((account, summary));
+    drop((account, summary, nested));
     process.dispose().await.unwrap();
 }

@@ -856,10 +856,15 @@ impl Connection {
     fn cancel(&self, id: &str) {
         {
             let mut calls = self.0.calls.lock().unwrap();
-            if calls.closed.is_some() || calls.waiting.remove(id).is_none() {
+            if calls.closed.is_some() {
                 return;
             }
-            calls.cancelled.insert(id.to_owned());
+            // Still waiting: a late reply will be discarded. Already answered
+            // but not consumed (e.g. a returned Promise the caller has not yet
+            // awaited): the callee may still be running it, so cancel anyway.
+            if calls.waiting.remove(id).is_some() {
+                calls.cancelled.insert(id.to_owned());
+            }
         }
         let _ = self.write(Frame::Cancel { id: id.to_owned() });
     }

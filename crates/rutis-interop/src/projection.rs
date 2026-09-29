@@ -63,26 +63,36 @@ impl Projection {
         make: fn(Arc<Process>, String) -> T,
     ) {
         let mut binding: Option<(Disposer, ServiceWriter<T>)> = None;
+        // A proxy whose publication failed is kept for the retry: it holds its
+        // handle, and dropping it would release that handle on the Cordis side.
+        let mut candidate: Option<(String, Arc<T>)> = None;
         let apply: Apply = Box::new(move |ctx, process, handle| {
-            match (handle, binding.as_ref()) {
-                (Some(handle), Some((_, writer))) => writer
-                    .set(ctx, Arc::new(make(process.clone(), handle)))
-                    .map_err(|error| Error::Value(error.to_string()))?,
-                (Some(handle), None) => {
-                    let registered = ctx
-                        .provide_mut_as(TypeKey::of::<T>(), Arc::new(make(process.clone(), handle)))
-                        .map_err(|error| Error::Value(error.to_string()))?;
-                    binding = Some(registered);
-                }
-                (None, Some(_)) => {
-                    let (disposer, _) = binding.take().unwrap();
+            let Some(handle) = handle else {
+                candidate = None;
+                if let Some((disposer, _)) = binding.take() {
                     return Ok(Some(Box::pin(async move {
                         let _ = disposer.dispose().await;
                     })));
                 }
-                (None, None) => {}
+                return Ok(None);
+            };
+            let proxy = match candidate.take() {
+                Some((kept, proxy)) if kept == handle => proxy,
+                _ => Arc::new(make(process.clone(), handle.clone())),
+            };
+            let published = match binding.as_ref() {
+                Some((_, writer)) => writer
+                    .set(ctx, proxy.clone())
+                    .map_err(|error| Error::Value(error.to_string())),
+                None => ctx
+                    .provide_mut_as(TypeKey::of::<T>(), proxy.clone())
+                    .map(|registered| binding = Some(registered))
+                    .map_err(|error| Error::Value(error.to_string())),
+            };
+            if published.is_err() {
+                candidate = Some((handle, proxy));
             }
-            Ok(None)
+            published.map(|()| None)
         });
         self.state.lock().unwrap().slots.insert(
             name.to_owned(),

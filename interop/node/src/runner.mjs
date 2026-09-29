@@ -229,7 +229,8 @@ function dispatch(target, method, args) {
   return result
 }
 
-peer = await Process.connect(socketPath, dispatch)
+// Calls on exported objects and functions may replace services too.
+peer = await Process.connect(socketPath, dispatch, () => { if (slots.size && !closing) refresh() })
 await peer.closed()
 closing = true
 await dispose()

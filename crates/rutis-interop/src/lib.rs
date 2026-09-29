@@ -17,6 +17,8 @@ pub const PROTOCOL: u32 = 1;
 #[macro_export]
 macro_rules! include_mounts {
     () => {
+        // Mounts are generated on Unix only; elsewhere there is nothing to include.
+        #[cfg(unix)]
         include!(concat!(env!("OUT_DIR"), "/rutis_interop_mounts.rs"));
     };
 }

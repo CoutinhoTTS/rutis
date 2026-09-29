@@ -8,13 +8,14 @@ export class Process {
   #exited
   #peer
 
-  constructor(executable, { socketPath, dispatch } = {}) {
+  constructor(executable, { socketPath, dispatch, settled } = {}) {
     const { port1, port2 } = new MessageChannel()
     this.#port = port1
     this.#peer = new Peer({
       send: frame => this.#port.postMessage({ frame }),
       abort: () => this.#port.postMessage({ abort: true }),
       dispatch: dispatch ?? (() => { throw new Error('application has no exported service target') }),
+      settled,
       pump: done => {
         const sequence = Atomics.load(this.#signal, 0)
         let packet
@@ -50,8 +51,8 @@ export class Process {
       throw error
     }
   }
-  static async connect(socketPath, dispatch) {
-    const process = new Process(undefined, { socketPath, dispatch })
+  static async connect(socketPath, dispatch, settled) {
+    const process = new Process(undefined, { socketPath, dispatch, settled })
     try { await process.#peer.ready; return process }
     catch (error) { process.#port.postMessage({ abort: true }); await process.#exited; throw error }
   }
