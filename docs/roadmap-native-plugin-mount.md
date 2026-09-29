@@ -26,15 +26,43 @@
 
 ## 3. 后续工作
 
-### W1 真实插件基线（先做）
+### W1 真实插件基线（已完成首轮，2026-09-29）
 
-用真实插件代替夹具，找出实际缺口，再决定补什么。
+装置在 `interop/baseline/`：锁定 npm 上已发布的 dsh 官方插件（`0.2.0-rc.1`，Cordis `4.0.4`）。同一份场景清单分别在原生 Cordis 和经 interop 从 Rust 执行，逐项比对结果（`crates/rutis-interop/tests/dsh_baseline.rs`，CI 中运行）；`classify.mjs` 静态统计每个服务成员需要的绑定能力。
 
-- **目标插件**：npm 上已发布的 dsh 官方插件（`@deepseek-ai/dsh-settings`、`dsh-credentials`、`dsh-invariants`、`dsh-attachment` 等，版本 `0.1.1-rc.2`，依赖闭包无缺口）。能取得 `deepseek-harness/plugin-reference` 语料后再扩大样本。
-- **分级**（沿用 [dsh 桥](design-dsh-bridge-2026-08-21.md) §九的口径）：L0 能生成绑定并装载；L1 服务可调用；L2 主要用法行为与原生一致；L3 事件与生命周期一致；L4 带活对象的载荷一致。
-- **产出**：每个插件的分级结果和缺口清单（按"生成器不支持 / 协议不支持 / 边界规则之外"分类），写入本文。
+```sh
+npm --prefix interop/baseline ci
+cargo test -p rutis-interop --test dsh_baseline -- --nocapture
+node interop/baseline/classify.mjs
+```
 
-已知的第一批缺口（来自对 `dsh-settings` 的初步查看）：`class X extends Service` 形式的服务注册、返回对象（`SettingsScope`）、泛型接口、schemastery schema 作为配置。
+**协议层结果**（绕过生成器，按 JSON 直接调用）：
+
+| 插件 | 服务 | 装载 / 可用性与原生一致 | 数据调用与原生一致 |
+| --- | --- | --- | --- |
+| dsh-invariants | `invariants` | 是 | 无纯数据方法 |
+| dsh-credentials-local | `credentials` | 是 | 7 / 7 |
+| dsh-fs-local | `fs` | 是 | 8 / 8（含 `FsError` 业务错误） |
+| dsh-jobs-local | `jobs` | 是 | 2 / 2（含业务错误） |
+| dsh-commands | `commands` | 是 | 无纯数据方法 |
+| dsh-workspace | `workspaceRegistry` | 是（缺依赖，两边都不发布服务） | — |
+
+**绑定层结果**：生成器对 6 个插件全部停在 L0，原因相同：它们都用 `class X extends Service` 注册，服务名和类型写在 `declare module '@deepseek-ai/cordis' { interface Context { ... } }` 里，而生成器只识别 `ctx.provide('名字', 值)`。
+
+**能力统计**（6 个插件、55 个公开成员）：现有生成器能处理 1 个；协议已支持、只差生成器的 28 个；其余需要协议扩展。
+
+| 能力 | 成员数 | 生成器 | 协议 |
+| --- | --- | --- | --- |
+| 品牌字符串 / 数字 | 42 | 否 | 是 |
+| 数据对象（含字面量联合、可空） | 31 | 否 | 是 |
+| 可选参数 | 19 | 否 | 是 |
+| `AbortSignal` 参数 | 13 | 否 | 否 |
+| 活对象（有方法的对象 / 类实例） | 12 | 否 | 否 |
+| 回调参数 / 返回函数 | 5 / 5 | 否 | 是 |
+| 公开属性 | 5 | 否 | 否 |
+| `Uint8Array` / `AsyncIterable` | 2 / 1 | 否 | 否 |
+
+事件：纯通知 5 个，waterfall 3 个（`fs/write-intent`、`fs/edit-intent`、`workspace/session-activity`），有返回值 1 个。
 
 ### W2 工程防护（与 W1 并行）
 
@@ -46,13 +74,15 @@
 | 握手能力协商 | 握手交换能力集；装载期检查插件所需服务，缺失时明确报错 |
 | 断连记录 | 断连时记录在途调用和计数，便于排查 |
 
-### W3 按缺口补能力
+### W3 按缺口补能力（顺序由 W1 数据决定）
 
-补什么由 W1 的结果决定，不预先排机制。候选项：
-
-- **生成器**：`Service` 子类注册、返回有状态对象（协议新增 object 引用）、函数类型参数、更多数据类型、schemastery 配置。
-- **事件**：按设计 §6 按组转发。默认只转发纯 `emit` 事件；waterfall 事件绝不被动订阅（`rutis-cordis` 实测：不调用 `next()` 的监听会否决整条链）。
-- **活对象载荷**：参照 dsh 桥的替身表，逐个事件决定活对象的过线表示。
+1. **服务发现改为读取类型声明**：从 `Context` 接口扩展取服务名与类型，支持 `Service` 子类；用 `package.json` 的 `types` 找声明文件。这是 6 个插件都卡在 L0 的原因。
+2. **数据类型**：品牌类型、数据对象（生成 serde 结构体）、字面量联合、可空、可选参数。只需要生成器，协议已支持；完成后预计 28 个成员可用。
+3. **取消**：`AbortSignal` 参数映射为取消（与 W2 的取消传播共用机制），13 个成员。
+4. **回调参数、返回函数**：生成器接入协议已有的函数引用，10 个成员。
+5. **活对象与属性**：协议增加 object 引用类型，17 个成员；先确认实际用法再定范围。
+6. **事件**：纯通知事件按设计 §6 转发；waterfall 事件暂不转发。
+7. `Uint8Array`、`AsyncIterable`：按需。
 
 ### W4 包级接入
 

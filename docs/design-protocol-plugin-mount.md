@@ -1,6 +1,6 @@
 # rutis 挂载 Cordis 插件：兼容层设计
 
-依据：[需求](requirements-protocol-plugins.md)。基准：Cordis `4.0.1`（`interop/node/package-lock.json` 锁定）。交付计划见[路线图](roadmap-native-plugin-mount.md)。
+依据：[需求](requirements-protocol-plugins.md)。基准：Cordis `4.0.4`（`interop/node/package-lock.json` 锁定）。交付计划见[路线图](roadmap-native-plugin-mount.md)。
 
 **原 TS 插件在真实 Cordis 中运行；rutis 侧拿到的是构建时生成的 Rust 类型，以普通 rutis 服务的形式注册。所有映射都在兼容层完成，只使用 rutis 和 Cordis 的公开 API。**
 
@@ -103,7 +103,7 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 
 ## 5. 生命周期与故障
 
-- **启动**：挂载插件启动 Node 进程，握手后发 `mount`；Node 侧加载原插件并等待 `fiber.await()`。原插件启动失败时挂载失败，不注册任何服务；服务暂不可用时挂载成功但不注册，依赖方保持等待。
+- **启动**：挂载插件启动 Node 进程，握手后发 `mount`；Node 侧加载原插件并等待 `fiber.await()`。runner 使用插件自己解析到的 Cordis（插件的 `Service` 子类与 `Context` 必须来自同一模块实例），插件入口可以导出 `apply`，也可以默认导出 `Service` 子类。原插件启动失败时挂载失败，不注册任何服务；服务暂不可用时挂载成功但不注册，依赖方保持等待。
 - **清理顺序**：挂载插件先注册自己的清理 effect，再注册服务。rutis 逆序清理，所以先撤销服务、执行消费者的 disposer（此时仍可调用远端服务），最后才关闭 Node 进程。
 - **先清理后排空**：`dispose` 同时启动 Cordis 插件卸载和在途调用排空，不先等调用结束；disposer 可能正是解除在途等待的动作。
 - **故障**：Node 进程退出或连接断开时，所有在途调用和后续调用都返回 `Transport` 错误。不重试，不返回默认值，已发送但未返回的调用视为结果未知。
