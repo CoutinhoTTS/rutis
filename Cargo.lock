@@ -2880,6 +2880,7 @@ dependencies = [
 name = "rutis-interop"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "proc-macro2",
  "quote",
  "rutis",

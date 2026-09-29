@@ -574,6 +574,21 @@ impl Drop for Peer {
 pub struct Connection(Arc<Peer>);
 impl Connection {
     pub fn connect(stream: UnixStream, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
+        Self::connect_with(
+            stream,
+            dispatch,
+            Box::new(|| Error::Transport("peer disconnected".into())),
+        )
+    }
+
+    /// Like [`Connection::connect`]; `disconnected` builds the error that
+    /// ends the session when the peer goes away, for example with the exit
+    /// status of its process. It runs on the reader thread and may block.
+    pub fn connect_with(
+        stream: UnixStream,
+        dispatch: Arc<dyn Dispatch>,
+        disconnected: Box<dyn FnOnce() -> Error + Send>,
+    ) -> Result<Self, Error> {
         stream.set_nonblocking(false).map_err(transport)?;
         let reader = stream.try_clone().map_err(transport)?;
         let peer = Self(Arc::new(Peer {
@@ -598,13 +613,13 @@ impl Connection {
             .spawn(move || {
                 let result: Result<(), Error> = (|| {
                     for line in BufReader::new(reader).lines() {
-                        let line = line.map_err(transport)?;
+                        let Ok(line) = line else { break };
                         let Some(peer) = weak.upgrade().map(Self) else {
                             return Ok(());
                         };
                         peer.receive(serde_json::from_str(&line).map_err(transport)?)?;
                     }
-                    Err(Error::Transport("peer disconnected".into()))
+                    Err(disconnected())
                 })();
                 if let (Err(error), Some(peer)) = (result, weak.upgrade()) {
                     Self(peer).close(error);

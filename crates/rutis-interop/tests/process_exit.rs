@@ -134,10 +134,12 @@ async fn process_exit_fails_both_pending_and_subsequent_calls() {
         process.call("lifecycle", "started", json!([])).unwrap(),
         json!(true)
     );
-    assert!(matches!(
-        process.call("lifecycle", "crash", json!([])),
-        Err(Error::Transport(_))
-    ));
+    match process.call("lifecycle", "crash", json!([])) {
+        Err(Error::Transport(message)) => {
+            assert_eq!(message, "Cordis process exited with exit status: 17")
+        }
+        other => panic!("expected a transport error, got {other:?}"),
+    }
     assert!(tokio::time::timeout(Duration::from_secs(2), pending)
         .await
         .unwrap()

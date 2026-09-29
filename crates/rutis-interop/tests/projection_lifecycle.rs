@@ -368,3 +368,79 @@ async fn a_call_on_an_exported_object_refreshes_the_slots() {
     view.dispose().await.unwrap();
     ctx.shutdown().await.unwrap();
 }
+
+// Experiment follow-up: a Node process that goes away withdraws the
+// services, so consumers stop by native gating, and errors say how it ended.
+struct Consumer {
+    stopped: Arc<Mutex<bool>>,
+    injects: [TypeKey; 1],
+}
+
+impl Plugin for Consumer {
+    fn name(&self) -> &str {
+        "consumer"
+    }
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        let stopped = self.stopped.clone();
+        Box::pin(async move {
+            ctx.effect(move || {
+                Effect::Disposer(Box::new(move || {
+                    *stopped.lock().unwrap() = true;
+                    Ok(())
+                }))
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_crashed_process_withdraws_its_services() {
+    let mut file = tempfile::Builder::new().suffix(".mjs").tempfile().unwrap();
+    file.write_all(
+        br#"
+export function apply(ctx) {
+  ctx.provide('counter', { current() { return 1 } })
+  ctx.provide('control', { cycle() { process.exit(17) } })
+}
+"#,
+    )
+    .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let shared = Shared::default();
+    let view = ctx.plugin(Mount {
+        plugin: file.path().to_owned(),
+        process: shared.clone(),
+    });
+    (&view).await.unwrap();
+    let stopped = Arc::new(Mutex::new(false));
+    let consumer = ctx.plugin(Consumer {
+        stopped: stopped.clone(),
+        injects: [TypeKey::of::<Counter>()],
+    });
+    (&consumer).await.unwrap();
+    let process = shared.lock().unwrap().clone().unwrap();
+
+    let error = process.call("control", "cycle", json!([])).unwrap_err();
+    assert!(
+        error.to_string().contains("exited with exit status: 17"),
+        "{error}"
+    );
+    settle().await;
+    assert!(ctx.get::<Counter>().is_none());
+    assert!(*stopped.lock().unwrap());
+    assert_eq!(
+        process.exit_status().as_deref(),
+        Some("exited with exit status: 17")
+    );
+    drop(process);
+    let disposed = view.dispose().await.unwrap_err();
+    assert!(
+        disposed.to_string().contains("exit status: 17"),
+        "{disposed}"
+    );
+    ctx.shutdown().await.unwrap();
+}

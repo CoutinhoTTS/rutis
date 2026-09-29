@@ -4,7 +4,8 @@
 //! `provide_mut_as`; a replacement goes through the returned `ServiceWriter`,
 //! so earlier `Arc` snapshots keep their original remote object. An
 //! unavailable slot withdraws the binding, which lets native dependency
-//! gating stop and restart consumers.
+//! gating stop and restart consumers. When the Node process goes away every
+//! slot becomes unavailable.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -113,10 +114,35 @@ impl Projection {
             for (name, slot) in state.slots.iter_mut() {
                 slot.handle = process.service(name);
             }
-            state.target = Some((ctx.clone(), process));
+            state.target = Some((ctx.clone(), process.clone()));
             state.runtime = Some(tokio::runtime::Handle::current());
         }
+        // A Node process that goes away leaves every slot unavailable: the
+        // services are withdrawn and native gating stops their consumers.
+        let connection = process.connection().clone();
+        let me = self.me.clone();
+        tokio::spawn(async move {
+            connection.closed().await;
+            if let Some(me) = me.upgrade() {
+                me.disconnected();
+            }
+        });
         self.publish().map_err(Into::into)
+    }
+
+    fn disconnected(&self) {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.target.is_none() {
+                return; // closed by disposal
+            }
+            for slot in state.slots.values_mut() {
+                slot.handle = None;
+            }
+        }
+        if let Err(error) = self.publish() {
+            eprintln!("rutis-interop: cannot withdraw Cordis services: {error}");
+        }
     }
 
     /// Stop following changes and drop the bindings' writers, which hold the

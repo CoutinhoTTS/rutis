@@ -110,6 +110,7 @@ store.set(&credentials::CredentialRef::from("app/api-key"), "s3cret").await?;
 - 直接 `ctx.set` 换值，rutis 侧在下一次调用该服务后才切换到新对象。
 - 同步方法不能在执行中等待需要 Node 事件循环推进的结果，这类等待返回 `SyncWaitCycle`。
 - 宿主提供的服务在 Cordis 侧是代理对象，`instanceof` 判断不成立。
+- 插件里未捕获的异常或未处理的 Promise 拒绝会结束整个 Node 进程（Node 的默认规则），同一挂载里的插件一起停止。此后挂载的服务全部撤销，依赖它们的 rutis 插件停止等待；调用返回的 `Error::Transport` 说明进程如何结束。需要恢复时由应用卸载并重新挂载。
 
 ## 5. 常见构建错误
 

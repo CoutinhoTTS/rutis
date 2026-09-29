@@ -33,6 +33,20 @@ cargo run --release -p interop-experiments --bin bench
 
 以上缺口都可以在兼容层补上，不需要改动 rutis 内核：监听连接断开后撤销投影的服务（使用方按原生规则回到等待），错误中带上退出码 / 信号；卸载超时后强制结束 Node 进程；同步调用可选超时。
 
+### 修复后（结论 1、3）
+
+连接断开后兼容层撤销所有投影的服务；错误和卸载结果带上进程的结束方式。重跑后：
+
+| 场景 | 调用错误 | 服务 / 使用方 |
+| --- | --- | --- |
+| 空闲时 SIGKILL | `Cordis process exited with signal: 9 (SIGKILL)` | 已撤销 / 停止等待（Pending） |
+| 同步调用中 `process.exit(17)` | `Cordis process exited with exit status: 17` | 同上 |
+| 异步调用等待中 SIGKILL | `… signal: 9 (SIGKILL)`，约 4 ms | 同上 |
+| 定时器异常 / 未处理拒绝 | `… exit status: 1` | 同上 |
+| `apply` 中退出 | 挂载 Failed：`… exit status: 3` | — |
+
+挂载插件本身仍为 Active，只是不再提供服务；应用卸载后重新挂载即恢复。回归测试：`crates/rutis-interop/tests/projection_lifecycle.rs::a_crashed_process_withdraws_its_services`、`process_exit.rs`。结论 5（卡住时没有超时）尚未处理。
+
 ## 2. 调用开销
 
 release 构建，每项预热后测量。
