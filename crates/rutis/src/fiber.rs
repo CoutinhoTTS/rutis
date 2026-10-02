@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ctx::{Ctx, Shared};
 use crate::diagnostics::ServiceAccess;
 use crate::effect::{Effect, EffectMeta, EffectRecord};
-use crate::error::{aggregate_arcs, panic_error, CordisError};
+use crate::error::{aggregate_arcs, panic_error, CordisError, ServiceReadFailure};
 use crate::event::{CatchUnwind, Event};
 use crate::key::{InstanceId, ScopeId, TypeKey};
 use crate::{BoxFuture, Plugin, PluginFactory};
@@ -489,6 +489,17 @@ impl FiberInner {
         (satisfied, missing)
     }
 
+    /// Whether this generation's strict reads include a declared
+    /// dependency found unavailable (removed, provider inactive, check
+    /// rejected). The access record is cleared when a generation loads.
+    fn read_a_lost_dependency(&self) -> bool {
+        self.accesses.lock().unwrap().iter().any(|access| {
+            access.strict
+                && matches!(access.failure, Some(ServiceReadFailure::Unavailable(_)))
+                && self.declared_injects.contains(&access.key)
+        })
+    }
+
     async fn refresh_deps(this: &Arc<Self>) {
         if this.closing.load(Ordering::SeqCst) || this.ctx.shared().closing.load(Ordering::SeqCst) {
             return;
@@ -615,6 +626,18 @@ impl FiberInner {
                     .collect();
                 for key in provided {
                     shared.registry.notify_key_changed(&key);
+                }
+            }
+            // apply 报告声明的依赖在门控之后、取用之前消失。证据是本代的
+            // 访问记录:确有一次对声明依赖的严格读取因"不可用"而失败(被摘除、
+            // 提供者失活、check 拒绝)——门控之后依赖确实失效过,哪怕此刻已
+            // 恢复。这一代视同被驱逐,回滚后回到 Pending(不进粘性 Failed);
+            // 已恢复则立即重查装载。没有这样的读取时不认这个理由,按普通
+            // 失败处理,避免装载循环。
+            Err(CordisError::InjectUnsatisfied(_)) if this.read_a_lost_dependency() => {
+                Self::unload(this, NextState::Pending).await;
+                if this.resolve_deps().1.is_empty() {
+                    this.post(Intent::RefreshDeps);
                 }
             }
             Err(e) => Self::fail_load(this, e).await,

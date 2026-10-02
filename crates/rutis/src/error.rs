@@ -113,6 +113,10 @@ pub enum CordisError {
     Closed,
     #[error("config validation failed: {issues:?}")]
     Validation { issues: Vec<String> },
+    /// A dependency is gone. Returned from `apply` after a strict read
+    /// (`require` / `require_as`) of a declared dependency found it
+    /// unavailable in the same load, it rolls the load back to Pending
+    /// instead of Failed; otherwise it is an ordinary load failure.
     #[error("dependency unsatisfied: {0:?}")]
     InjectUnsatisfied(Vec<String>),
     /// 同一 (key, scope) 重复注册(实现新增变体,见 §八 实现记录)。
