@@ -1284,3 +1284,88 @@ async fn consumer_outside_closed_subtree_can_reload_from_new_provider() {
     assert_eq!(external.state().state, FiberState::Active);
     root.shutdown().await.unwrap();
 }
+
+/// Waits for its owner's cancellation, then records that it returned.
+struct AwaitOwnerCancellation {
+    owner: Ctx,
+    entered: Arc<Semaphore>,
+    returned: Arc<AtomicUsize>,
+}
+impl Listener<Ping> for AwaitOwnerCancellation {
+    fn call<'a>(
+        &'a self,
+        _sender: &'a Ctx,
+        _event: &'a Ping,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        Box::pin(async move {
+            self.entered.add_permits(1);
+            self.owner.cancelled().await;
+            self.returned.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        })
+    }
+}
+
+/// A descendant's listener is running for an `ancestor` instance event and
+/// only returns once its owner is cancelled. Returns how often it returned.
+async fn start_owner_waiting_callback(ancestor: &Ctx, owner: &Ctx) -> Arc<AtomicUsize> {
+    let entered = Arc::new(Semaphore::new(0));
+    let returned = Arc::new(AtomicUsize::new(0));
+    let key = rutis::EventKey::<Ping>::of().instance(ancestor.instance());
+    owner
+        .events()
+        .on(
+            owner,
+            &key,
+            AwaitOwnerCancellation {
+                owner: owner.clone(),
+                entered: entered.clone(),
+                returned: returned.clone(),
+            },
+        )
+        .unwrap();
+    ancestor
+        .events()
+        .emit(ancestor, &key, Arc::new(Ping(1)))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+        .await
+        .expect("callback entered")
+        .unwrap()
+        .forget();
+    returned
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_shutdown_cancels_descendants_before_draining_instance_events() {
+    let root = Ctx::root().unwrap();
+    let (_owner_view, owner) = child(&root).await;
+    let returned = start_owner_waiting_callback(&root, &owner).await;
+
+    // A waiter dropped by its timeout does not stop the shutdown.
+    let _ = tokio::time::timeout(Duration::from_millis(1), root.shutdown()).await;
+    tokio::time::timeout(Duration::from_secs(5), root.shutdown())
+        .await
+        .expect("root shutdown finishes without a separate child shutdown")
+        .unwrap();
+    assert!(owner.cancellation_token().is_cancelled());
+    // Completion waited for the accepted callback.
+    assert_eq!(returned.load(Ordering::SeqCst), 1);
+    // A repeated shutdown joins the same result.
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subtree_shutdown_cancels_descendants_before_draining_instance_events() {
+    let root = Ctx::root().unwrap();
+    let (ancestor_view, ancestor) = child(&root).await;
+    let (_owner_view, owner) = child(&ancestor).await;
+    let returned = start_owner_waiting_callback(&ancestor, &owner).await;
+
+    tokio::time::timeout(Duration::from_secs(5), ancestor_view.shutdown())
+        .await
+        .expect("subtree shutdown finishes")
+        .unwrap();
+    assert_eq!(returned.load(Ordering::SeqCst), 1);
+    root.shutdown().await.unwrap();
+}
