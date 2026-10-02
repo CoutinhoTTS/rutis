@@ -1,0 +1,19 @@
+[package]
+name = "rutis-dev"
+description = "Development channel for a running rutis host: describe, watch, load and swap plugins over a local socket"
+edition.workspace = true
+version = "0.1.0"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+rutis = { path = "../rutis", version = "0.6.0" }
+rutis-loader = { path = "../rutis-loader", version = "0.1.0" }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { workspace = true, features = ["io-util", "net", "macros", "rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
