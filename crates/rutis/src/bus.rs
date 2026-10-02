@@ -120,6 +120,7 @@ impl<C> std::ops::Deref for Hook<C> {
 
 /// Which public dispatch operation produced an observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DispatchMode {
     Emit,
     Serial,
@@ -131,6 +132,7 @@ pub enum DispatchMode {
 
 /// A dispatch before its business listener snapshot is selected. An observed
 /// instance attempt can still lose a race with subtree shutdown and be rejected.
+#[non_exhaustive]
 pub struct DispatchAttempt<'a> {
     pub key: &'a TypeKey,
     pub mode: DispatchMode,

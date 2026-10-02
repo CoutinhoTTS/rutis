@@ -29,6 +29,7 @@ pub enum EffectPhase {
 /// Read-only cleanup ownership tree. Child phases follow their owning record;
 /// the tree does not track which individual leaf is currently executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EffectMeta {
     pub label: String,
     pub phase: EffectPhase,

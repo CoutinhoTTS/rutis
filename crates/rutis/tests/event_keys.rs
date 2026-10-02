@@ -472,10 +472,7 @@ async fn keyed_prepend_runs_first() {
             &ctx,
             &rutis::EventKey::dynamic("prep"),
             Named("front", order.clone(), done.clone()),
-            rutis::EventOptions {
-                prepend: true,
-                ..Default::default()
-            },
+            rutis::EventOptions::default().prepend(true),
         )
         .unwrap();
 

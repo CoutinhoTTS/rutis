@@ -1083,10 +1083,7 @@ async fn prepend_order() {
             &ctx,
             &rutis::EventKey::of(),
             Named("prepended", ord.clone()),
-            rutis::EventOptions {
-                prepend: true,
-                ..Default::default()
-            },
+            rutis::EventOptions::default().prepend(true),
         )
         .unwrap();
     ctx.events()

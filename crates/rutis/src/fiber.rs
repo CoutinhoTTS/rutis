@@ -48,6 +48,7 @@ pub struct PluginId(pub u64);
 /// `dispose()` 会 join 同一任务。同步代码若不让出执行权，Tokio 无法
 /// 强制中断，deadline 也无法在该 runtime 线程上及时触发。
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DisposeWaitError {
     #[error("fiber {plugin_id:?} generation {generation} still {state:?} after {elapsed:?}")]
     TimedOut {
@@ -63,6 +64,7 @@ pub enum DisposeWaitError {
 /// fiber 状态迁移事件(D24:锁内 FIFO 入队、锁外分发;
 /// `seq` 保证提交顺序可识别,不保证 listener 完成顺序)。
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FiberStatusChanged {
     pub plugin_id: PluginId,
     pub seq: u64,
