@@ -244,7 +244,8 @@ ctx.effect(move || {
 定义事件类型时，实现 `Event`，指定用于诊断的名称和处理结果类型。处理逻辑通过 `Listener` 实现。下面以携带文档名称的 `DocumentIndexed` 为例：
 
 ```rust
-use rutis::{BoxFuture, CordisError, Ctx, Event, Listener};
+use std::sync::Arc;
+use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Listener};
 
 struct DocumentIndexed(String);
 
@@ -265,11 +266,18 @@ impl Listener<DocumentIndexed> for Progress {
         })
     }
 }
+
+fn index(ctx: &Ctx, path: String) -> Result<(), CordisError> {
+    let key = EventKey::<DocumentIndexed>::of();
+    ctx.events().on(ctx, &key, Progress)?;
+    ctx.events().emit(ctx, &key, Arc::new(DocumentIndexed(path)))?;
+    Ok(())
+}
 ```
 
-在这个例子中，`ctx.events().on(ctx, Progress)` 注册监听器，`ctx.events().emit(ctx, Arc::new(event))` 提交事件。
+在这个例子中，`EventKey::<DocumentIndexed>::of()` 是这类事件的通道，`on` 在该通道上注册监听器，`emit` 向该通道提交事件；两者都返回 `Result`，失败时（例如上下文已经关闭）不会注册或投递。
 
-事件按类型和通道匹配，`NAME` 用于诊断。监听器属于注册时传入的 `Ctx`；回调收到的 `Ctx` 来自发送方。回调需要创建属于监听插件的资源时，应捕获注册方的 `Ctx`。可运行代码见 [上下文归属示例](../crates/rutis/examples/listener_ctx_ownership.rs)。
+事件按类型和通道匹配，`NAME` 用于诊断。同一事件类型可以用 `EventKey::named("…")`（运行时生成的名称用 `EventKey::dynamic`）划分多个通道。监听器属于注册时传入的 `Ctx`；回调收到的 `Ctx` 来自发送方。回调需要创建属于监听插件的资源时，应捕获注册方的 `Ctx`。可运行代码见 [上下文归属示例](../crates/rutis/examples/listener_ctx_ownership.rs)。
 
 ### 选择分发方式
 
@@ -316,20 +324,18 @@ Indexer 将传入的键用于 `injects` 和 `get_as`。该服务的访问范围�
 工作区 ID 也作为参数传给 Progress 和 Indexer。它们使用自己的上下文，以及同一个工作区 ID：
 
 ```rust,ignore
+let key = EventKey::<DocumentIndexed>::of().instance(workspace);
+
 // 在 Progress 子插件中注册。
-progress_ctx.events().on_instance::<DocumentIndexed>(
-    progress_ctx, workspace, Progress,
-)?;
+progress_ctx.events().on(progress_ctx, &key, Progress)?;
 
 // 在 Indexer 子插件中发送。
-indexer_ctx.events().emit_instance(
-    indexer_ctx, workspace, Arc::new(DocumentIndexed(path)),
-)?;
+indexer_ctx.events().emit(indexer_ctx, &key, Arc::new(DocumentIndexed(path)))?;
 ```
 
 实例通道允许对应工作区及其子插件注册和发送事件。关闭相关子树时，框架等待已经接纳的实例事件处理完成，再完成资源清理。回调中产生的额外后台任务，按前面的任务管理方式登记。
 
-普通事件用于 root 内共享通知，`on_keyed/emit_keyed` 用名称区分通道，实例事件用于子树内通知。三类通道分别匹配；isolate 的服务作用域独立于事件通道。当前实例事件支持 emit、parallel 和 serial。
+普通事件用于 root 内共享通知，命名通道（`EventKey::named`）用名称区分通道，实例事件用于子树内通知。三类通道分别匹配；`.instance(id)` 也可以加在命名通道上。isolate 的服务作用域独立于事件通道。当前实例事件支持 emit、parallel 和 serial。旧的 `on_instance` / `emit_instance` / `on_keyed` / `emit_keyed` 自 0.5.0 起弃用，新代码统一使用 `EventKey`。
 
 关闭操作由宿主协调。实例回调若需要关闭工作区，可向宿主发送请求并返回，由宿主等待关闭完成。这样，关闭过程可以正常等待当前回调结束。
 
