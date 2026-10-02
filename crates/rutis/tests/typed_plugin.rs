@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey, Typed, TypedPlugin,
+    BoxFuture, CordisError, Ctx, Deps, Effect, FiberState, FiberView, Plugin, TypeKey, Typed,
+    TypedPlugin,
 };
 
 #[derive(Debug)]
@@ -188,4 +189,88 @@ async fn typed_and_untyped_plugins_depend_on_each_other() {
     provider.dispose().await.unwrap();
     reach(&untyped, FiberState::Pending).await;
     reach(&typed, FiberState::Pending).await;
+}
+
+/// Loads once its `Llm` is ready; the first generation waits in `apply`
+/// until the dependency is withdrawn, then reads it as a typed plugin does.
+struct LosesItsDependency {
+    generations: Arc<std::sync::atomic::AtomicUsize>,
+    seen: Seen,
+    injects: Vec<TypeKey>,
+}
+
+impl Plugin for LosesItsDependency {
+    fn name(&self) -> &str {
+        "loses-its-dependency"
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let generation = self
+                .generations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if generation == 0 {
+                // Withdrawing the provider cancels this generation.
+                ctx.cancelled().await;
+            }
+            let (llm,) = <(Arc<Llm>,) as Deps>::resolve(ctx)?;
+            self.seen.lock().unwrap().push((llm.0, false));
+            Ok(Effect::Done)
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_dependency_lost_before_it_is_read_returns_the_plugin_to_pending() {
+    let ctx = Ctx::root().unwrap();
+    let first = ctx.provide(Llm(1)).unwrap();
+    let seen = Seen::default();
+    let view = ctx.plugin(LosesItsDependency {
+        generations: Default::default(),
+        seen: seen.clone(),
+        injects: vec![TypeKey::of::<Llm>()],
+    });
+    reach(&view, FiberState::Loading).await;
+
+    // The gate was open; the dependency goes before apply reads it.
+    soon(first.dispose()).await.unwrap();
+    reach(&view, FiberState::Pending).await;
+    assert!(view.state().error.is_none());
+    assert!(seen.lock().unwrap().is_empty());
+
+    // It loads again when the dependency comes back.
+    ctx.provide(Llm(2)).unwrap();
+    reach(&view, FiberState::Active).await;
+    assert_eq!(*seen.lock().unwrap(), [(2, false)]);
+}
+
+/// Claims a lost dependency while every dependency is present.
+struct FalseClaim(Vec<TypeKey>);
+
+impl Plugin for FalseClaim {
+    fn name(&self) -> &str {
+        "false-claim"
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        &self.0
+    }
+
+    fn apply<'a>(&'a self, _: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async { Err(CordisError::InjectUnsatisfied(vec!["Llm".into()])) })
+    }
+}
+
+#[tokio::test]
+async fn the_claim_is_a_plain_failure_while_dependencies_are_present() {
+    let ctx = Ctx::root().unwrap();
+    ctx.provide(Llm(1)).unwrap();
+    let view = ctx.plugin(FalseClaim(vec![TypeKey::of::<Llm>()]));
+    let error = soon(&view).await.expect_err("fails instead of looping");
+    assert!(matches!(*error, CordisError::InjectUnsatisfied(_)));
+    assert_eq!(view.state().state, FiberState::Failed);
 }

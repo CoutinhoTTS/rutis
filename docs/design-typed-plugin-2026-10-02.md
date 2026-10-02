@@ -1,6 +1,6 @@
 # TypedPlugin：类型化依赖（草案）
 
-状态：草案，第一版已实现（#50）。日期：2026-10-02。
+状态：草案，第一版已实现（#50）。挂载方式与依赖丢失处理已定（见文末）。日期：2026-10-02。
 
 ## 目标
 
@@ -44,7 +44,7 @@ ctx.plugin(Typed::new(MyPlugin));
 
 | 写法 | 门控 | 读取 |
 |---|---|---|
-| `Arc<T>` | 是 | `ctx.require::<T>()`（门控已开，正常必有；失败即装载失败） |
+| `Arc<T>` | 是 | `ctx.require::<T>()`；门控之后被撤掉则回到 Pending（见文末） |
 | `Option<Arc<T>>` | 否 | `ctx.get::<T>()`；出现或消失不触发重载，与现在"不声明、apply 里 get"一致 |
 | `()`、至多 8 元组 | 各成员之和 | 依次读取，首个错误返回 |
 
@@ -67,10 +67,15 @@ issue 要求一并设计，第一版先不做，等形状定下来再补：
 - **配置热更新**：`PluginFactory` 构造的插件能否是 typed（`build` 返回 `Typed<P>` 即可），需补测试。
 - **诊断**：可选依赖经 `get` 读取，在诊断里记为"未声明的访问"；是否标注为 optional 待定。
 
-## 待讨论
+## 已定
 
-1. 包装方式：`Typed::new(p)` 显式包装，还是 `ctx.plugin_typed(p)`。前者不增加 `Ctx` 方法，
-   当前采用。不能用 blanket `impl<P: TypedPlugin> Plugin for P`：`injects()` 要返回借用切片，
-   需要实例里存一份。
-2. 必需依赖读取失败时（门控通过到 `apply` 之间被驱逐）当前返回错误、fiber 进 Failed；
-   该窗口内驱逐本身也会触发卸载重载，是否应改为回到 Pending。
+1. **包装方式**：`ctx.plugin(Typed::new(p))` 显式包装，不给 `Ctx` 加方法。不用 blanket
+   `impl<P: TypedPlugin> Plugin for P`：`injects()` 返回借用切片，需要实例里存一份。
+2. **门控通过后、取用前依赖消失**：回到 Pending，不进 Failed。
+   - typed 读取遇到 `Unavailable` 时返回 `CordisError::InjectUnsatisfied`（该变体此前未被使用）。
+   - 内核规则：apply 返回 `InjectUnsatisfied` 且此刻确有依赖缺失 → 这一代回滚（清理照常
+     LIFO 排干，清理错误进 ErrorSink）并回到 Pending；依赖回来时照常装载。
+   - 依赖其实齐全时不认这个理由，按普通失败进 Failed，避免装载循环。
+   - 非 typed 插件也可以主动返回这个错误得到同样效果。
+   - 与 Cordis 的差异：Cordis 在此窗口内 apply 抛错会进 FAILED（依赖回来时重试）；
+     rutis 只对这个明确的错误变体放宽，其它错误仍是粘性 Failed。

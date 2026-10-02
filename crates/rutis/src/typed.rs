@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use crate::ctx::Ctx;
-use crate::error::CordisError;
+use crate::error::{CordisError, ServiceReadFailure};
 use crate::key::TypeKey;
 use crate::plugin::Plugin;
 use crate::{BoxFuture, Effect};
@@ -22,6 +22,7 @@ use crate::{BoxFuture, Effect};
 /// A set of dependencies read from a context.
 ///
 /// - `Arc<T>`: required; gates the plugin and is read with [`Ctx::require`].
+///   If it is gone by the time `apply` runs, the load returns to Pending.
 /// - `Option<Arc<T>>`: optional; does not gate, read with [`Ctx::get`].
 /// - `()` and tuples of up to eight of these.
 pub trait Deps: Sized + Send + 'static {
@@ -38,7 +39,13 @@ impl<T: Send + Sync + 'static> Deps for Arc<T> {
     }
 
     fn resolve(ctx: &Ctx) -> Result<Self, CordisError> {
-        Ok(ctx.require::<T>()?)
+        ctx.require::<T>().map_err(|error| match error.reason {
+            // Gone since the gate opened: the load goes back to Pending.
+            ServiceReadFailure::Unavailable(_) => {
+                CordisError::InjectUnsatisfied(vec![format!("{:?}", error.key)])
+            }
+            _ => error.into(),
+        })
     }
 }
 

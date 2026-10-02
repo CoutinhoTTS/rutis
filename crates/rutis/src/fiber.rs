@@ -617,6 +617,12 @@ impl FiberInner {
                     shared.registry.notify_key_changed(&key);
                 }
             }
+            // apply 报告声明的依赖在门控之后、取用之前消失:这一代视同被驱逐,
+            // 回滚后回到 Pending,依赖回来时照常装载(不进粘性 Failed)。依赖
+            // 仍齐全时不认这个理由,按普通失败处理,避免装载循环。
+            Err(CordisError::InjectUnsatisfied(_)) if !this.resolve_deps().1.is_empty() => {
+                Self::unload(this, NextState::Pending).await;
+            }
             Err(e) => Self::fail_load(this, e).await,
         }
         this.flush_status();
