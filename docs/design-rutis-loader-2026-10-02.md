@@ -183,7 +183,7 @@ impl Loader {
     fn evaluated(&self, id: &str) -> Option<Result<Value, LoaderError>>; // 当前生效的求值后配置，只读（§十一之二）
 
     // 改（= 改可编辑层 + reconcile + persist；任一步失败返回 Err，什么都不变）
-    async fn create(&self, opts: NewEntry, parent: Option<&str>, position: Option<usize>) -> Result<(String, Option<FiberView>), LoaderError>;
+    async fn create(&self, opts: NewEntry, parent: Option<&str>, position: Option<usize>) -> Result<(String, Option<FiberView>), LoaderError>; // 等到稳定才返回，§八
     async fn update(&self, id: &str, config: Value) -> Result<(), LoaderError>;
     async fn rename_module(&self, id: &str, name: &str) -> Result<(), LoaderError>; // 换 name，见 §五
     async fn set_disabled(&self, id: &str, disabled: bool) -> Result<(), LoaderError>;
@@ -193,6 +193,10 @@ impl Loader {
     // 运行态操作（不改期望状态，不持久化）
     async fn reload(&self, id: &str) -> Result<(), LoaderError>; // 重新 resolve（dylib 升级）
     async fn restart(&self, id: &str) -> Result<(), LoaderError>;
+
+    // 持久化（§八 待保存队列）
+    async fn flush(&self) -> Result<(), LoaderError>;  // 重试保存队列里还没存下的修改
+    fn pending(&self) -> Vec<Edit>;
 
     // 等
     async fn settled(&self);   // 所有 resolve 和 fiber 转换都落地（对应 cordis tree.await()）
@@ -222,7 +226,8 @@ pub struct EntryInfo {
 | dry-run 通过、新实例 apply 失败 | 回滚：恢复旧可编辑层并 reconcile，旧配置重新装载；返回 `ApplyFailed`；不持久化（§八） |
 | 回滚时旧配置也装不起来 | 返回 `RollbackFailed { apply, rollback }`；可编辑层和存储都是旧内容，该行状态 `Failed`，与存储一致 |
 | 存储里的版本已被别人改过 | 按最新内容重做本次操作，有限次重试后仍冲突则返回 `Conflict`（§八） |
-| 持久化失败（非冲突） | 返回 Err；运行态和内存里的可编辑层已改。下一次成功持久化时一并写出 |
+| 持久化失败（非冲突） | 返回 `PersistFailed`；运行态和内存里的可编辑层已改，这次修改留在**待保存队列**里，下次保存或 `flush()` 时整队写出（§八） |
+| 冲突重放时，队列里较早的修改已不适用 | 从队列移除，发 `PendingEditDropped { edit, error }` 事件；本次修改照常继续（§八） |
 | 宿主关闭 | 所有操作返回 `Closed`，不再持久化 |
 
 ## 八、期望状态、可编辑层与持久化
@@ -233,7 +238,7 @@ pub struct EntryInfo {
 
 1. 用 `apply_patches`（§十一之一）把各层按顺序合成期望树，同时收集警告（patch 找不到目标等）；
 2. 和当前运行态按 id 对比：新增 → spawn；消失 → dispose；只改 `config` → update；改 `name` → §五；改 `isolate` / `inject` / 父分组 → 重建；`disabled` 变化 → dispose 或 spawn；
-3. 等树稳定，返回 `ReconcileReport { warnings, new_failures }`。`new_failures` 只算**这次新出现**的失败行，原本就坏着的行不算（与 dsh 的 `reconcileProfilePatches` 一致）。
+3. 等树稳定，返回 `ReconcileReport { warnings, new_failures }`。**稳定**指没有 fiber 处在转换中（Loading / Unloading）：`Active`、`Pending`（依赖未就绪）、`Failed`、`Unresolved` 都算稳定，所以依赖没到位的插件不会让调用方一直等下去。`new_failures` 只算**这次新出现**的失败行，原本就坏着的行不算（与 dsh 的 `reconcileProfilePatches` 一致）。
 
 外部数据变了（比如 dsh 的文件被改），应用就带着新的层再调一次 `reconcile`。这一步只负责应用和报告，**不回滚**：外部改动的来源是应用，回不回滚由应用决定。
 
@@ -241,13 +246,15 @@ pub struct EntryInfo {
 
 ### 命令式修改
 
-所有命令式修改都是同一个流程：
+所有命令式修改（包括 `create`）都是同一个流程，**等到稳定才返回**：
 
 1. 检查归属和覆盖（见下文）；
 2. 算出可编辑层的新内容；
 3. dry-run（resolve + `validate_config` + `build` + 实例 `validate`），不过就返回 Err；
 4. 用新层 reconcile；**出现新失败行 → 恢复旧层、再 reconcile 一次，返回 `ApplyFailed`**；
-5. 成功后调 `Persist::save`，带上本次的 `Edit` 和期望的版本号（见"持久化钩子"）；版本冲突时按最新内容重做（见"多写者"）。
+5. 把本次 `Edit` 加进待保存队列，调 `Persist::save` 把整个队列写出（见"持久化钩子""待保存队列""多写者"）。
+
+`create` 也不例外：dry-run 通过但 apply 失败 → 回滚（把刚插入的行从可编辑层去掉、再 reconcile），返回 `ApplyFailed`，不持久化；依赖没就绪 → 新行停在 `Pending`，算成功，正常持久化并返回 `(id, view)`。
 
 先 reconcile 后持久化，所以存下来的永远是跑通过的状态，不需要回滚存储。
 
@@ -282,9 +289,10 @@ pub trait Persist: Send + Sync + 'static {
     /// 读存储里这一层的最新内容和版本号（冲突后重做时用）。
     fn load<'a>(&'a self, layer: &'a str) -> BoxFuture<'a, Result<(Vec<Patch>, Version), LoaderError>>;
     /// 只有存储当前版本等于 `expected` 时才写入，返回新版本；否则返回 `Conflict`。
-    /// `edit` 是本次操作的语义描述，实现可以用它做局部修改（比如保留文件注释）；
-    /// `patches` 是修改后整层的内容，两者一致。
-    fn save<'a>(&'a self, layer: &'a str, expected: &'a Version, edit: &'a Edit, patches: &'a [Patch])
+    /// `edits` 是待保存队列（自 `expected` 那个版本以来、按顺序的全部修改），
+    /// 实现可以用它做局部修改（比如保留文件注释）；`patches` 是整层的最终内容。
+    /// 契约：把 `edits` 依次作用在版本 `expected` 的内容上，结果必须等于 `patches`。
+    fn save<'a>(&'a self, layer: &'a str, expected: &'a Version, edits: &'a [Edit], patches: &'a [Patch])
         -> BoxFuture<'a, Result<Version, PersistError>>;
 }
 
@@ -293,8 +301,18 @@ pub enum Edit { /* … */ }
 ```
 
 - loader 保证同一进程内 `save` 调用串行、按提交顺序；
+- 实现做局部修改时，要自己核对"局部修改的结果 == `patches`"，不一致就退回整层重写（可能丢掉注释），并打警告。宁可丢格式，也不能丢修改；
 - 自带 `NoPersist`（什么都不存，版本号恒定）；
 - 存成文件、写数据库还是发到远端，由应用实现。
+
+### 待保存队列
+
+loader 在内存里维护一个**待保存队列**：自上次成功保存以来、已经生效（reconcile 通过）但还没存下的 `Edit`，按顺序排列。
+
+- 每次命令式修改成功后加进队尾，然后调 `save(expected = 上次成功保存的版本, edits = 整个队列, patches = 当前可编辑层)`；
+- `save` 成功 → 记下新版本，**清空队列**；
+- `save` 非冲突失败 → 队列原样保留，本次返回 `PersistFailed`；下一次修改或 `flush()` 会把整队一起写出；
+- 队列只在内存里，进程退出就没了。所以 `PersistFailed` 必须报告给调用方（UI 应提示"未保存"），应用也可以定期调 `flush()` 重试。
 
 ### 多写者
 
@@ -303,9 +321,14 @@ pub enum Edit { /* … */ }
 所以用**版本号比较（CAS）**：
 
 1. `save` 发现存储版本不是自己期望的 → 返回 `Conflict`；
-2. loader 用 `Persist::load` 读最新内容，先用它 reconcile（把别人的修改装进来）；
-3. 在最新内容上**重做同一个 `Edit`**（操作是语义化的，比如"把 X 的 config 改成 Y"，所以可以重做），重新走第 1–5 步；
-4. 有限次（默认 3 次）后仍冲突 → 返回 `Conflict`。重做时如果归属、覆盖检查不再通过（比如别人删了这一行），就返回对应的错误。
+2. loader 用 `Persist::load` 读最新内容和版本，作为新的起点；
+3. 在最新内容上**按顺序重放整个待保存队列**（操作是语义化的，比如"把 X 的 config 改成 Y"，所以可以重放）。每一项都重新走命令式修改的第 1–4 步（归属、覆盖检查，dry-run，reconcile，失败回滚）：
+   - 较早的项重放失败（比如别人删了那一行）→ 从队列移除，发 `PendingEditDropped { edit, error }` 事件，继续重放后面的；
+   - 本次的项重放失败 → 从队列移除，本次返回它的错误；
+4. 用新版本作为 `expected`，再 `save` 剩下的整个队列；
+5. 有限次（默认 3 次）后仍冲突 → 返回 `Conflict`，队列保留，下次修改或 `flush()` 再试。
+
+例子：本进程改 A，保存失败（队列：A）→ 另一进程提交了 C → 本进程改 B，保存冲突 → 读到含 C 的最新内容，依次重放 A、B → 一次写出 → 存储里 A、B、C 都在，队列清空。
 
 版本号也让应用的文件监视分得清"别人改的"和"我自己刚写的"：版本等于自己刚写的版本时，不用再 reconcile。
 
@@ -431,7 +454,7 @@ pub trait Expressions: Send + Sync + 'static {
 - 实现 `Persist`，只写用户层文件：
   - 版本号 = 文件内容哈希；
   - `save` 在 profile 的**跨进程文件锁**（dsh 用的是 `withFileLock`）里做"读当前文件 → 比较版本 → 写"，不一致就返回 `Conflict`。锁只保证这一步原子，防止丢失修改靠的是版本比较（§八 多写者）；
-  - 按 `Edit` 在 YAML 文档上做局部修改，**保留用户的注释和格式**（dsh-config-editor 用的是 `yaml` 库的 `parseDocument`）；
+  - 把 `edits` 依次作用在 YAML 文档上做局部修改，**保留用户的注释和格式**（dsh-config-editor 用的是 `yaml` 库的 `parseDocument`）；写之前解析一遍结果，与 `patches` 比对，不一致就整层重写并打警告；
   - 临时文件 + rename 原子替换。
 
 ### 热重载
@@ -532,7 +555,11 @@ pub trait Expressions: Send + Sync + 'static {
 - 回滚：修改导致新失败行 → 可编辑层恢复、运行态回到旧配置、返回 Err；
 - reconcile：增、删、改 config、改 name、改父分组各走对应路径；已经坏着的行不算新失败；
 - 没有可编辑层时命令式修改 → `NoEditableLayer`；
-- 持久化：`save` 按提交顺序、串行调用；`save` 失败 → Err，下次成功时写出最新内容；
+- 持久化：`save` 按提交顺序、串行调用；`save` 失败 → `PersistFailed`、修改留在队列；下次修改或 `flush()` 整队写出后队列清空；
+- 待保存队列 + 冲突：修改 A 保存失败 → 另一写者提交 C → 修改 B 触发冲突 → 最终存储里 A、B、C 都在、队列清空；
+- 重放丢弃：队列里的 A 在重放时已不适用（目标行被另一写者删掉）→ A 被移除并发 `PendingEditDropped`，B 正常保存；
+- `save` 契约：模拟一个只做局部修改的存储，局部结果与 `patches` 不一致 → 退回整层重写并告警；
+- create 等待：dry-run 通过、apply 失败 → `ApplyFailed`，新行不在可编辑层、未持久化；依赖未就绪 → 返回成功、行为 `Pending`、已持久化；
 - 重启一致性：对每种命令式操作（create、update、set_disabled、改 isolate/inject、rename、move、remove），用存下来的层在新 loader 里 reconcile，得到的期望树与修改后的完全一致；
 - 归属：下层的行 rename → `NotOwned`；在下层分组里 create 带 `position` → `Unsupported`、不带则追加到末尾；
 - 多写者：两个 loader 共用一个模拟存储，从同一版本出发各改不同的行 → 两处修改都保留；改同一行 → 后者在最新内容上重做；持续冲突 → `Conflict`；
@@ -566,7 +593,7 @@ pub trait Expressions: Send + Sync + 'static {
 ## 十八、已定事项
 
 1. **名字不加前缀，名字本身就是身份。** `Builtins` 可以用任意名字注册，包括 npm 包名（比如用 Rust 重写的插件直接注册成 `@deepseek-ai/dsh-llm`）。解析顺序：先查 Builtins 精确匹配，再按 `dylib:` 之类的显式前缀分发，最后（P6）把 npm 包名交给 interop。理由：dsh 的配置和 patch 都按 name 定位行（patch 会校验 name 是否匹配），迁移时名字必须保持不变；用 Rust 替换某个 JS 插件，应该只换实现，不改配置。
-2. **`create` 先校验，再提交，不等启动。** 解析失败或配置 dry-run 失败 → 返回 Err，什么都不改（与 update 同一规则）；通过后进可编辑层、reconcile、持久化，返回 `(id, FiberView)`。apply 是异步的，不在这里等；调用方要等就 `.await` view 或 `settled()`。`reconcile` 例外：期望树里起不来的行保留，状态是 `Unresolved` / `Failed`，不删用户的配置。
+2. **`create` 和其它命令式修改一样，等到稳定才返回。** 没有特例：校验失败 → 什么都不改；apply 失败 → 回滚、`ApplyFailed`、不持久化；依赖未就绪 → 停在 `Pending` 也算稳定，返回成功并持久化。（早先"create 不等启动"的写法与回滚语义矛盾，已删除。）`reconcile` 的行为不同：它把外部给的层原样应用，期望树里起不来的行保留，状态是 `Unresolved` / `Failed`，不删用户的配置，也不回滚。
 3. **写入**：loader 保证进程内 `Persist::save` 串行、按顺序；多进程之间靠版本号比较 + 重做操作防止丢失修改（§八 多写者）。文件锁、原子替换是文件的事，在 rutis-dsh（§十二）。
 4. **被覆盖字段的修改**：照 dsh-config-editor 的做法，写进可编辑层；上层覆盖则拒绝；失败则回滚，详见 §八。
 5. **`!!js` 要支持**：rutis-loader 提供表达式钩子，JS 子集求值器放在 rutis-dsh，详见 §十一之二、§十二。原先"一直不求值"的想法不可行。
