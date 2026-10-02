@@ -152,6 +152,7 @@ impl Inner {
                         group: true,
                         name,
                         injects: Vec::new(),
+                        factory_name: String::new(),
                         resolved: None,
                         config: Value::Null,
                         scope,
@@ -208,6 +209,7 @@ impl Inner {
                     group: false,
                     name,
                     injects,
+                    factory_name: resolved.factory.name().to_owned(),
                     resolved: Some(resolved),
                     config,
                     scope,
@@ -345,7 +347,8 @@ impl Inner {
                     let name = row.name.clone().unwrap_or_default();
                     match state.resolved.get(&name) {
                         Some(Ok(resolved))
-                            if combined_injects(resolved, &row.scope) == running.injects => {}
+                            if combined_injects(resolved, &row.scope) == running.injects
+                                && resolved.factory.name() == running.factory_name => {}
                         _ => continue,
                     }
                 }

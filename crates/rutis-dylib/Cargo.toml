@@ -21,6 +21,15 @@ semver = "1"
 libc = "0.2"
 thiserror = { workspace = true }
 tempfile = "3"
+rutis-loader = { path = "../rutis-loader", version = "0.1.0", optional = true }
+
+[features]
+# DylibResolver: dylib plugins as rutis-loader rows (`dylib:<dir>`).
+loader = ["dep:rutis-loader"]
 
 [dev-dependencies]
 tokio = { workspace = true }
+
+[[example]]
+name = "loader_host"
+required-features = ["loader"]

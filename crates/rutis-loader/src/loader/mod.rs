@@ -233,6 +233,8 @@ struct Running {
     group: bool,
     name: String,
     injects: Vec<TypeKey>,
+    /// The module factory's name: its identity. A new one means respawning.
+    factory_name: String,
     resolved: Option<Arc<Resolved>>,
     /// The evaluated config the kernel holds.
     config: Value,

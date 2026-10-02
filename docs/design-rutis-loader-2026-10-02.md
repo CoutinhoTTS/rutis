@@ -1,6 +1,6 @@
 # rutis-loader：插件管理层（设计稿）
 
-状态：P1、P2 已实现（rutis-loader、rutis-dsh 的 `profile` 模块），P3 起见各自 PR。日期：2026-10-02。
+状态：P1、P2、P3 已实现（rutis-loader、rutis-dsh 的 `profile` 模块、rutis-dylib 的 `DylibResolver`），P4 起见各自 PR。日期：2026-10-02。
 对照对象：dsh vendored 的 `@deepseek-ai/cordis-plugin-loader` 1.0.5（`src/config/{entry,tree,group}.ts`、`src/index.ts`）、`cordis-plugin-include` 1.0.9、`dsh-app-boot`、`dsh-config-editor`。
 
 ## 一、要解决什么
@@ -142,7 +142,7 @@ struct EntryConfig {
 
 两种情况都继承 `update` 的全部保证：dry-run 不过就不动，PluginId 不变，下游依赖照常驱逐重载。
 
-**例外**：依赖声明（`injects`）在 spawn 时就固定了（内核 D32f）。新模块的 `injects` 和旧的不一样时，只能 dispose 旧 fiber 再 spawn 新的，PluginId 也会变。loader 自动判断走哪条路。
+**例外**：依赖声明（`injects`）在 spawn 时就固定了（内核 D32f）。新模块的 `injects` 和旧的不一样时，只能 dispose 旧 fiber 再 spawn 新的，PluginId 也会变。模块工厂的名字（插件身份）变了同样重建，与 rutis-dylib `swap` 拒绝换身份一致。loader 自动判断走哪条路。
 
 ## 六、分组
 
@@ -543,7 +543,7 @@ pub trait Expressions: Send + Sync + 'static {
    - rutis-dsh：dsh 分层、YAML 读写与 `Persist` 实现、文件锁、热重载、嵌套 include、JS 子集求值器；
    - 内核小补，各自独立 PR：`impl Plugin for Box<dyn Plugin>`、按 `PluginId` 取 `FiberView`、服务绑定变化事件；
    - interop 生成的 `Config` 加 `Deserialize`。
-3. **P3 `DylibResolver`**（Linux）+ SDK 元数据加 schema 和服务名；macOS dylib 单独立项。
+3. **P3 `DylibResolver`**（Linux）+ SDK 元数据加 schema；macOS dylib 单独立项。（已实现：`rutis-dylib` 的 `loader` feature；名字 `dylib:<目录>`。服务名没有放进 SDK：服务名目录要登记带类型的探针，dylib 插件给不了，需要把 rutis-loader 编进 SDK 的 ABI；改为由宿主用共享的接口 crate 登记。）
 4. **P4 dev 通道**建在 loader 上。
 5. **P5 volatile 字段；插件卸载自己**（内核 `dispose_self` + loader 识别）。
 6. **P6 `InteropResolver`**：逐个管理 JS 插件，含 schema 导出、isolate 转发。

@@ -321,9 +321,13 @@ async fn rename_updates_in_place_or_respawns() {
     assert_eq!(
         loader.get("n").unwrap().plugin,
         before,
-        "same injects: in place"
+        "same factory and injects: in place"
     );
 
+    // Another factory (identity) with the same injects: respawned too.
+    loader.rename_module("n", "provider").await.unwrap();
+    let provider = loader.get("n").unwrap().plugin;
+    assert_ne!(provider, before, "different factory: respawned");
     loader.rename_module("n", "consumer").await.unwrap();
     let after = loader.get("n").unwrap().plugin;
     assert_ne!(after, before, "different injects: respawned");

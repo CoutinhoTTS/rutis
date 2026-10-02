@@ -294,12 +294,31 @@ impl Loader {
             (factory.name().to_string(), factory.injects().to_vec())
         }))
         .map_err(|_| fail("entry", "factory metadata panicked".into()))?;
+        // Optional: plugins built before the symbol existed have no schema.
+        let schema = match optional_symbol::<unsafe fn() -> Option<String>>(
+            handle,
+            b"rutis_plugin_config_schema\0",
+        ) {
+            None => None,
+            Some(schema_fn) => {
+                let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schema_fn()))
+                    .map_err(|_| fail("schema", "schema function panicked".into()))?;
+                match text {
+                    None => None,
+                    Some(text) => Some(
+                        rutis_sdk::serde_json::from_str(&text)
+                            .map_err(|e| fail("schema", format!("invalid JSON: {e}")))?,
+                    ),
+                }
+            }
+        };
         let module = Arc::new(Module {
             id: id.clone(),
             version: version.clone(),
             library_sha256: actual_hash,
             name,
             injects,
+            schema,
             factory,
             _handle: handle,
         });
@@ -366,6 +385,7 @@ pub struct Module {
     library_sha256: String,
     name: String,
     injects: Vec<TypeKey>,
+    schema: Option<rutis_sdk::serde_json::Value>,
     factory: Box<dyn PluginFactory<ConfigValue>>,
     _handle: NonNull<libc::c_void>,
 }
@@ -381,6 +401,21 @@ impl Module {
     }
     pub fn library_sha256(&self) -> &str {
         &self.library_sha256
+    }
+    /// The factory's display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+    /// The config's JSON Schema, when the plugin exported one.
+    pub fn schema(&self) -> Option<&rutis_sdk::serde_json::Value> {
+        self.schema.as_ref()
+    }
+    /// The plugin's factory over JSON config.
+    pub fn factory(&self) -> &dyn PluginFactory<ConfigValue> {
+        self.factory.as_ref()
     }
 }
 
@@ -597,6 +632,15 @@ unsafe fn open_library(path: &Path) -> Result<NonNull<libc::c_void>, String> {
             .to_string_lossy()
             .into_owned()
     })
+}
+
+unsafe fn optional_symbol<T>(handle: NonNull<libc::c_void>, name: &[u8]) -> Option<T> {
+    let ptr = libc::dlsym(handle.as_ptr(), name.as_ptr().cast());
+    if ptr.is_null() {
+        None
+    } else {
+        Some(std::mem::transmute_copy(&ptr))
+    }
 }
 
 unsafe fn symbol<T>(handle: NonNull<libc::c_void>, name: &[u8]) -> Result<T, String> {

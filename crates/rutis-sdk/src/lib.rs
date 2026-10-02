@@ -90,9 +90,18 @@ pub const fn boot_meta(sdk_id: &str, artifact: &str, id: &str, version: &str) ->
 
 /// Export a factory and a static, pre-dlopen identity blob from a plugin dylib.
 /// `RUTIS_SDK_ARTIFACT_SHA256` must be set by the two-stage build.
+///
+/// `schema:` optionally gives the JSON Schema of the config, as a
+/// `serde_json::Value`, for hosts that show config forms (rutis-loader).
 #[macro_export]
 macro_rules! export_plugin {
     (id: $id:literal, factory: $factory:expr $(,)?) => {
+        $crate::export_plugin!(@export $id, $factory, ::core::option::Option::None);
+    };
+    (id: $id:literal, factory: $factory:expr, schema: $schema:expr $(,)?) => {
+        $crate::export_plugin!(@export $id, $factory, ::core::option::Option::Some($schema));
+    };
+    (@export $id:literal, $factory:expr, $schema:expr) => {
         #[cfg(panic = "abort")]
         compile_error!("rutis dylib plugins require panic = unwind");
         const RUTIS_PLUGIN_ARTIFACT_SHA256: &str = env!("RUTIS_SDK_ARTIFACT_SHA256");
@@ -116,6 +125,13 @@ macro_rules! export_plugin {
                 id: $id,
                 version: env!("CARGO_PKG_VERSION"),
             }
+        }
+        /// The config's JSON Schema as text, or `None`. Optional for hosts:
+        /// plugins built before it existed simply lack the symbol.
+        #[no_mangle]
+        pub fn rutis_plugin_config_schema() -> Option<String> {
+            let schema: Option<$crate::serde_json::Value> = $schema;
+            schema.map(|schema| schema.to_string())
         }
         #[no_mangle]
         pub fn rutis_plugin_entry() -> Result<

@@ -6,3 +6,8 @@
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
+
+#[cfg(all(target_os = "linux", feature = "loader"))]
+mod resolver;
+#[cfg(all(target_os = "linux", feature = "loader"))]
+pub use resolver::DylibResolver;
