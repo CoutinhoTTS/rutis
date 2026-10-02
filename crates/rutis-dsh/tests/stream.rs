@@ -1,5 +1,5 @@
 //! dsh-llm callers stream model calls served by aimux-llm in the rutis host.
-#![cfg(all(unix, dsh_llm))]
+#![cfg(all(unix, dsh_installed))]
 
 mod common;
 
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{mounted, Scripted};
-use dsh_llm_mount::dsh;
+use rutis_dsh::agent;
 use serde_json::{json, Value};
 
 fn chunks(raw: Vec<String>) -> Vec<Value> {
@@ -21,7 +21,7 @@ fn chunks(raw: Vec<String>) -> Vec<Value> {
 async fn dsh_streams_text_tool_calls_and_usage_from_aimux() {
     let service = Arc::new(Scripted::default());
     let ctx = mounted(service.clone()).await;
-    let probe = ctx.get::<dsh::LlmProbe>().unwrap();
+    let probe = ctx.get::<agent::LlmProbe>().unwrap();
 
     let got = chunks(
         probe
@@ -62,7 +62,7 @@ async fn dsh_streams_text_tool_calls_and_usage_from_aimux() {
 #[tokio::test(flavor = "multi_thread")]
 async fn aimux_failures_end_the_dsh_stream_with_their_code() {
     let ctx = mounted(Arc::new(Scripted::default())).await;
-    let probe = ctx.get::<dsh::LlmProbe>().unwrap();
+    let probe = ctx.get::<agent::LlmProbe>().unwrap();
 
     let got = chunks(probe.collect("failing", "m", "", "hi").await.unwrap());
     assert_eq!(
@@ -78,7 +78,7 @@ async fn aimux_failures_end_the_dsh_stream_with_their_code() {
 async fn a_dsh_caller_that_stops_reading_stops_the_aimux_stream() {
     let service = Arc::new(Scripted::default());
     let ctx = mounted(service.clone()).await;
-    let probe = ctx.get::<dsh::LlmProbe>().unwrap();
+    let probe = ctx.get::<agent::LlmProbe>().unwrap();
 
     let first: Value =
         serde_json::from_str(&probe.first_chunk("endless", "m").await.unwrap()).unwrap();
@@ -95,7 +95,7 @@ async fn a_dsh_caller_that_stops_reading_stops_the_aimux_stream() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dsh_lists_models_from_aimux() {
     let ctx = mounted(Arc::new(Scripted::default())).await;
-    let runtime = ctx.get::<dsh::LlmRuntime>().unwrap();
+    let runtime = ctx.get::<agent::LlmRuntime>().unwrap();
     let models = runtime.list_models("scripted").await.unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "scripted-chat");
@@ -110,7 +110,7 @@ async fn routes_name_their_aimux_provider_key_and_display_name() {
         service.clone(),
         [(
             "fast",
-            dsh::Route {
+            agent::Route {
                 provider: Some("scripted".into()),
                 api_key_env: Some("DSH_LLM_MOUNT_TEST_KEY".into()),
                 display_name: Some("Fast (aimux)".into()),
@@ -119,7 +119,7 @@ async fn routes_name_their_aimux_provider_key_and_display_name() {
     )
     .await;
 
-    let runtime = ctx.get::<dsh::LlmRuntime>().unwrap();
+    let runtime = ctx.get::<agent::LlmRuntime>().unwrap();
     let providers = runtime.list_providers().unwrap();
     let fast = providers
         .iter()
@@ -127,7 +127,7 @@ async fn routes_name_their_aimux_provider_key_and_display_name() {
         .unwrap();
     assert_eq!(fast.name, "Fast (aimux)");
 
-    let probe = ctx.get::<dsh::LlmProbe>().unwrap();
+    let probe = ctx.get::<agent::LlmProbe>().unwrap();
     let got = chunks(probe.collect("fast", "m", "", "hi").await.unwrap());
     assert_eq!(got.last().unwrap()["type"], "finish");
     let request = service.requests.lock().unwrap()[0].clone();

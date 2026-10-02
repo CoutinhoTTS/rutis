@@ -1,19 +1,19 @@
 //! A dsh agent loop mounted in rutis runs a whole turn on models served by aimux.
-#![cfg(all(unix, dsh_llm))]
+#![cfg(all(unix, dsh_installed))]
 
 mod common;
 
 use std::sync::Arc;
 
 use common::{mounted, Scripted};
-use dsh_llm_mount::dsh;
+use rutis_dsh::agent;
 use serde_json::{json, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dsh_agent_turn_calls_a_tool_and_answers_through_aimux() {
     let service = Arc::new(Scripted::default());
     let ctx = mounted(service.clone()).await;
-    let probe = ctx.get::<dsh::AgentProbe>().unwrap();
+    let probe = ctx.get::<agent::AgentProbe>().unwrap();
 
     let messages: Vec<Value> = probe
         .run("agent", "m", "What is the code name?")
@@ -90,14 +90,14 @@ async fn a_dsh_agent_turn_calls_a_tool_and_answers_through_aimux() {
 
 /// The same turn against a real provider, configured like `rutis-dsh`:
 /// `DEEPSEEK_API_KEY` (or `AIMUX_PROVIDER`, `AIMUX_MODEL` and that provider's
-/// key). Run with `cargo test -p dsh-llm-mount --test agent -- --ignored`.
+/// key). Run with `cargo test -p rutis-dsh --test agent -- --ignored`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "calls a real model provider"]
 async fn a_dsh_agent_turn_on_a_real_model() {
     let provider = std::env::var("AIMUX_PROVIDER").unwrap_or_else(|_| "deepseek".into());
     let model = std::env::var("AIMUX_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
     let ctx = common::mount(Arc::new(aimux_llm::AimuxLlm::from_env()), &[&provider]).await;
-    let probe = ctx.get::<dsh::AgentProbe>().unwrap();
+    let probe = ctx.get::<agent::AgentProbe>().unwrap();
 
     let messages = probe
         .run(

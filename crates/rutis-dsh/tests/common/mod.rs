@@ -1,3 +1,6 @@
+// Shared by several test binaries; each uses part of it.
+#![allow(dead_code)]
+
 //! A scripted aimux service and the dsh mount the tests drive.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,8 +11,8 @@ use aimux_core::stream_part::StreamPart;
 use aimux_core::types::{FinishReason, FinishReasonUnified, TokenUsage, Usage};
 use aimux_llm::service::PartStream;
 use aimux_llm::{LlmService, LlmServiceError, ModelBrief, StreamRequest};
-use dsh_llm_mount::dsh;
 use rutis::Ctx;
+use rutis_dsh::agent;
 use serde_json::json;
 
 /// Plays one scripted response per provider and records the requests.
@@ -133,7 +136,7 @@ pub async fn mounted(service: Arc<Scripted>) -> Ctx {
 
 /// Mounts the dsh composition with `service` serving the given provider routes.
 pub async fn mount(service: Arc<dyn LlmService>, providers: &[&str]) -> Ctx {
-    let route = || dsh::Route {
+    let route = || agent::Route {
         provider: None,
         api_key_env: None,
         display_name: None,
@@ -148,11 +151,11 @@ pub async fn mount(service: Arc<dyn LlmService>, providers: &[&str]) -> Ctx {
 /// Mounts the dsh composition with `service` serving the given routes.
 pub async fn mount_routes(
     service: Arc<dyn LlmService>,
-    routes: impl IntoIterator<Item = (&str, dsh::Route)>,
+    routes: impl IntoIterator<Item = (&str, agent::Route)>,
 ) -> Ctx {
     let ctx = Ctx::root().unwrap();
-    dsh_llm_mount::provide(&ctx, service).unwrap();
-    let view = ctx.plugin(dsh::Plugin::new(dsh::Config {
+    rutis_dsh::provide_agent_aimux(&ctx, service).unwrap();
+    let view = ctx.plugin(agent::Plugin::new(agent::Config {
         invariants: Default::default(),
         typert: Default::default(),
         llm: Default::default(),
@@ -162,7 +165,7 @@ pub async fn mount_routes(
         tools: Default::default(),
         agents: Default::default(),
         agent_loop: Default::default(),
-        adapter: dsh::AdapterConfig {
+        adapter: agent::AdapterConfig {
             providers: routes
                 .into_iter()
                 .map(|(name, route)| (name.to_string(), route))

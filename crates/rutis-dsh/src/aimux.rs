@@ -1,10 +1,8 @@
-//! dsh-llm mounted in a rutis application. Model calls that dsh plugins make
-//! through `ctx.llm.stream` reach aimux-llm in this process: the adapter in
-//! `cordis/aimux-adapter.ts` pulls neutral parts from [`AimuxBridge`], which
-//! the application provides as `ctx.aimux`.
-#![cfg(all(unix, dsh_llm))]
-
-rutis_interop::include_mounts!();
+//! The `aimux` service the mounted dsh adapter (`dsh/aimux/src/adapter.ts`)
+//! uses: each model call is an aimux-llm stream the adapter reads in batches.
+//! The request and part shapes mirror the adapter's TypeScript declarations;
+//! each mount implements its generated `AimuxHost` trait through
+//! [`serve_aimux!`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,19 +13,155 @@ use aimux_core::types::FinishReasonUnified;
 use aimux_llm::service::{MessageSpec, PartStream, PromptSpec, ToolCallSpec, ToolSpec};
 use aimux_llm::{LlmService, StreamRequest};
 use futures::{FutureExt, StreamExt};
-use rutis::{BoxFuture, CordisError, Ctx, Disposer};
+use rutis::BoxFuture;
 use rutis_interop::Error;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use dsh::{AimuxPart, AimuxPartKind, AimuxPartReason, AimuxRequest};
+/// One model call (`AimuxRequest` in the adapter).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Request {
+    provider: String,
+    model: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    system: Option<String>,
+    messages: Vec<Message>,
+    tools: Vec<Tool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Message {
+    role: String,
+    text: String,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    is_error: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Tool {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    parameters: Option<serde_json::Value>,
+}
+
+/// One neutral stream part (`AimuxPart` in the adapter).
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Part {
+    kind: PartKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arguments: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<PartReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_read_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_write_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum PartKind {
+    #[default]
+    Text,
+    Reasoning,
+    ToolCall,
+    Finish,
+    Error,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum PartReason {
+    Stop,
+    ToolCalls,
+    Length,
+    Other,
+}
+
+/// Converts between this module's shapes and a mount's generated ones, which
+/// share the JSON form.
+pub(crate) fn convert<T: Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Result<U, Error> {
+    serde_json::to_value(value)
+        .and_then(serde_json::from_value)
+        .map_err(|error| Error::Value(error.to_string()))
+}
+
+/// Implements a mount's generated `AimuxHost` trait for [`AimuxBridge`].
+macro_rules! serve_aimux {
+    ($mount:ident) => {
+        impl $mount::AimuxHost for $crate::aimux::AimuxBridge {
+            fn open(
+                &self,
+                request: $mount::AimuxRequest,
+            ) -> ::rutis::BoxFuture<'static, Result<String, ::rutis_interop::Error>> {
+                match $crate::aimux::convert(&request) {
+                    Ok(request) => $crate::aimux::AimuxBridge::open(self, request),
+                    Err(error) => Box::pin(async move { Err(error) }),
+                }
+            }
+
+            fn next(
+                &self,
+                stream: String,
+            ) -> ::rutis::BoxFuture<'static, Result<Vec<$mount::AimuxPart>, ::rutis_interop::Error>>
+            {
+                let parts = $crate::aimux::AimuxBridge::next(self, stream);
+                Box::pin(async move { $crate::aimux::convert(&parts.await?) })
+            }
+
+            fn close(&self, stream: String) -> Result<Option<()>, ::rutis_interop::Error> {
+                $crate::aimux::AimuxBridge::close(self, &stream);
+                Ok(None)
+            }
+
+            fn list_models(
+                &self,
+                provider: String,
+                api_key: Option<String>,
+            ) -> ::rutis::BoxFuture<'static, Result<Vec<String>, ::rutis_interop::Error>> {
+                $crate::aimux::AimuxBridge::list_models(self, provider, api_key)
+            }
+        }
+    };
+}
+pub(crate) use serve_aimux;
 
 /// At most this many parts are returned by one `next`.
 const BATCH: usize = 256;
-
-/// Registers `service` as the `aimux` service that the mounted adapter uses.
-pub fn provide(ctx: &Ctx, service: Arc<dyn LlmService>) -> Result<Disposer, CordisError> {
-    dsh::provide_aimux(ctx, AimuxBridge::new(service))
-}
 
 /// Serves `ctx.aimux` from an aimux-llm service: each call is a stream the
 /// adapter reads in batches.
@@ -64,8 +198,8 @@ impl Drop for AimuxBridge {
     }
 }
 
-impl dsh::AimuxHost for AimuxBridge {
-    fn open(&self, request: AimuxRequest) -> BoxFuture<'static, Result<String, Error>> {
+impl AimuxBridge {
+    pub(crate) fn open(&self, request: Request) -> BoxFuture<'static, Result<String, Error>> {
         let id = format!("aimux:{}", self.ids.fetch_add(1, Ordering::Relaxed));
         let call = Arc::new(Call {
             parts: tokio::sync::Mutex::new(None),
@@ -88,7 +222,7 @@ impl dsh::AimuxHost for AimuxBridge {
         })
     }
 
-    fn next(&self, stream: String) -> BoxFuture<'static, Result<Vec<AimuxPart>, Error>> {
+    pub(crate) fn next(&self, stream: String) -> BoxFuture<'static, Result<Vec<Part>, Error>> {
         let call = self.call(&stream);
         Box::pin(async move {
             let Some(call) = call else {
@@ -134,14 +268,13 @@ impl dsh::AimuxHost for AimuxBridge {
         })
     }
 
-    fn close(&self, stream: String) -> Result<Option<()>, Error> {
-        if let Some(call) = self.calls.lock().unwrap().remove(&stream) {
+    pub(crate) fn close(&self, stream: &str) {
+        if let Some(call) = self.calls.lock().unwrap().remove(stream) {
             call.closed.cancel();
         }
-        Ok(None)
     }
 
-    fn list_models(
+    pub(crate) fn list_models(
         &self,
         provider: String,
         api_key: Option<String>,
@@ -157,7 +290,7 @@ impl dsh::AimuxHost for AimuxBridge {
     }
 }
 
-fn stream_request(request: AimuxRequest) -> StreamRequest {
+fn stream_request(request: Request) -> StreamRequest {
     StreamRequest {
         provider: Some(request.provider),
         model: Some(request.model),
@@ -198,73 +331,63 @@ fn stream_request(request: AimuxRequest) -> StreamRequest {
     }
 }
 
-fn part(kind: AimuxPartKind) -> AimuxPart {
-    AimuxPart {
+fn part(kind: PartKind) -> Part {
+    Part {
         kind,
-        delta: None,
-        id: None,
-        name: None,
-        arguments: None,
-        reason: None,
-        input_tokens: None,
-        output_tokens: None,
-        cache_read_tokens: None,
-        cache_write_tokens: None,
-        code: None,
-        message: None,
+        ..Part::default()
     }
 }
 
-fn failure(code: &str, message: &str) -> AimuxPart {
-    AimuxPart {
+fn failure(code: &str, message: &str) -> Part {
+    Part {
         code: Some(code.into()),
         message: Some(message.into()),
-        ..part(AimuxPartKind::Error)
+        ..part(PartKind::Error)
     }
 }
 
 /// The neutral form of one aimux part; parts the adapter does not use are dropped.
-fn neutral(stream_part: StreamPart) -> Option<AimuxPart> {
+fn neutral(stream_part: StreamPart) -> Option<Part> {
     let count = |value: Option<u32>| value.map(f64::from);
     Some(match stream_part {
-        StreamPart::TextDelta { delta, .. } => AimuxPart {
+        StreamPart::TextDelta { delta, .. } => Part {
             delta: Some(delta),
-            ..part(AimuxPartKind::Text)
+            ..part(PartKind::Text)
         },
-        StreamPart::ReasoningDelta { delta, .. } => AimuxPart {
+        StreamPart::ReasoningDelta { delta, .. } => Part {
             delta: Some(delta),
-            ..part(AimuxPartKind::Reasoning)
+            ..part(PartKind::Reasoning)
         },
         StreamPart::ToolCall {
             tool_call_id,
             tool_name,
             input,
             ..
-        } => AimuxPart {
+        } => Part {
             id: Some(tool_call_id),
             name: Some(tool_name),
             arguments: Some(match input {
                 serde_json::Value::String(text) => text,
                 input => input.to_string(),
             }),
-            ..part(AimuxPartKind::ToolCall)
+            ..part(PartKind::ToolCall)
         },
         StreamPart::Finish {
             finish_reason,
             usage,
             ..
-        } => AimuxPart {
+        } => Part {
             reason: Some(match finish_reason.unified {
-                FinishReasonUnified::Stop => AimuxPartReason::Stop,
-                FinishReasonUnified::ToolCalls => AimuxPartReason::ToolCalls,
-                FinishReasonUnified::Length => AimuxPartReason::Length,
-                _ => AimuxPartReason::Other,
+                FinishReasonUnified::Stop => PartReason::Stop,
+                FinishReasonUnified::ToolCalls => PartReason::ToolCalls,
+                FinishReasonUnified::Length => PartReason::Length,
+                _ => PartReason::Other,
             }),
             input_tokens: count(usage.input_tokens.no_cache.or(usage.input_tokens.total)),
             output_tokens: count(usage.output_tokens.total),
             cache_read_tokens: count(usage.input_tokens.cache_read),
             cache_write_tokens: count(usage.input_tokens.cache_write),
-            ..part(AimuxPartKind::Finish)
+            ..part(PartKind::Finish)
         },
         StreamPart::Error { error } => failure("PROVIDER", &error.to_string()),
         _ => return None,
