@@ -21,6 +21,7 @@ if (command === 'yaml') {
 } else if (command === 'compose') {
   const boot = await load('@deepseek-ai/dsh-app-boot')
   const context = JSON.parse(args[0])
+  context.overlays = (context.overlayFiles ?? []).flatMap(file => boot.loadOverlayPatches('dsh', file))
   const profile = boot.loadProfileDirectory('dsh', context.dir, context.installAnchor)
   const patches = boot.readProfilePatches('dsh', context, profile)
   const warnings = []

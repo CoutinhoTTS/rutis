@@ -7,5 +7,9 @@
 //! Design: `docs/design-rutis-loader-2026-10-02.md` §十二.
 
 pub mod expr;
+pub mod layers;
+pub mod npm_semver;
 pub mod paths;
 pub mod yaml;
+
+pub use layers::{load, Profile, ProfileContext, ProfileError, SkippedBundle};
