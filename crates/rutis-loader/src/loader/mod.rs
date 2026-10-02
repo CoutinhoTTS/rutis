@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use rutis::{Ctx, Event, FiberView, PluginId, Snapshot, TypeKey};
+
 use serde_json::Value;
 
 use crate::edit::Edit;
@@ -89,6 +90,9 @@ pub struct EntryInfo {
     /// Field → name of the last layer that replaced it.
     pub overridden: BTreeMap<String, String>,
     pub status: EntryStatus,
+    /// The last config the loader tried to apply was refused by the plugin's
+    /// validation. A running row keeps its previous config.
+    pub rejected: Option<LoaderError>,
     pub plugin: Option<PluginId>,
     pub view: Option<FiberView>,
     pub schema: Option<Value>,
@@ -104,6 +108,7 @@ impl std::fmt::Debug for EntryInfo {
             .field("owner", &self.owner)
             .field("overridden", &self.overridden)
             .field("status", &self.status)
+            .field("rejected", &self.rejected)
             .field("plugin", &self.plugin)
             .finish_non_exhaustive()
     }
@@ -169,14 +174,30 @@ struct State {
     desired: Desired,
     resolved: HashMap<String, Result<Arc<Resolved>, LoaderError>>,
     /// Running group contexts; `None` is the loader's own (the root).
-    groups: HashMap<Option<String>, Ctx>,
+    groups: HashMap<Option<String>, Group>,
     running: HashMap<String, Running>,
+    /// Rows whose config the plugin refused: at spawn (the row does not
+    /// run) or on update (the plugin keeps running its previous config).
+    rejected: HashMap<String, LoaderError>,
+    /// Source of spawn tokens; see [`Running::token`].
+    next_token: u64,
     /// Last root context, kept to notice a host shutdown after unmount.
     last_root: Option<Ctx>,
 }
 
+/// A running group's context, tagged with the token of the spawn that owns
+/// it so a late cleanup of an older instance cannot unregister a newer one.
+struct Group {
+    ctx: Ctx,
+    token: u64,
+}
+
 struct Running {
     parent: Option<String>,
+    /// Unique per spawn. A group registers its context under this token.
+    token: u64,
+    /// Token of the group context this row was spawned in.
+    parent_token: u64,
     view: FiberView,
     group: bool,
     name: String,

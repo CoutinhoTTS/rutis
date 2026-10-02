@@ -95,6 +95,7 @@ impl Loader {
     /// Retry persisting the pending queue.
     pub async fn flush(&self) -> Result<(), LoaderError> {
         let _op = self.inner.op.lock().await;
+        self.inner.check_open()?;
         self.inner.persist_queue(None).await
     }
 
@@ -123,7 +124,7 @@ impl Loader {
                 .iter()
                 .map(|(id, r)| (r.view.id, id.clone()))
                 .collect();
-            (records, state.groups.get(&None).cloned())
+            (records, state.groups.get(&None).map(|g| g.ctx.clone()))
         };
         if let Some(id) = records.get(&plugin) {
             return Some(id.clone());
@@ -149,10 +150,17 @@ impl Loader {
         Ok(self.inner.resolver.resolve(name).await?.schema.clone())
     }
 
-    /// The config a row's plugin receives (read-only).
+    /// The config a row's plugin runs with (read-only). For a running row
+    /// this is what the kernel holds, which differs from the desired config
+    /// when the last update was rejected (see [`EntryInfo::rejected`]).
     pub fn evaluated(&self, id: &str) -> Option<Result<Value, LoaderError>> {
         let state = self.inner.state.lock().unwrap();
         let row = state.desired.row(id)?;
+        if let Some(running) = state.running.get(id) {
+            if !running.group {
+                return Some(Ok(running.config.clone()));
+            }
+        }
         Some(if contains_expression(&row.config) {
             Err(LoaderError::Expression(
                 "no expression evaluator is installed".into(),

@@ -44,6 +44,8 @@ impl PluginFactory<EntryConfig> for EntryFactory {
 pub(super) struct GroupPlugin {
     pub(super) inner: Weak<Inner>,
     pub(super) id: String,
+    /// The token of the spawn that created this plugin.
+    pub(super) token: u64,
 }
 
 impl Plugin for GroupPlugin {
@@ -56,12 +58,13 @@ impl Plugin for GroupPlugin {
             let Some(inner) = self.inner.upgrade() else {
                 return Ok(Effect::Done);
             };
-            inner.attach(Some(self.id.clone()), ctx);
+            let token = self.token;
+            inner.attach(Some(self.id.clone()), token, ctx);
             let weak = self.inner.clone();
             let id = self.id.clone();
             Ok(Effect::Disposer(Box::new(move || {
                 if let Some(inner) = weak.upgrade() {
-                    inner.detach(Some(id));
+                    inner.detach(Some(id), token);
                 }
                 Ok(())
             })))
@@ -102,11 +105,12 @@ impl Plugin for LoaderPlugin {
         Box::pin(async move {
             // The service is released with the fiber.
             ctx.provide(self.loader.clone())?;
-            self.loader.inner.attach(None, ctx);
+            let token = self.loader.inner.next_token();
+            self.loader.inner.attach(None, token, ctx);
             let weak = Arc::downgrade(&self.loader.inner);
             Ok(Effect::Disposer(Box::new(move || {
                 if let Some(inner) = weak.upgrade() {
-                    inner.detach(None);
+                    inner.detach(None, token);
                 }
                 Ok(())
             })))

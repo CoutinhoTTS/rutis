@@ -1,9 +1,10 @@
 //! Driving the running fibers towards the desired tree.
 
 use std::collections::HashSet;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
-use rutis::{Ctx, Event, EventKey, FiberState, FiberView, PluginId};
+use rutis::{CordisError, Ctx, Event, EventKey, FiberState, FiberView, PluginId};
 use serde_json::Value;
 
 use crate::error::Failure;
@@ -12,42 +13,70 @@ use crate::LoaderError;
 
 use super::desired::{Desired, Row};
 use super::plugins::{EntryConfig, EntryFactory, GroupPlugin};
-use super::{EntryInfo, EntryStatus, Inner, ReconcileReport, Running, State};
+use super::{EntryInfo, EntryStatus, Group, Inner, ReconcileReport, Running, State};
 
 impl Inner {
-    /// Register a running group's context and spawn its wanted children.
-    pub(super) fn attach(self: &Arc<Self>, group: Option<String>, ctx: &Ctx) {
+    pub(super) fn next_token(&self) -> u64 {
         let mut state = self.state.lock().unwrap();
-        if group.is_none() {
-            state.last_root = Some(ctx.clone());
+        state.next_token += 1;
+        state.next_token
+    }
+
+    /// Register a running group's context and spawn its wanted children.
+    /// A group instance that is no longer the current record of its row
+    /// (an older spawn still loading) registers nothing.
+    pub(super) fn attach(self: &Arc<Self>, group: Option<String>, token: u64, ctx: &Ctx) {
+        let mut state = self.state.lock().unwrap();
+        match &group {
+            None => state.last_root = Some(ctx.clone()),
+            Some(id) => {
+                if state.running.get(id).map(|r| r.token) != Some(token) {
+                    return;
+                }
+            }
         }
-        state.groups.insert(group.clone(), ctx.clone());
+        state.groups.insert(
+            group.clone(),
+            Group {
+                ctx: ctx.clone(),
+                token,
+            },
+        );
         self.spawn_children(&mut state, &group);
     }
 
-    /// Forget a group's context and the records below it; the kernel
-    /// unloads the fibers themselves.
-    pub(super) fn detach(&self, group: Option<String>) {
+    /// Forget a group's context and the records spawned in it; the kernel
+    /// unloads the fibers themselves. Only the instance that registered
+    /// the context (same token) can remove it, so a late cleanup of an old
+    /// instance leaves a newer one alone.
+    pub(super) fn detach(&self, group: Option<String>, token: u64) {
         let mut state = self.state.lock().unwrap();
+        if state.groups.get(&group).map(|g| g.token) != Some(token) {
+            return;
+        }
         state.groups.remove(&group);
-        let mut gone: Vec<Option<String>> = vec![group];
-        while let Some(parent) = gone.pop() {
+        let mut gone: Vec<(Option<String>, u64)> = vec![(group, token)];
+        while let Some((parent, parent_token)) = gone.pop() {
             let children: Vec<String> = state
                 .running
                 .iter()
-                .filter(|(_, r)| r.parent == parent)
+                .filter(|(_, r)| r.parent == parent && r.parent_token == parent_token)
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in children {
-                state.running.remove(&id);
-                state.groups.remove(&Some(id.clone()));
-                gone.push(Some(id));
+                let child = state.running.remove(&id).unwrap();
+                let key = Some(id.clone());
+                if state.groups.get(&key).map(|g| g.token) == Some(child.token) {
+                    state.groups.remove(&key);
+                }
+                gone.push((key, child.token));
             }
         }
     }
 
     pub(super) fn spawn_children(self: &Arc<Self>, state: &mut State, group: &Option<String>) {
-        let Some(ctx) = state.groups.get(group).cloned() else {
+        let Some((ctx, parent_token)) = state.groups.get(group).map(|g| (g.ctx.clone(), g.token))
+        else {
             return;
         };
         let candidates: Vec<usize> = state
@@ -65,15 +94,20 @@ impl Inner {
             }
             let id = row.id.clone();
             let name = row.name.clone().unwrap_or_default();
+            state.next_token += 1;
+            let token = state.next_token;
             if row.group {
                 let view = ctx.plugin(GroupPlugin {
                     inner: Arc::downgrade(self),
                     id: id.clone(),
+                    token,
                 });
                 state.running.insert(
                     id,
                     Running {
                         parent: group.clone(),
+                        token,
+                        parent_token,
                         view,
                         group: true,
                         name,
@@ -88,6 +122,23 @@ impl Inner {
                 continue;
             };
             let config = row.config.clone();
+            // The kernel's first load only builds and validates the instance;
+            // check the config here as `update` and the dry run do.
+            let checked = catch_unwind(AssertUnwindSafe(|| {
+                resolved.factory.validate_config(&config)
+            }))
+            .unwrap_or_else(|_| Err(CordisError::PluginFailed("validate_config panicked".into())));
+            if let Err(error) = checked {
+                state.rejected.insert(
+                    id.clone(),
+                    LoaderError::Rejected {
+                        id,
+                        error: Arc::new(error),
+                    },
+                );
+                continue;
+            }
+            state.rejected.remove(&id);
             let injects = resolved.factory.injects().to_vec();
             let view = ctx.plugin_with(
                 EntryFactory {
@@ -103,6 +154,8 @@ impl Inner {
                 id,
                 Running {
                     parent: group.clone(),
+                    token,
+                    parent_token,
                     view,
                     group: false,
                     name,
@@ -116,7 +169,11 @@ impl Inner {
 
     pub(super) fn root(&self) -> Option<Ctx> {
         let state = self.state.lock().unwrap();
-        state.groups.get(&None).cloned().or(state.last_root.clone())
+        state
+            .groups
+            .get(&None)
+            .map(|g| g.ctx.clone())
+            .or(state.last_root.clone())
     }
 
     pub(super) fn check_open(&self) -> Result<(), LoaderError> {
@@ -127,7 +184,13 @@ impl Inner {
     }
 
     pub(super) fn emit<E: Event>(&self, event: E) {
-        let root = self.state.lock().unwrap().groups.get(&None).cloned();
+        let root = self
+            .state
+            .lock()
+            .unwrap()
+            .groups
+            .get(&None)
+            .map(|g| g.ctx.clone());
         if let Some(root) = root {
             let _ = root
                 .events()
@@ -154,6 +217,8 @@ impl Inner {
                 Some(e.to_string())
             } else if matches!(row.disabled, Ok(true)) {
                 None
+            } else if let Some(rejected) = state.rejected.get(&row.id) {
+                Some(rejected.to_string())
             } else if let Some(running) = state.running.get(&row.id) {
                 let snapshot = running.view.state();
                 (snapshot.state == FiberState::Failed).then(|| {
@@ -206,9 +271,10 @@ impl Inner {
             self.state.lock().unwrap().resolved.insert(name, resolved);
         }
 
-        let mut disposals = Vec::new();
-        let mut updates = Vec::new();
-        {
+        // Old instances go first: a respawned provider must not meet its
+        // predecessor's service, and a group's cleanup must not race the
+        // registration of its successor.
+        let disposals = {
             let mut state = self.state.lock().unwrap();
             let state = &mut *state;
             // Records to keep as they are, or to update in place.
@@ -258,12 +324,35 @@ impl Inner {
                 .filter(|id| !keep.contains(*id))
                 .cloned()
                 .collect();
+            let mut disposals = Vec::new();
             for id in dropped {
                 let running = state.running.remove(&id).unwrap();
-                state.groups.remove(&Some(id));
+                let key = Some(id);
+                if state.groups.get(&key).map(|g| g.token) == Some(running.token) {
+                    state.groups.remove(&key);
+                }
                 disposals.push(running.view.dispose());
             }
-            for (id, running) in state.running.iter_mut() {
+            let wanted: HashSet<String> = state
+                .desired
+                .rows
+                .iter()
+                .filter(|row| state.desired.wanted(row))
+                .map(|row| row.id.clone())
+                .collect();
+            state.rejected.retain(|id, _| wanted.contains(id));
+            disposals
+        };
+        for disposal in disposals {
+            let _ = disposal.await;
+        }
+
+        let mut updates = Vec::new();
+        {
+            let mut state = self.state.lock().unwrap();
+            let state = &mut *state;
+            let mut settled = Vec::new();
+            for (id, running) in state.running.iter() {
                 if running.group {
                     continue;
                 }
@@ -277,26 +366,57 @@ impl Inner {
                     .as_ref()
                     .is_some_and(|r| Arc::ptr_eq(r, resolved));
                 if same_module && running.config == row.config {
+                    // Already running what is wanted: an earlier rejection
+                    // no longer applies.
+                    settled.push(id.clone());
                     continue;
                 }
-                running.resolved = Some(resolved.clone());
-                running.config = row.config.clone();
-                running.name = name;
-                updates.push(running.view.update(EntryConfig {
+                let config = EntryConfig {
                     resolved: resolved.clone(),
                     value: row.config.clone(),
-                }));
+                };
+                updates.push((
+                    id.clone(),
+                    running.view.clone(),
+                    running.view.update(config),
+                    name,
+                ));
+            }
+            for id in settled {
+                state.rejected.remove(&id);
             }
             let groups: Vec<Option<String>> = state.groups.keys().cloned().collect();
             for group in groups {
                 self.spawn_children(state, &group);
             }
         }
-        for disposal in disposals {
-            let _ = disposal.await;
-        }
-        for update in updates {
-            let _ = update.await;
+        for (id, view, update, name) in updates {
+            let result = update.await;
+            // Record what the kernel actually holds: a rejected update keeps
+            // the previous config; one that failed in apply stored the new.
+            let current = view.current_config::<EntryConfig>();
+            let mut state = self.state.lock().unwrap();
+            let Some(running) = state.running.get_mut(&id) else {
+                continue;
+            };
+            if running.view.id != view.id {
+                continue;
+            }
+            if let Some(current) = current {
+                running.resolved = Some(current.resolved.clone());
+                running.config = current.value.clone();
+                running.name = name;
+            }
+            match result {
+                Err(error) if view.state().state != FiberState::Failed => {
+                    state
+                        .rejected
+                        .insert(id.clone(), LoaderError::Rejected { id, error });
+                }
+                _ => {
+                    state.rejected.remove(&id);
+                }
+            }
         }
         self.settle().await;
 
@@ -352,6 +472,8 @@ impl Inner {
             EntryStatus::Disabled
         } else if let Some(running) = running {
             EntryStatus::Running(running.view.state())
+        } else if let Some(rejected) = state.rejected.get(&row.id) {
+            EntryStatus::Unresolved(rejected.clone())
         } else if let Some(Err(e)) = row.name.as_ref().and_then(|n| state.resolved.get(n)) {
             if !row.group && state.desired.wanted(row) {
                 EntryStatus::Unresolved(e.clone())
@@ -379,6 +501,7 @@ impl Inner {
                 })
                 .collect(),
             status,
+            rejected: state.rejected.get(&row.id).cloned(),
             plugin: running.map(|r| r.view.id),
             view: running.map(|r| r.view.clone()),
             schema: resolved.and_then(|r| r.schema.clone()),

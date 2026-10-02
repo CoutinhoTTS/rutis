@@ -110,9 +110,10 @@ pub fn apply_edit(
                 "a patch name only asserts the target's name and cannot rename it",
             )?;
             ctx.check_above(row, "name")?;
+            // Fold under the old name: assertions written for it hold now.
+            fold_overrides(&mut patches, id, row_name(row));
             let object = owned_object(&mut patches, id)?;
             object.insert("name".into(), Value::String(name.clone()));
-            fold_overrides(&mut patches, id);
         }
         Edit::Move {
             id,
@@ -128,7 +129,11 @@ pub fn apply_edit(
                     )));
                 }
             }
-            fold_overrides(&mut patches, id);
+            fold_overrides(&mut patches, id, row_name(row));
+            // Patches that address the moved subtree (inserts into its
+            // groups, overrides of its rows) must stay after it, or the
+            // composition no longer finds their targets.
+            let subtree = ctx.subtree_ids(id);
             let object = take_owned(&mut patches, id)?;
             // Positions count the siblings as they are after removal.
             let after: Vec<Layer> = replace_layer(layers, editable, &patches);
@@ -144,6 +149,7 @@ pub fn apply_edit(
                 parent.as_deref(),
                 *position,
             )?;
+            keep_dependents_after(&mut patches, id, &subtree);
         }
         Edit::Remove { id } => {
             let row = ctx.require(id)?;
@@ -238,11 +244,12 @@ impl Context<'_> {
         self.addressable(row)?;
         self.check_above(row, field)?;
         let id = row.id.as_deref().unwrap_or_default();
+        let name = row_name(row);
         if row.owner == Owner::Layer(self.editable) {
-            fold_overrides(patches, id);
+            fold_overrides(patches, id, name);
             owned_object(patches, id)?.insert(field.to_owned(), value);
         } else {
-            upsert_override(patches, id, field, value);
+            upsert_override(patches, id, name, field, value);
         }
         Ok(())
     }
@@ -337,23 +344,70 @@ fn locate_mut<'a>(patches: &'a mut [Patch], id: &str) -> Option<(&'a mut Vec<Val
         let children = array[child].get_mut("config")?.as_array_mut()?;
         search(children, id)
     }
-    fn contains(array: &[Value], id: &str) -> bool {
-        array.iter().any(|item| {
-            item.get("id").and_then(Value::as_str) == Some(id)
-                || (item.get("group").is_some_and(truthy)
-                    && item
-                        .get("config")
-                        .and_then(Value::as_array)
-                        .is_some_and(|children| contains(children, id)))
-        })
+    let index = patch_index_of(patches, id)?;
+    search(patches[index].insert.as_mut()?, id)
+}
+
+fn contains(array: &[Value], id: &str) -> bool {
+    array.iter().any(|item| {
+        item.get("id").and_then(Value::as_str) == Some(id)
+            || (item.get("group").is_some_and(truthy)
+                && item
+                    .get("config")
+                    .and_then(Value::as_array)
+                    .is_some_and(|children| contains(children, id)))
+    })
+}
+
+/// Move every patch addressing a row of `subtree` that now precedes the
+/// patch carrying `id` to just after it, keeping their relative order.
+fn keep_dependents_after(patches: &mut Vec<Patch>, id: &str, subtree: &[String]) {
+    let Some(carrier) = patch_index_of(patches, id) else {
+        return;
+    };
+    let addresses = |patch: &Patch| {
+        patch
+            .id
+            .as_deref()
+            .is_some_and(|target| subtree.iter().any(|s| s == target))
+    };
+    let early: Vec<usize> = (0..carrier).filter(|&i| addresses(&patches[i])).collect();
+    if early.is_empty() {
+        return;
     }
-    let index = patches.iter().position(|patch| {
+    let mut moved = Vec::new();
+    for &index in early.iter().rev() {
+        moved.push(patches.remove(index));
+    }
+    moved.reverse();
+    let carrier = carrier - early.len();
+    for (offset, patch) in moved.into_iter().enumerate() {
+        patches.insert(carrier + 1 + offset, patch);
+    }
+}
+
+fn row_name(row: &ComposedRow) -> Option<&str> {
+    row.value.get("name").and_then(Value::as_str)
+}
+
+/// Index of the insert patch that carries the owned row `id`.
+fn patch_index_of(patches: &[Patch], id: &str) -> Option<usize> {
+    patches.iter().position(|patch| {
         patch
             .insert
             .as_deref()
             .is_some_and(|rows| contains(rows, id))
-    })?;
-    search(patches[index].insert.as_mut()?, id)
+    })
+}
+
+/// Whether a patch's `name` assertion holds for a row named `name`. A
+/// failing assertion makes cordis skip the whole patch, so such a patch is
+/// inert: it must be neither reused nor folded.
+fn asserts(patch: &Patch, name: Option<&str>) -> bool {
+    match patch.name.as_deref().filter(|n| !n.is_empty()) {
+        None => true,
+        Some(asserted) => Some(asserted) == name,
+    }
 }
 
 fn owned_object<'a>(
@@ -381,23 +435,18 @@ fn take_owned(patches: &mut Vec<Patch>, id: &str) -> Result<Map<String, Value>, 
 
 /// Merge the editable layer's own override patches for an owned row into
 /// its insert, so the row reads as one object and can move freely.
-fn fold_overrides(patches: &mut Vec<Patch>, id: &str) {
+fn fold_overrides(patches: &mut Vec<Patch>, id: &str, name: Option<&str>) {
     let mut fields = Map::new();
-    let mut name = None;
     patches.retain(|patch| {
-        if patch.insert.is_none() && patch.id.as_deref() == Some(id) {
+        if patch.insert.is_none() && patch.id.as_deref() == Some(id) && asserts(patch, name) {
             for (key, value) in &patch.overrides {
                 fields.insert(key.clone(), value.clone());
-            }
-            if patch.name.is_some() {
-                name = patch.name.clone();
             }
             false
         } else {
             true
         }
     });
-    let _ = name; // an assertion only; the insert carries the real name
     if fields.is_empty() {
         return;
     }
@@ -412,13 +461,18 @@ fn fold_overrides(patches: &mut Vec<Patch>, id: &str) {
     }
 }
 
-/// Merge `field` into the editable layer's override patch for `id`.
-fn upsert_override(patches: &mut Vec<Patch>, id: &str, field: &str, value: Value) {
-    if let Some(patch) = patches
-        .iter_mut()
-        .rev()
-        .find(|patch| patch.insert.is_none() && patch.id.as_deref() == Some(id))
-    {
+/// Merge `field` into the editable layer's override patch for `id`, reusing
+/// only a patch whose name assertion holds for the row.
+fn upsert_override(
+    patches: &mut Vec<Patch>,
+    id: &str,
+    name: Option<&str>,
+    field: &str,
+    value: Value,
+) {
+    if let Some(patch) = patches.iter_mut().rev().find(|patch| {
+        patch.insert.is_none() && patch.id.as_deref() == Some(id) && asserts(patch, name)
+    }) {
         patch.overrides.insert(field.to_owned(), value);
         return;
     }
