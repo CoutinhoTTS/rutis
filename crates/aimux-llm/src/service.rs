@@ -71,7 +71,7 @@ pub struct StreamRequest {
     pub options: PromptSpec,
 }
 
-/// prompt 的中性形状:system + 逐消息(role, 纯文本) + 工具 schema。
+/// prompt 的中性形状:system + 逐消息(role, 文本, 工具调用/结果) + 工具 schema。
 /// 非文本块(图片/文件)是长尾,形状留位但不进入本 DTO。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -86,6 +86,25 @@ pub struct PromptSpec {
 pub struct MessageSpec {
     pub role: Option<String>,
     pub text: String,
+    /// assistant 消息发出的工具调用。
+    #[serde(rename = "toolCalls")]
+    pub tool_calls: Vec<ToolCallSpec>,
+    /// tool 消息所回应的调用;缺省时 tool 消息按普通文本处理。
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: Option<String>,
+    #[serde(rename = "toolName")]
+    pub tool_name: Option<String>,
+    #[serde(rename = "isError")]
+    pub is_error: Option<bool>,
+}
+
+/// 一次工具调用;`arguments` 是模型产出的原始 JSON 文本。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ToolCallSpec {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

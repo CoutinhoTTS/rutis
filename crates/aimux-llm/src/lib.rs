@@ -8,6 +8,7 @@
 //! 服务面(即中性协议的 schema 所在,DTO 见 [`service`]):
 //! - `stream(StreamRequest) → StreamPart 流`;
 //! - `list_models(provider, key) → 模型表`。
+//!
 //! 服务实现 [`provider::AimuxLlm`]:per-(provider,key,model) 工厂缓存、
 //! listModels 缓存、无 key 回落(构造失败不阻塞宿主,调用时报错)。
 
