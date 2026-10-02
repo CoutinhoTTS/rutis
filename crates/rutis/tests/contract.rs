@@ -175,6 +175,16 @@ async fn reach(view: &FiberView, state: FiberState) {
         .expect("fiber dropped");
 }
 
+/// Polls `fut` once and checks it is still waiting: the caller is then
+/// parked on the result before the test lets it complete.
+async fn parked<F: std::future::Future + Unpin>(fut: &mut F) {
+    tokio::select! {
+        biased;
+        _ = fut => panic!("finished while it should still be waiting"),
+        _ = std::future::ready(()) => {}
+    }
+}
+
 /// Runs `n` scheduler turns: a stand-in for "takes a while" that does not
 /// depend on the clock.
 async fn turns(n: usize) {
@@ -462,7 +472,8 @@ async fn loading_unload_no_lost_wakeup() {
     }));
     // Loading 中触发卸载:intent 串行,不丢唤醒、不死锁
     soon(entered.notified()).await;
-    let disposed = view.dispose(); // 登记在调用点完成,此时 apply 仍未返回
+    let mut disposed = view.dispose();
+    parked(&mut disposed).await; // 等待者已挂起,此时 apply 仍未返回
     release.notify_one();
     soon(disposed).await.unwrap();
     assert_eq!(view.state().state, FiberState::Disposed);
@@ -676,7 +687,8 @@ async fn dispose_during_dispose() {
     let v = view.clone();
     let first = tokio::spawn(async move { v.dispose().await });
     soon(started.notified()).await; // 清理已开始
-    let second = view.dispose(); // 清理中再 dispose:join,不死锁
+    let mut second = view.dispose(); // 清理中再 dispose:join,不死锁
+    parked(&mut second).await;
     release.notify_one();
     soon(second).await.unwrap();
     first.await.unwrap().unwrap();

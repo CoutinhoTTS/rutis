@@ -27,6 +27,7 @@ jobs:
         env:
           ROUNDS: ${{ inputs.rounds || '20' }}
         run: |
+          case "$ROUNDS" in ""|*[!0-9]*) echo "::error::rounds must be a number"; exit 1;; esac
           for round in $(seq 1 "$ROUNDS"); do
             if ! cargo test -q -p rutis > out.txt 2>&1; then
               cat out.txt
