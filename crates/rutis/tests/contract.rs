@@ -132,11 +132,11 @@ fn counting_effect(counter: Arc<AtomicUsize>, err: Option<CordisError>) -> Effec
     }))
 }
 
-fn marker_effect(name: &'static str, order: Order, ms: u64) -> Effect {
+fn marker_effect(name: &'static str, order: Order) -> Effect {
     Effect::AsyncDisposer(Box::new(move || {
         let order = order.clone();
         Box::pin(async move {
-            tokio::time::sleep(Duration::from_millis(ms)).await;
+            tokio::task::yield_now().await;
             order.lock().unwrap().push(name);
             Ok(())
         })
@@ -150,6 +150,47 @@ where
     tokio::time::timeout(Duration::from_secs(5), f)
         .await
         .expect("timed out")
+}
+
+/// Polls `done` until it holds; the timeout only guards against a hang.
+async fn eventually(mut done: impl FnMut() -> bool) {
+    soon(async {
+        while !done() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+}
+
+/// Waits until every accepted `emit` has finished dispatching.
+async fn drained(ctx: &Ctx) {
+    eventually(|| ctx.diagnostics().event_backlogs.is_empty()).await
+}
+
+/// Waits until `view` reaches `state`.
+async fn reach(view: &FiberView, state: FiberState) {
+    let mut rx = view.watch();
+    soon(rx.wait_for(|snapshot| snapshot.state == state))
+        .await
+        .expect("fiber dropped");
+}
+
+/// Polls `fut` once and checks it is still waiting: the caller is then
+/// parked on the result before the test lets it complete.
+async fn parked<F: std::future::Future + Unpin>(fut: &mut F) {
+    tokio::select! {
+        biased;
+        _ = fut => panic!("finished while it should still be waiting"),
+        _ = std::future::ready(()) => {}
+    }
+}
+
+/// Runs `n` scheduler turns: a stand-in for "takes a while" that does not
+/// depend on the clock.
+async fn turns(n: usize) {
+    for _ in 0..n {
+        tokio::task::yield_now().await;
+    }
 }
 
 // ── assembly(支柱 1)──────────────────────────────────────────────
@@ -218,7 +259,7 @@ async fn plugin_registers_n_listeners() {
     ctx.events()
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    drained(&ctx).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2); // 卸载后不再分发
 }
 
@@ -287,7 +328,7 @@ async fn state_transitions() {
     }));
     (&view).await.expect("load");
     view.dispose().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    drained(&ctx).await;
 
     let mut events: Vec<FiberStatusChanged> = seen.lock().unwrap().clone();
     events.sort_by_key(|e| e.seq);
@@ -418,17 +459,23 @@ async fn cross_generation_isolation() {
 #[tokio::test]
 async fn loading_unload_no_lost_wakeup() {
     let ctx = Ctx::root().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (e, r) = (entered.clone(), release.clone());
     let view = ctx.plugin(simple("slow", move |_ctx: &Ctx| {
-        Box::pin(async {
-            tokio::time::sleep(Duration::from_millis(80)).await;
+        let (e, r) = (e.clone(), r.clone());
+        Box::pin(async move {
+            e.notify_one();
+            r.notified().await;
             Ok(Effect::Done)
         })
     }));
     // Loading 中触发卸载:intent 串行,不丢唤醒、不死锁
-    let v = view.clone();
-    let disposed = tokio::spawn(async move { v.dispose().await });
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    disposed.await.unwrap().unwrap();
+    soon(entered.notified()).await;
+    let mut disposed = view.dispose();
+    parked(&mut disposed).await; // 等待者已挂起,此时 apply 仍未返回
+    release.notify_one();
+    soon(disposed).await.unwrap();
     assert_eq!(view.state().state, FiberState::Disposed);
 }
 
@@ -447,7 +494,7 @@ async fn waits_for_dependency() {
             })
         },
     ));
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    (&view).await.expect("settle on Pending is Ok"); // 初始装载已处理
     assert_eq!(view.state().state, FiberState::Pending); // 依赖未齐 → Pending
     ctx.provide(LlmSvc { n: 7 }).unwrap();
     (&view).await.expect("activates after provider");
@@ -462,22 +509,10 @@ async fn late_provider_activates() {
         move |_ctx: &Ctx| Box::pin(async { Ok(Effect::Done) }),
     ));
     // 后到 provider(顺序无关):先 Pending,后激活
-    let ctx2 = ctx.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        ctx2.provide(LlmSvc { n: 1 }).unwrap();
-    });
-    (&view).await.ok(); // Pending 时 settle 立即返回;等待激活
-    soon(async {
-        let mut rx = view.watch();
-        loop {
-            if rx.borrow().state == FiberState::Active {
-                break;
-            }
-            rx.changed().await.unwrap();
-        }
-    })
-    .await;
+    (&view).await.expect("settle on Pending is Ok");
+    assert_eq!(view.state().state, FiberState::Pending);
+    ctx.provide(LlmSvc { n: 1 }).unwrap();
+    reach(&view, FiberState::Active).await;
 }
 
 #[tokio::test]
@@ -501,16 +536,7 @@ async fn check_evicts() {
     // check() 谓词翻转为 false → 驱逐回 Pending(fiber.ts:689-701 语义)
     flag.store(false, Ordering::SeqCst);
     ctx.refresh();
-    soon(async {
-        let mut rx = view.watch();
-        loop {
-            if rx.borrow().state == FiberState::Pending {
-                break;
-            }
-            rx.changed().await.unwrap();
-        }
-    })
-    .await;
+    reach(&view, FiberState::Pending).await;
 }
 
 #[tokio::test]
@@ -521,8 +547,9 @@ async fn pending_not_failed() {
         vec![TypeKey::of::<LlmSvc>()],
         move |_ctx: &Ctx| Box::pin(async { Ok(Effect::Done) }),
     ));
-    tokio::time::sleep(Duration::from_millis(60)).await;
     // 缺依赖长期 Pending 是合法状态,不报错(D22)
+    (&view).await.expect("settle on Pending is Ok");
+    turns(20).await; // 再给驱动几轮机会:仍不得变成 Failed
     assert_eq!(view.state().state, FiberState::Pending);
     (&view).await.expect("settle on Pending is Ok");
 }
@@ -532,31 +559,31 @@ async fn pending_not_failed() {
 #[tokio::test]
 async fn lifo_serial() {
     let ctx = Ctx::root().unwrap();
-    // 记录 start/end 事件对:串行下严格配对不交错,并发下先执行的 sleep
-    // 窗口内会出现别人的 start(锁死"串行"性质,而非仅完成顺序)
+    // 记录 start/end 事件对:串行下严格配对不交错,并发下先执行者让出的
+    // 几轮调度里会出现别人的 start(锁死"串行"性质,而非仅完成顺序)
     let trace: Arc<Mutex<Vec<(&'static str, &'static str)>>> = Arc::new(Mutex::new(Vec::new()));
     let t = trace.clone();
     let view = ctx.plugin(simple("lifo", move |ctx: &Ctx| {
         let t = t.clone();
         Box::pin(async move {
             let mk =
-                |name: &'static str, ms: u64, t: Arc<Mutex<Vec<(&'static str, &'static str)>>>| {
+                |name: &'static str, n: usize, t: Arc<Mutex<Vec<(&'static str, &'static str)>>>| {
                     Effect::AsyncDisposer(Box::new(move || {
                         let t = t.clone();
                         Box::pin(async move {
                             t.lock().unwrap().push((name, "start"));
-                            tokio::time::sleep(Duration::from_millis(ms)).await;
+                            turns(n).await;
                             t.lock().unwrap().push((name, "end"));
                             Ok(())
                         })
                     }))
                 };
             let t1 = t.clone();
-            ctx.effect(move || mk("e1", 30, t1))?;
+            ctx.effect(move || mk("e1", 3, t1))?;
             let t2 = t.clone();
-            ctx.effect(move || mk("e2", 20, t2))?;
+            ctx.effect(move || mk("e2", 2, t2))?;
             let t3 = t.clone();
-            ctx.effect(move || mk("e3", 10, t3))?;
+            ctx.effect(move || mk("e3", 1, t3))?;
             Ok(Effect::Done)
         })
     }));
@@ -634,11 +661,14 @@ async fn exactly_once_same_error() {
 async fn dispose_during_dispose() {
     let ctx = Ctx::root().unwrap();
     let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
     let counter = Arc::new(AtomicUsize::new(0));
     let s = started.clone();
+    let r = release.clone();
     let c = counter.clone();
     let view = ctx.plugin(simple("slowclean", move |_ctx: &Ctx| {
         let s = s.clone();
+        let r = r.clone();
         let c = c.clone();
         Box::pin(async move {
             Ok(Effect::AsyncDisposer(Box::new(move || {
@@ -646,7 +676,7 @@ async fn dispose_during_dispose() {
                 let c = c;
                 Box::pin(async move {
                     s.notify_one();
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    r.notified().await;
                     c.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 })
@@ -657,9 +687,11 @@ async fn dispose_during_dispose() {
     let v = view.clone();
     let first = tokio::spawn(async move { v.dispose().await });
     soon(started.notified()).await; // 清理已开始
-    let second = view.dispose().await; // 清理中再 dispose:join,不死锁
+    let mut second = view.dispose(); // 清理中再 dispose:join,不死锁
+    parked(&mut second).await;
+    release.notify_one();
+    soon(second).await.unwrap();
     first.await.unwrap().unwrap();
-    second.unwrap();
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
 
@@ -796,15 +828,7 @@ async fn emit_error_sink() {
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
     // Err 与 panic 都进 ErrorSink(D30),各一次
-    soon(async {
-        loop {
-            if collected.lock().unwrap().len() >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
+    drained(&ctx).await;
     let got = collected.lock().unwrap();
     assert_eq!(got.len(), 2);
     assert!(matches!(*got[0], CordisError::ServiceNotFound(_)));
@@ -1118,7 +1142,7 @@ async fn once_once() {
     ctx.events()
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    drained(&ctx).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1); // 至多一次
 }
 
@@ -1176,22 +1200,40 @@ async fn listener_unload_race() {
     let ctx = Ctx::root().unwrap();
     let (hits, _done) = recorder();
     let h = hits.clone();
+    // 进入监听器时报到,再交给 Rec 等 gate
+    struct Entered(Arc<tokio::sync::Notify>, Rec);
+    impl Listener<Ping> for Entered {
+        fn call<'a>(
+            &'a self,
+            ctx: &'a Ctx,
+            e: &'a Ping,
+        ) -> BoxFuture<'a, Result<Option<u32>, CordisError>> {
+            self.0.notify_one();
+            self.1.call(ctx, e)
+        }
+    }
     let gate = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
     let gate2 = gate.clone();
+    let entered2 = entered.clone();
     let view = ctx.plugin(simple("racer", move |ctx: &Ctx| {
         let hits = h.clone();
         let gate = gate2.clone();
+        let entered = entered2.clone();
         Box::pin(async move {
             ctx.events().on(
                 ctx,
                 &rutis::EventKey::of(),
-                Rec {
-                    hits,
-                    bail: None,
-                    err: false,
-                    notify: None,
-                    gate: Some(gate),
-                },
+                Entered(
+                    entered,
+                    Rec {
+                        hits,
+                        bail: None,
+                        err: false,
+                        notify: None,
+                        gate: Some(gate),
+                    },
+                ),
             )?;
             Ok(Effect::Done)
         })
@@ -1204,7 +1246,7 @@ async fn listener_unload_race() {
             .serial(&ctx2, &rutis::EventKey::of(), &Ping { value: 1 })
             .await
     });
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    soon(entered.notified()).await; // 监听器已在 gate 上
     view.dispose().await.unwrap(); // 与进行中分发竞争
     gate.notify_one(); // 放行
     dispatch.await.unwrap().unwrap();
@@ -1407,7 +1449,7 @@ async fn eviction_order() {
     let provider = ctx.plugin(simple("P", move |ctx: &Ctx| {
         let o = o1.clone();
         Box::pin(async move {
-            ctx.effect(move || marker_effect("P", o.clone(), 0))?; // 先注册 → LIFO 最后跑
+            ctx.effect(move || marker_effect("P", o.clone()))?; // 先注册 → LIFO 最后跑
             ctx.provide(Dep1)?;
             Ok(Effect::Done)
         })
@@ -1420,7 +1462,7 @@ async fn eviction_order() {
         move |ctx: &Ctx| {
             let o = o2.clone();
             Box::pin(async move {
-                ctx.effect(move || marker_effect("M", o.clone(), 0))?;
+                ctx.effect(move || marker_effect("M", o.clone()))?;
                 ctx.provide(Dep2)?;
                 Ok(Effect::Done)
             })
@@ -1434,7 +1476,7 @@ async fn eviction_order() {
         move |ctx: &Ctx| {
             let o = o3.clone();
             Box::pin(async move {
-                ctx.effect(move || marker_effect("C", o.clone(), 0))?;
+                ctx.effect(move || marker_effect("C", o.clone()))?;
                 Ok(Effect::Done)
             })
         },
@@ -1590,15 +1632,7 @@ async fn cancel_wakes_awaiters() {
         })
     }));
     // apply 阻塞在 token 上:等它进入 Loading,再 dispose(预取消唤醒)
-    soon(async {
-        loop {
-            if view.state().state == FiberState::Loading {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    reach(&view, FiberState::Loading).await;
     view.dispose().await.unwrap();
     assert_eq!(exited.load(Ordering::SeqCst), 1);
 }
@@ -1856,21 +1890,13 @@ async fn cancel_during_loading() {
                     o.fetch_add(1, Ordering::SeqCst); // Loading 中被唤醒
                     Ok(Effect::Done)
                 }
-                _ = tokio::time::sleep(Duration::from_secs(10)) => Ok(Effect::Done),
+                _ = std::future::pending::<()>() => unreachable!(),
             }
         })
     }));
     // 等 apply 进入 Loading(其 select 挂起),再 dispose
-    soon(async {
-        loop {
-            if view.state().state == FiberState::Loading {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
-    view.dispose().await.unwrap();
+    reach(&view, FiberState::Loading).await;
+    soon(view.dispose()).await.unwrap();
     assert_eq!(observed.load(Ordering::SeqCst), 1);
 }
 
@@ -1888,13 +1914,18 @@ async fn cancel_idempotent() {
 async fn cancel_cascades() {
     let ctx = Ctx::root().unwrap();
     let child_exited = Arc::new(AtomicUsize::new(0));
+    let child_started = Arc::new(tokio::sync::Notify::new());
     let ce = child_exited.clone();
+    let cs = child_started.clone();
     let parent = ctx.plugin(simple("parent", move |ctx: &Ctx| {
         let ce = ce.clone();
+        let cs = cs.clone();
         Box::pin(async move {
             ctx.plugin(simple("child", move |cctx: &Ctx| {
                 let ce = ce.clone();
+                let cs = cs.clone();
                 Box::pin(async move {
+                    cs.notify_one();
                     cctx.cancelled().await; // 父卸载级联取消子代
                     ce.fetch_add(1, Ordering::SeqCst);
                     Ok(Effect::Done)
@@ -1904,7 +1935,7 @@ async fn cancel_cascades() {
         })
     }));
     (&parent).await.expect("parent load");
-    tokio::time::sleep(Duration::from_millis(50)).await; // 子 fiber 启动
+    soon(child_started.notified()).await; // 子 fiber 已在 apply 中
     parent.dispose().await.unwrap();
     assert_eq!(child_exited.load(Ordering::SeqCst), 1);
 }
@@ -1952,7 +1983,7 @@ async fn apply_failure_rolls_back() {
     ctx.events()
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    drained(&ctx).await;
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     // 子插件已级联处置
     let child = child_slot.lock().unwrap().take().unwrap();
@@ -2015,29 +2046,43 @@ async fn evict_after_consumer_disposed_completes() {
 async fn disposer_drop_is_cancel_safe() {
     let ctx = Ctx::root().unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
-    let c = counter.clone();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let done = Arc::new(tokio::sync::Notify::new());
+    let (c, s, r, dn) = (
+        counter.clone(),
+        started.clone(),
+        release.clone(),
+        done.clone(),
+    );
     let d = ctx
         .effect(move || {
             Effect::AsyncDisposer(Box::new(move || {
-                let c = c.clone();
+                let (c, s, r, dn) = (c.clone(), s.clone(), r.clone(), dn.clone());
                 Box::pin(async move {
-                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    s.notify_one();
+                    r.notified().await;
                     c.fetch_add(1, Ordering::SeqCst);
+                    dn.notify_one();
                     Ok(())
                 })
             }))
         })
         .unwrap();
-    // 中途丢弃 dispose future(超时放弃)
-    let _ = tokio::time::timeout(Duration::from_millis(10), d.dispose()).await;
-    assert_eq!(counter.load(Ordering::SeqCst), 0);
-    // 独立清理任务继续完成
+    // 清理开始后中途丢弃 dispose future
+    let mut disposing = Box::pin(d.dispose());
     soon(async {
-        while counter.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::select! {
+            _ = &mut disposing => panic!("dispose finished while its cleanup was held"),
+            _ = started.notified() => {}
         }
     })
     .await;
+    drop(disposing);
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    // 独立清理任务继续完成
+    release.notify_one();
+    soon(done.notified()).await;
     assert_eq!(counter.load(Ordering::SeqCst), 1);
     // fiber 卸载 join 已缓存终态,不重跑
     ctx.root_view().unwrap().dispose().await.unwrap();
@@ -2156,7 +2201,7 @@ async fn concurrent_provide_single_winner() {
 async fn serial_register_order_adversarial() {
     struct SlowBail {
         value: u32,
-        delay_ms: u64,
+        turns: usize,
         hits: Arc<AtomicUsize>,
     }
     impl Listener<Ping> for SlowBail {
@@ -2167,10 +2212,10 @@ async fn serial_register_order_adversarial() {
         ) -> BoxFuture<'a, Result<Option<u32>, CordisError>> {
             let hits = self.hits.clone();
             let bail = self.value;
-            let delay = self.delay_ms;
+            let n = self.turns;
             let base = e.value;
             Box::pin(async move {
-                tokio::time::sleep(Duration::from_millis(delay)).await;
+                turns(n).await;
                 hits.fetch_add(1, Ordering::SeqCst);
                 Ok(Some(bail + base))
             })
@@ -2184,7 +2229,7 @@ async fn serial_register_order_adversarial() {
             &rutis::EventKey::of(),
             SlowBail {
                 value: 1,
-                delay_ms: 40,
+                turns: 20,
                 hits: hits.clone(),
             },
         )
@@ -2195,7 +2240,7 @@ async fn serial_register_order_adversarial() {
             &rutis::EventKey::of(),
             SlowBail {
                 value: 2,
-                delay_ms: 0,
+                turns: 0,
                 hits: hits.clone(),
             },
         )
@@ -2296,7 +2341,7 @@ async fn check_recovery_reactivates() {
 #[tokio::test]
 async fn parallel_waits_all() {
     struct Delayed {
-        delay_ms: u64,
+        turns: usize,
         err: bool,
         hits: Arc<AtomicUsize>,
     }
@@ -2308,9 +2353,9 @@ async fn parallel_waits_all() {
         ) -> BoxFuture<'a, Result<Option<u32>, CordisError>> {
             let hits = self.hits.clone();
             let err = self.err;
-            let delay = self.delay_ms;
+            let n = self.turns;
             Box::pin(async move {
-                tokio::time::sleep(Duration::from_millis(delay)).await;
+                turns(n).await;
                 hits.fetch_add(1, Ordering::SeqCst);
                 if err {
                     Err(CordisError::ServiceNotFound("fast".into()))
@@ -2327,7 +2372,7 @@ async fn parallel_waits_all() {
             &ctx,
             &rutis::EventKey::of(),
             Delayed {
-                delay_ms: 0,
+                turns: 0,
                 err: true,
                 hits: hits.clone(),
             },
@@ -2338,7 +2383,7 @@ async fn parallel_waits_all() {
             &ctx,
             &rutis::EventKey::of(),
             Delayed {
-                delay_ms: 60,
+                turns: 20,
                 err: false,
                 hits: hits.clone(),
             },
@@ -2417,12 +2462,7 @@ async fn restart_cleanup_errors_to_sink() {
     view.restart()
         .await
         .expect("restart Ok, cleanup error to sink");
-    soon(async {
-        while sink_errors.lock().unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    eventually(|| !sink_errors.lock().unwrap().is_empty()).await;
     assert!(matches!(
         *sink_errors.lock().unwrap()[0],
         CordisError::InactiveEffect

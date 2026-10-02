@@ -1,0 +1,38 @@
+# The rutis kernel tests run many times over, to catch failures that depend
+# on how tasks interleave and show up only once in a while. Runs nightly and
+# on demand; a failing round prints the test output it saw.
+name: stress
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: How many times to run the rutis tests
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  rutis:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rutis --no-run
+      - name: Repeat the rutis tests
+        env:
+          ROUNDS: ${{ inputs.rounds || '20' }}
+        run: |
+          case "$ROUNDS" in ""|*[!0-9]*) echo "::error::rounds must be a number"; exit 1;; esac
+          for round in $(seq 1 "$ROUNDS"); do
+            if ! cargo test -q -p rutis > out.txt 2>&1; then
+              cat out.txt
+              echo "::error title=rutis stress::failed in round $round of $ROUNDS"
+              exit 1
+            fi
+          done
+          echo "rutis tests passed $ROUNDS rounds." >> "$GITHUB_STEP_SUMMARY"

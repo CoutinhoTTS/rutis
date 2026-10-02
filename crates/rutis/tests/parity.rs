@@ -176,6 +176,21 @@ where
         .expect("timed out")
 }
 
+/// Polls `done` until it holds; the timeout only guards against a hang.
+async fn eventually(mut done: impl FnMut() -> bool) {
+    soon(async {
+        while !done() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+}
+
+/// Waits until every accepted `emit` has finished dispatching.
+async fn drained(ctx: &Ctx) {
+    eventually(|| ctx.diagnostics().event_backlogs.is_empty()).await
+}
+
 /// 等待 fiber 进入目标状态(watch last-value)。
 async fn wait_state(view: &FiberView, want: FiberState) {
     soon(async {
@@ -230,15 +245,7 @@ fn transitions_of(log: &TransitionLog, id: PluginId) -> Vec<(FiberState, FiberSt
 }
 
 async fn wait_transitions(log: &TransitionLog, id: PluginId, at_least: usize) {
-    soon(async {
-        loop {
-            if transitions_of(log, id).len() >= at_least {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    eventually(|| transitions_of(log, id).len() >= at_least).await;
 }
 
 /// 分段装配(dispose.spec async yield 系列的 Rust 载体):每段先等放行门,
@@ -447,12 +454,7 @@ async fn logs_disposal_observer_failures_without_rejecting_disposal() {
         .await
         .expect("observer failure must not reject disposal");
     assert_eq!(*seen.lock().unwrap(), vec!["disposed"]);
-    soon(async {
-        while sink.lock().unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    eventually(|| !sink.lock().unwrap().is_empty()).await;
     assert_eq!(sink.lock().unwrap().len(), 1);
     assert!(
         matches!(*sink.lock().unwrap()[0], CordisError::ServiceNotFound(ref m) if m == "observer failed")
@@ -536,12 +538,7 @@ async fn does_not_await_async_disposal_observers_but_still_observes_rejections()
     assert!(sink.lock().unwrap().is_empty()); // 观察者还挂着,尚未报错
 
     observer_gate.notify_one();
-    soon(async {
-        while sink.lock().unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    eventually(|| !sink.lock().unwrap().is_empty()).await;
     assert!(
         matches!(*sink.lock().unwrap()[0], CordisError::ServiceNotFound(ref m) if m == "observer")
     );
@@ -667,12 +664,7 @@ async fn makes_a_loading_parent_join_child_cleanup_already_in_progress() {
         })
     }));
     // owner 的 apply 已创建 child 并填槽(publication 进行中)
-    soon(async {
-        while child_slot.lock().unwrap().is_none() {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    eventually(|| child_slot.lock().unwrap().is_some()).await;
     *owner_slot.lock().unwrap() = Some(owner.clone());
     go.notify_one();
     soon(cleanup_started.notified()).await;
@@ -1081,12 +1073,7 @@ async fn logs_auto_rollback_cleanup_failure_once_when_a_structural_owner_joins()
     *slot.lock().unwrap() = Some(view.clone());
     soon(registered.notified()).await;
     hold.notify_one();
-    soon(async {
-        while !restart_done.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    eventually(|| restart_done.load(Ordering::SeqCst)).await;
     // 回滚 + 重启 join 同一回滚:错误只记录一次
     assert_eq!(sink.lock().unwrap().len(), 1);
     assert!(
@@ -2475,18 +2462,13 @@ async fn events_ctx_on() {
     ctx.events()
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
-    soon(async {
-        while hits.load(Ordering::SeqCst) < 2 {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await;
+    eventually(|| hits.load(Ordering::SeqCst) >= 2).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     d.dispose().await.unwrap();
     ctx.events()
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    drained(&ctx).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2); // 卸载后不再分发
 }
 
@@ -2515,13 +2497,13 @@ async fn events_ctx_once() {
     ctx.events()
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    drained(&ctx).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1); // 至多一次
     d.dispose().await.unwrap();
     ctx.events()
         .emit(&ctx, &rutis::EventKey::of(), Arc::new(Ping { value: 1 }))
         .expect("default event dispatch");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    drained(&ctx).await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
