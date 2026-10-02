@@ -44,6 +44,24 @@ rutis-dsh up [--profile <name>] [dsh 选项...]
 | 宿主服务 | `src/aimux.rs` | `aimux` 的 Rust 实现：每次调用是一个 aimux-llm 流，适配器分批读取；停止读取即取消 |
 | 挂载 | `Cargo.toml` | `web`：web 界面；`agent`：不带界面的 dsh agent 组合（测试与从 Rust 驱动 agent） |
 
+## profile 配置（rutis-loader）
+
+`rutis_dsh::profile` 把 dsh 的 profile 配置接到 [rutis-loader](../rutis-loader)，不需要 Node：
+
+| 部分 | 作用 |
+| --- | --- |
+| `profile::load` | 按 dsh-app-boot 的规则读出各层：bundle 的 patch 文件（解析不到、没有 `dsh.bundle`、版本不兼容的 bundle 跳过并说明原因）、用户层 `cordis.patch.yml`（可编辑）、`$DSH_HOME/cordis.patch.yml`、`--patch`、遥测开关；嵌套 include 展开为最后一层 |
+| `profile::UserLayerStore` | 用户层的 `Persist`：持有与 dsh 相同的跨进程写锁（`<profile>/package.json.lock`），比对版本，只重写变化的 patch（其余 patch 的注释保留），读回校验后原子替换 |
+| `profile::expr::JsSubset` | dsh 写在 `!!js` 里的 JavaScript 子集；`ctx` 只能读服务名目录里登记的服务 |
+| `profile::watch::watch` | 轮询 profile 的文件，变化后重新读层并 reconcile |
+| `rutis-dsh dump-config` | 打印合成后的 profile，对照 `dsh --dump-config` |
+
+与 dsh 的一致性由对拍测试保证：YAML 方言对 js-yaml，表达式对 Node，分层对 dsh-app-boot（见 `tests/profile_*.rs`，需要安装 npm 项目）。
+
+```sh
+cargo run -p rutis-dsh -- dump-config --profile web
+```
+
 ## 部署
 
 二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_INTEROP_ROOT` 指向它（见 rutis-interop README 的“部署”）。仓库内的 npm 项目以 `file:` 依赖引用 `interop/node`；独立部署时可改为 npm 上的 `@arcships/rutis-interop`。

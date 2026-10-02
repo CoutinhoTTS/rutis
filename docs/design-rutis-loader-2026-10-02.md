@@ -1,6 +1,6 @@
 # rutis-loader：插件管理层（设计稿）
 
-状态：P1 已实现；P2 的 rutis-loader 部分（服务名目录、表达式钩子）已实现，rutis-dsh 部分未实现。日期：2026-10-02。
+状态：P1、P2 已实现（rutis-loader、rutis-dsh 的 `profile` 模块），P3 起见各自 PR。日期：2026-10-02。
 对照对象：dsh vendored 的 `@deepseek-ai/cordis-plugin-loader` 1.0.5（`src/config/{entry,tree,group}.ts`、`src/index.ts`）、`cordis-plugin-include` 1.0.9、`dsh-app-boot`、`dsh-config-editor`。
 
 ## 一、要解决什么
@@ -458,7 +458,7 @@ pub trait Expressions: Send + Sync + 'static {
 - 实现 `Persist`，只写用户层文件：
   - 版本号 = 文件内容哈希；
   - `save` 在 profile 的**跨进程文件锁**（dsh 用的是 `withFileLock`）里做"读当前文件 → 比较版本 → 写"，不一致就返回 `Conflict`。锁只保证这一步原子，防止丢失修改靠的是版本比较（§八 多写者）；
-  - 把 `edits` 依次作用在 YAML 文档上做局部修改，**保留用户的注释和格式**（dsh-config-editor 用的是 `yaml` 库的 `parseDocument`）；写之前解析一遍结果，与 `patches` 比对，不一致就整层重写并打警告；
+  - 按 patch 粒度重写：没有变化的 patch 原样保留源文本（包括注释和格式），变化了的 patch 重新生成（它自己的注释随之丢失）；写之前解析一遍结果，与 `patches` 比对，不一致就整层重新生成。dsh-config-editor 用 `yaml` 库在节点粒度上修改，粒度比这里细，见 §十九。
   - 临时文件 + rename 原子替换。
 
 ### 热重载
@@ -603,3 +603,7 @@ pub trait Expressions: Send + Sync + 'static {
 5. **`!!js` 要支持**：rutis-loader 提供表达式钩子，JS 子集求值器放在 rutis-dsh，详见 §十一之二、§十二。原先"一直不求值"的想法不可行。
 6. **表达式里的 `ctx` 只开放宿主登记过的服务。** `ctx.<服务>.<字段>` 只能读宿主专门登记为"表达式可读"的服务（比如 `webStartup`、`headlessStartup` 这类启动参数服务），读其它服务直接报错。`ctx.get('<名字>')` 只判断服务在不在，不读内容，所以对服务名目录里所有登记过的名字都开放。这样配置读不到插件内部数据，出问题也好查。
 7. **rutis-loader 不读写任何文件。** 输入是有序的层（数据），输出是持久化钩子。插件组合写死在代码里的项目不用 loader；要动态管理的项目自己决定数据存哪；dsh 的文件规则在 rutis-dsh。
+
+## 十九、仍待确认
+
+- 用户层的注释按 patch 粒度保留（§十二）。如果需要节点粒度（被修改的 patch 内部的注释也保留），要么找一个保留注释的 Rust YAML 编辑库，要么自己做基于位置的节点替换。
