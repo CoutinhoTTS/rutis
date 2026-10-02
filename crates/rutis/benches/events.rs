@@ -4,8 +4,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use rutis::{
-    BoxFuture, CordisError, Ctx, Event, EventKey, EventPattern, Listener, PatternListener,
-    SyncEvent, SyncNext,
+    BoxFuture, CordisError, Ctx, Event, EventKey, EventPattern, Listener, Next, PatternListener,
+    SyncEvent, SyncNext, WaterfallListener,
 };
 
 struct Ping;
@@ -33,6 +33,21 @@ impl PatternListener<Ping> for Pass {
     ) -> BoxFuture<'a, Result<Option<u64>, CordisError>> {
         Box::pin(async { Ok(None) })
     }
+}
+/// Passes to the rest of the chain.
+struct Through;
+impl WaterfallListener<Ping> for Through {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: &'a Ping,
+        next: Next<'a, Ping>,
+    ) -> BoxFuture<'a, Result<u64, CordisError>> {
+        next.call()
+    }
+}
+fn terminal<'a>(_: &'a Ctx, _: &'a Ping) -> BoxFuture<'a, Result<u64, CordisError>> {
+    Box::pin(async { Ok(1) })
 }
 fn measure(mut call: impl FnMut(), iterations: usize) -> f64 {
     for _ in 0..1000 {
@@ -98,6 +113,68 @@ fn main() {
                 iterations,
             ),
         );
+        runtime.block_on(root.shutdown()).unwrap();
+    }
+    // The awaited dispatch modes, with empty listeners: serial runs every
+    // listener (each returns None), parallel runs them concurrently, and
+    // waterfall passes through every listener to the terminal.
+    for listeners in [0, 1, 8, 64] {
+        let root = Ctx::root().unwrap();
+        let key = EventKey::named("awaited");
+        for _ in 0..listeners {
+            root.events().on(&root, &key, Pass).unwrap();
+            root.events().on_waterfall(&root, &key, Through).unwrap();
+        }
+        let loops = if listeners > 8 {
+            iterations / 10 + 1
+        } else {
+            iterations
+        };
+        let ping = std::sync::Arc::new(Ping);
+        // Measured inside a runtime task, where plugins call them; parallel
+        // spawns one task per listener.
+        let task_root = root.clone();
+        let task_key = key.clone();
+        let [serial, parallel, waterfall] = runtime
+            .block_on(runtime.spawn(async move {
+                let (root, key) = (task_root, task_key);
+                let mut samples = [0.0; 3];
+                for (mode, sample) in samples.iter_mut().enumerate() {
+                    let once = || async {
+                        match mode {
+                            0 => {
+                                black_box(root.events().serial(&root, &key, &Ping).await.unwrap());
+                            }
+                            1 => root
+                                .events()
+                                .parallel(&root, &key, ping.clone())
+                                .await
+                                .unwrap(),
+                            _ => {
+                                black_box(
+                                    root.events()
+                                        .waterfall(&root, &key, &Ping, terminal)
+                                        .await
+                                        .unwrap(),
+                                );
+                            }
+                        }
+                    };
+                    for _ in 0..1000 {
+                        once().await;
+                    }
+                    let start = Instant::now();
+                    for _ in 0..loops {
+                        once().await;
+                    }
+                    *sample = start.elapsed().as_nanos() as f64 / loops as f64;
+                }
+                samples
+            }))
+            .unwrap();
+        report(&format!("serial exact listeners={listeners}"), serial);
+        report(&format!("parallel exact listeners={listeners}"), parallel);
+        report(&format!("waterfall exact listeners={listeners}"), waterfall);
         runtime.block_on(root.shutdown()).unwrap();
     }
     for patterns in [0, 1, 8, 64, 1024] {
