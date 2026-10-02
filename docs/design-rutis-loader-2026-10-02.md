@@ -1,6 +1,6 @@
 # rutis-loader：插件管理层（设计稿）
 
-状态：设计稿，未实现。日期：2026-10-02。
+状态：P1 已实现（crates/rutis-loader），P2 起未实现。日期：2026-10-02。
 对照对象：dsh vendored 的 `@deepseek-ai/cordis-plugin-loader` 1.0.5（`src/config/{entry,tree,group}.ts`、`src/index.ts`）、`cordis-plugin-include` 1.0.9、`dsh-app-boot`、`dsh-config-editor`。
 
 ## 一、要解决什么

@@ -134,9 +134,14 @@ impl Arena {
         };
         let config = match fields.remove("config") {
             None => Config::Absent,
-            Some(Value::Array(items)) if fields.get("group").is_some_and(truthy) => Config::Children(
-                items.into_iter().map(|item| self.build(item, layer)).collect(),
-            ),
+            Some(Value::Array(items)) if fields.get("group").is_some_and(truthy) => {
+                Config::Children(
+                    items
+                        .into_iter()
+                        .map(|item| self.build(item, layer))
+                        .collect(),
+                )
+            }
             Some(other) => Config::Value(other),
         };
         let id = match fields.get("id") {
@@ -278,12 +283,20 @@ pub fn apply_patches(layers: &[Layer]) -> Composed {
                     None => root.extend(built),
                     Some(id) => {
                         let Some(&target) = arena.index.get(id) else {
-                            warn(layer_index, patch_index, format!("patch insert: entry {id:?} not found"));
+                            warn(
+                                layer_index,
+                                patch_index,
+                                format!("patch insert: entry {id:?} not found"),
+                            );
                             continue;
                         };
                         let node = &mut arena.nodes[target];
                         if !node.fields.get("group").is_some_and(truthy) {
-                            warn(layer_index, patch_index, format!("patch insert: entry {id:?} is not a group"));
+                            warn(
+                                layer_index,
+                                patch_index,
+                                format!("patch insert: entry {id:?} is not a group"),
+                            );
                             continue;
                         }
                         let config = std::mem::replace(&mut node.config, Config::Absent);
@@ -301,11 +314,19 @@ pub fn apply_patches(layers: &[Layer]) -> Composed {
                 continue;
             }
             let Some(id) = id else {
-                warn(layer_index, patch_index, "patch: id is required for non-insert patches".into());
+                warn(
+                    layer_index,
+                    patch_index,
+                    "patch: id is required for non-insert patches".into(),
+                );
                 continue;
             };
             let Some(&target) = arena.index.get(id) else {
-                warn(layer_index, patch_index, format!("patch: entry {id:?} not found"));
+                warn(
+                    layer_index,
+                    patch_index,
+                    format!("patch: entry {id:?} not found"),
+                );
                 continue;
             };
             let node = &mut arena.nodes[target];

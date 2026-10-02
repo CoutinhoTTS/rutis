@@ -48,8 +48,10 @@ fn matches_cordis_apply_entry_patches() {
 fn inputs_are_not_modified_and_dropping_a_layer_reverts() {
     let base = Layer::new(
         "base",
-        serde_json::from_value(json!([{ "insert": [{ "id": "a", "name": "pa", "config": { "x": 1 } }] }]))
-            .unwrap(),
+        serde_json::from_value(
+            json!([{ "insert": [{ "id": "a", "name": "pa", "config": { "x": 1 } }] }]),
+        )
+        .unwrap(),
     );
     let user = Layer::new(
         "user",
@@ -90,7 +92,13 @@ fn flat_rows_carry_owner_parent_and_overrides() {
     let summary: Vec<_> = composed
         .flat
         .iter()
-        .map(|row| (row.id.clone().unwrap(), row.parent.clone(), row.owner.clone()))
+        .map(|row| {
+            (
+                row.id.clone().unwrap(),
+                row.parent.clone(),
+                row.owner.clone(),
+            )
+        })
         .collect();
     assert_eq!(
         summary,
