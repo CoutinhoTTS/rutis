@@ -40,7 +40,7 @@ group = [
     { name = "system_prompt", plugin = "@deepseek-ai/dsh-system-prompt" },
     { name = "tools", plugin = "@deepseek-ai/dsh-tools" },
     { name = "agents", plugin = "@deepseek-ai/dsh-agent" },
-    { name = "agent_loop", path = "cordis/agent-loop.ts" },
+    { name = "agent_loop", plugin = "@deepseek-ai/dsh-agent-loop" },
     { name = "adapter", path = "cordis/aimux-adapter.ts" },
     { name = "llm_probe", path = "cordis/probe.ts" },
     { name = "agent_probe", path = "cordis/agent-probe.ts" },

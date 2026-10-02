@@ -34,7 +34,7 @@ async fn mounts_load_from_the_npm_project_named_at_run_time() {
     std::env::set_var(rutis_interop::ROOT_VARIABLE, &copy);
     let ctx = mounted(Arc::new(Scripted::default())).await;
     let chunks = ctx
-        .get::<dsh::LlmProbe2>()
+        .get::<dsh::LlmProbe>()
         .unwrap()
         .collect("scripted", "m", "", "hi")
         .await

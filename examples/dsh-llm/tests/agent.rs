@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 async fn a_dsh_agent_turn_calls_a_tool_and_answers_through_aimux() {
     let service = Arc::new(Scripted::default());
     let ctx = mounted(service.clone()).await;
-    let probe = ctx.get::<dsh::AgentProbe2>().unwrap();
+    let probe = ctx.get::<dsh::AgentProbe>().unwrap();
 
     let messages: Vec<Value> = probe
         .run("agent", "m", "What is the code name?")
@@ -97,7 +97,7 @@ async fn a_dsh_agent_turn_on_a_real_model() {
     let provider = std::env::var("AIMUX_PROVIDER").unwrap_or_else(|_| "deepseek".into());
     let model = std::env::var("AIMUX_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
     let ctx = common::mount(Arc::new(aimux_llm::AimuxLlm::from_env()), &[&provider]).await;
-    let probe = ctx.get::<dsh::AgentProbe2>().unwrap();
+    let probe = ctx.get::<dsh::AgentProbe>().unwrap();
 
     let messages = probe
         .run(
