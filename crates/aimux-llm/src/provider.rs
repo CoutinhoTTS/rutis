@@ -12,7 +12,7 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 
 use crate::service::{
-    LlmService, LlmServiceError, ModelBrief, PartStream, PromptSpec, StreamRequest,
+    LlmService, LlmServiceError, MessageSpec, ModelBrief, PartStream, PromptSpec, StreamRequest,
 };
 
 /// per-key provider 工厂:(provider, api_key, model) → model。默认实现走
@@ -164,12 +164,7 @@ fn to_call_options(spec: &PromptSpec) -> CallOptions {
         prompt.push(text_message(Role::System, system));
     }
     for message in &spec.messages {
-        let role = match message.role.as_deref() {
-            Some("assistant") => Role::Assistant,
-            Some("system") => Role::System,
-            _ => Role::User,
-        };
-        prompt.push(text_message(role, &message.text));
+        prompt.push(prompt_message(message));
     }
     let tools = spec
         .tools
@@ -190,6 +185,45 @@ fn to_call_options(spec: &PromptSpec) -> CallOptions {
         prompt,
         tools: (!tools.is_empty()).then_some(tools),
         ..CallOptions::default()
+    }
+}
+
+/// 一条消息:assistant 带工具调用 part;回应某次调用的 tool 消息是工具
+/// 结果 part;其余为文本。
+fn prompt_message(message: &MessageSpec) -> LanguageModelPromptMessage {
+    match (message.role.as_deref(), &message.tool_call_id) {
+        (Some("tool"), Some(id)) => LanguageModelPromptMessage {
+            role: Role::Tool,
+            content: vec![ContentPart::ToolResult {
+                tool_call_id: id.clone(),
+                result: Value::String(message.text.clone()),
+                tool_name: message.tool_name.clone(),
+                is_error: Some(message.is_error.unwrap_or(false)),
+                preliminary: None,
+                dynamic: None,
+                provider_options: None,
+            }],
+            provider_options: None,
+        },
+        (Some("assistant"), _) => {
+            let mut content = Vec::new();
+            if !message.text.is_empty() {
+                content.push(ContentPart::text(&message.text));
+            }
+            content.extend(message.tool_calls.iter().map(|call| {
+                // 模型产出的非法 JSON 原样保留为字符串,不丢调用。
+                let input = serde_json::from_str(&call.arguments)
+                    .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+                ContentPart::tool_call(&call.id, &call.name, input)
+            }));
+            LanguageModelPromptMessage {
+                role: Role::Assistant,
+                content,
+                provider_options: None,
+            }
+        }
+        (Some("system"), _) => text_message(Role::System, &message.text),
+        _ => text_message(Role::User, &message.text),
     }
 }
 

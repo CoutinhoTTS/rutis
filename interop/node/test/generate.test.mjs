@@ -48,6 +48,37 @@ test('objects with methods become live object proxies with getters and methods',
   })
 })
 
+test('a generic live object that keeps wrapping itself stays an untyped reference', async () => {
+  // Zod-style schemas: `optional()` wraps the schema in a new instantiation
+  // of the same class, so expanding the methods never reaches a known type.
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    export class Schema<T> { optional(): Schema<Schema<T>> { throw new Error() } describe(): string { return '' } }
+    class Service { schema(): Schema<string> { throw new Error() } }
+    export function apply(ctx: Context) { ctx.provide('schemas', new Service()) }
+  `, file => {
+    const { rust, diagnostics } = generate(file, root)
+    assert.match(rust, /pub fn schema\(&self\) -> Result<Schema, ::rutis_interop::Error>/)
+    assert.match(rust, /pub fn optional\(&self\) -> Result<::rutis_interop::ObjectRef, ::rutis_interop::Error>/)
+    assert.match(rust, /pub fn describe\(&self\) -> Result<String, ::rutis_interop::Error>/)
+    assert.equal(diagnostics.length, 1)
+    assert.match(diagnostics[0], /plugin\.ts:\d+:\d+: Schema\.optional: Schema<Schema<string>> wraps Schema<string> again; bound as an untyped ObjectRef/)
+  })
+})
+
+test('relocatable mounts address the runtime and plugins from the npm project', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    class Service { ping(): number { return 1 } }
+    export function apply(ctx: Context) { ctx.provide('pinger', new Service()) }
+  `, (file, temporary) => {
+    const { rust } = generate(file, root, { root: temporary })
+    assert.match(rust, /::rutis_interop::npm_root\(".*generator-[^"]*"\)/)
+    assert.match(rust, /\.join\("plugin\.ts"\)/)
+    assert.match(rust, /\.join\("\.\.\/\.\.\/?"\)/)
+    // No absolute path but the build-time default of the root itself.
+    assert.equal(rust.split(temporary).length - 1, 1)
+  })
+})
+
 test('public state cannot silently become a copied value', async () => {
   await fixture(`import type { Context } from '@deepseek-ai/cordis'
     class Service { value = 1; read(): number { return this.value } }

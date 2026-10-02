@@ -60,6 +60,7 @@ pub struct Bindings {
     provided: Vec<String>,
     events: Vec<String>,
     emits: Vec<String>,
+    root: Option<std::path::PathBuf>,
 }
 
 impl Bindings {
@@ -71,7 +72,17 @@ impl Bindings {
             provided: Vec::new(),
             events: Vec::new(),
             emits: Vec::new(),
+            root: None,
         }
+    }
+
+    /// Locate the runtime and the plugins relative to the npm project at
+    /// `root`, so the binary can run against a copy of it elsewhere: see
+    /// [`crate::npm_root`]. Without it the generated code names absolute
+    /// paths on the build machine.
+    pub fn relocatable(mut self, root: impl AsRef<Path>) -> Self {
+        self.root = Some(root.as_ref().to_owned());
+        self
     }
 
     /// The single plugin of this mount; its configuration is `Config` itself.
@@ -127,8 +138,24 @@ impl Bindings {
                     .map(|event| format!("--emit={event}").into()),
             )
             .collect();
+        // Relocatable paths stay lexical: a symlinked package (a `file:`
+        // dependency) is addressed where it sits in the npm project.
+        let locate = |path: &Path| -> std::io::Result<std::path::PathBuf> {
+            match &self.root {
+                Some(_) => {
+                    path.metadata()?;
+                    std::path::absolute(path)
+                }
+                None => path.canonicalize(),
+            }
+        };
+        if let Some(root) = &self.root {
+            let mut argument = std::ffi::OsString::from("--root=");
+            argument.push(locate(root)?);
+            args.push(argument);
+        }
         for (name, plugin) in &self.members {
-            let plugin = plugin.canonicalize()?;
+            let plugin = locate(plugin)?;
             println!("cargo:rerun-if-changed={}", plugin.display());
             match name {
                 None if single => args.push(plugin.into_os_string()),
@@ -140,7 +167,8 @@ impl Bindings {
                 }
             }
         }
-        generate(args, &self.node_package, &self.module)
+        let node_package = locate(&self.node_package)?;
+        generate(args, &node_package, &self.module)
     }
 }
 
@@ -149,7 +177,6 @@ fn generate(
     node_package: &Path,
     module: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let node_package = node_package.canonicalize()?;
     let generator = node_package.join("src/generate.mjs");
     println!("cargo:rerun-if-changed={}", generator.display());
     println!(
@@ -158,7 +185,7 @@ fn generate(
     );
     let output = std::process::Command::new("node")
         .arg(&generator)
-        .arg(&node_package)
+        .arg(node_package)
         .args(&args)
         .output()?;
     if !output.status.success() {
@@ -297,7 +324,7 @@ pub fn from_manifest() -> Result<(), Box<dyn std::error::Error>> {
         let mount = mount
             .as_table()
             .ok_or(format!("mount {name} must be a table"))?;
-        let mut bindings = Bindings::new(name, &runtime);
+        let mut bindings = Bindings::new(name, &runtime).relocatable(&npm);
         match mount.get("group") {
             Some(toml::Value::Array(members)) => {
                 for member in members {

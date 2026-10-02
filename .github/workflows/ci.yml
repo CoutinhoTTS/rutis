@@ -37,10 +37,13 @@ jobs:
           cache-dependency-path: |
             interop/node/package-lock.json
             interop/baseline/package-lock.json
+            examples/dsh-llm/cordis/package-lock.json
       - run: npm --prefix interop/node ci
       - run: npm --prefix interop/node test
       # Real published Cordis plugins for the rutis-interop baseline test.
       - run: npm --prefix interop/baseline ci
+      # dsh-llm served by aimux-llm (examples/dsh-llm).
+      - run: npm --prefix examples/dsh-llm/cordis ci
 
       - name: cargo test (workspace, skip external host e2e)
         run: cargo test --workspace

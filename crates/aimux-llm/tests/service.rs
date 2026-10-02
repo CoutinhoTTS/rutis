@@ -8,6 +8,7 @@ use aimux_core::content::ContentPart;
 use aimux_core::error::AiMuxError;
 use aimux_core::language_model::LanguageModel;
 use aimux_core::language_model_message::LanguageModelPromptMessage;
+use aimux_core::message::Role;
 use aimux_core::options::CallOptions;
 use aimux_core::result::{GenerateResult, StreamResult};
 use aimux_core::stream_part::StreamPart;
@@ -245,4 +246,68 @@ async fn dto_maps_to_call_options_field_by_field() {
         }
         other => panic!("expected function tool, got {other:?}"),
     }
+}
+
+/// 工具往返:assistant 的工具调用与 tool 消息的结果以结构化 part 交给
+/// provider,不再折成文本。
+#[tokio::test]
+async fn tool_calls_and_results_reach_the_provider_as_structured_parts() {
+    let recorder = Arc::new(ChunkedLlm {
+        calls: Mutex::new(Vec::new()),
+    });
+    let rec2 = Arc::clone(&recorder);
+    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| {
+        Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>)
+    });
+    let svc = AimuxLlm::with_factory(
+        Arc::new(FailLlm {
+            touched: Arc::new(Mutex::new(false)),
+        }),
+        "deepseek",
+        "env-model",
+        factory,
+    );
+    let _ = svc
+        .stream(req(json!({
+            "provider": "deepseek", "model": "m", "apiKey": "k",
+            "options": {
+                "messages": [
+                    { "role": "user", "text": "look it up" },
+                    { "role": "assistant", "text": "checking", "toolCalls": [
+                        { "id": "c1", "name": "lookup", "arguments": "{\"q\":\"m2\"}" },
+                        { "id": "c2", "name": "lookup", "arguments": "not json" }
+                    ] },
+                    { "role": "tool", "text": "RESULT:m2", "toolCallId": "c1", "toolName": "lookup" },
+                    { "role": "tool", "text": "bad input", "toolCallId": "c2", "toolName": "lookup", "isError": true }
+                ]
+            }
+        })))
+        .await
+        .expect("stream");
+    let calls = recorder.calls.lock().unwrap();
+    let prompt = &calls.last().expect("recorded").prompt;
+    assert_eq!(prompt.len(), 4);
+    assert_eq!(prompt[1].role, Role::Assistant);
+    assert_eq!(
+        prompt[1].content,
+        vec![
+            ContentPart::text("checking"),
+            ContentPart::tool_call("c1", "lookup", json!({ "q": "m2" })),
+            // 模型产出的非法 JSON 原样保留为字符串,不丢调用。
+            ContentPart::tool_call("c2", "lookup", json!("not json")),
+        ]
+    );
+    let result = |id: &str, text: &str, is_error: bool| ContentPart::ToolResult {
+        tool_call_id: id.into(),
+        result: json!(text),
+        tool_name: Some("lookup".into()),
+        is_error: Some(is_error),
+        preliminary: None,
+        dynamic: None,
+        provider_options: None,
+    };
+    assert_eq!(prompt[2].role, Role::Tool);
+    assert_eq!(prompt[2].content, vec![result("c1", "RESULT:m2", false)]);
+    assert_eq!(prompt[3].role, Role::Tool);
+    assert_eq!(prompt[3].content, vec![result("c2", "bad input", true)]);
 }

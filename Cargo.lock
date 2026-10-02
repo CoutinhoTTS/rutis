@@ -972,6 +972,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsh-llm-mount"
+version = "0.1.0"
+dependencies = [
+ "aimux-core",
+ "aimux-llm",
+ "async-stream",
+ "async-trait",
+ "futures",
+ "rutis",
+ "rutis-interop",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
