@@ -9,10 +9,9 @@
 | 方向 | 负责 | 状态 |
 | --- | --- | --- |
 | rutis 应用挂载 Cordis 插件（主） | `rutis-interop` + `interop/node`（本路线图） | 开发中 |
-| Cordis / dsh 宿主使用 Rust 服务 | `rutis-cordis` + `host/`（[dsh 桥设计](design-dsh-bridge-2026-08-21.md)、[aimux 决策](decision-aimux-llm-plugin-2026-08-23.md)） | 在用，不受本路线图影响 |
-| `rutis-interop` 的反方向（Cordis 应用挂载 rutis 插件） | `build/rust.rs`、`server.rs` | **冻结**：保留代码与测试，不再增加能力；与 `rutis-cordis` 方向重合 |
+| dsh 完整界面运行在 rutis 宿主中 | `crates/rutis-dsh`（启动器插件 + aimux bundle，基于本兼容层） | 已完成；取代由 dsh 做宿主的旧桥 `rutis-cordis` + `host/`（已移除，[#83](https://github.com/arcships/rutis/issues/83)） |
+| `rutis-interop` 的反方向（Cordis 应用挂载 rutis 插件） | `build/rust.rs`、`server.rs` | **冻结**：保留代码与测试，不再增加能力 |
 
-传输层暂不统一（两套各约 800 行）。`rutis-interop` 稳定后再评估是否合并。
 
 ## 2. 已完成
 
@@ -107,7 +106,7 @@ W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设�
 
 未做：`@rutis/interop` 尚未发布到 npm，应用需要以 `file:` 依赖引用仓库中的 `interop/node`。
 
-可迁移部署（2026-10-02，已完成）：清单驱动的挂载按 npm 项目的相对位置定位运行时和插件，运行时由 `RUTIS_INTEROP_ROOT` 指定部署的副本，未设置时用构建时位置（`examples/dsh-llm/tests/relocate.rs`）。
+可迁移部署（2026-10-02，已完成）：清单驱动的挂载按 npm 项目的相对位置定位运行时和插件，运行时由 `RUTIS_INTEROP_ROOT` 指定部署的副本，未设置时用构建时位置（`crates/rutis-dsh/tests/relocate.rs`）。
 
 ### 实验：崩溃与调用开销（2026-09-29）
 

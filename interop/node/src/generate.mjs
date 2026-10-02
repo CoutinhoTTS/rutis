@@ -57,6 +57,8 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
     strict: true, skipLibCheck: true, noEmit: true,
+    // TypeScript plugins run under tsx, which loads `./module.ts` imports.
+    allowImportingTsExtensions: true,
   })
   const errors = ts.getPreEmitDiagnostics(program).filter(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
   if (errors.length) {
@@ -406,7 +408,9 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
       const configParameter = construct?.parameters[1]
       if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
     } else {
-      const applyType = checker.getTypeOfSymbolAtLocation(applyExport, applyExport.valueDeclaration)
+      // `export { apply } from './boot.ts'` exports an alias of the function.
+      const applySymbol = resolveAlias(applyExport)
+      const applyType = checker.getTypeOfSymbolAtLocation(applySymbol, applySymbol.valueDeclaration)
       const configParameter = applyType.getCallSignatures()[0]?.parameters[1]
       if (configParameter) configType = checker.getTypeOfSymbolAtLocation(configParameter, configParameter.valueDeclaration)
       // Source plugins: literal ctx.provide calls. Declaration-only packages:

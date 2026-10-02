@@ -115,6 +115,19 @@ test('configuration uses the input type of a declared Config schema', async () =
   })
 })
 
+test('a re-exported apply keeps its configuration type', async () => {
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    declare module '@deepseek-ai/cordis' { interface Context { pinger: { ping(): number } } }
+    export { apply } from './boot.ts'
+  `, async (file, temporary) => {
+    await writeFile(join(temporary, 'boot.ts'), `import type { Context } from '@deepseek-ai/cordis'
+      export function apply(ctx: Context, config: { port?: number }) { ctx.provide('pinger', { ping: () => config.port ?? 0 }) }
+    `)
+    const { rust } = generate(file, root, { provide: ['pinger'] })
+    assert.match(rust, /pub struct Config \{[^}]*pub port: Option<f64>,/)
+  })
+})
+
 test('public state cannot silently become a copied value', async () => {
   await fixture(`import type { Context } from '@deepseek-ai/cordis'
     class Service { value = 1; read(): number { return this.value } }
