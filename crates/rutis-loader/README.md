@@ -28,3 +28,8 @@ loader.update("my-row", serde_json::json!({ "level": 2 })).await?;
 ```
 
 配置里的 `inject` / `isolate` 用 `ServiceCatalog` 把服务名对应到 `TypeKey`；`{ "__jsExpr": .. }` 表达式由 `LoaderOptions::expressions` 求值，loader 自己不带求值器（dsh 的在 rutis-dsh）。没登记的服务名、没装求值器时，相关行状态为 `Unresolved`。
+
+插件生命周期：
+
+- **volatile 字段**：配置 schema 中带 `"x-volatile": true` 的字段（schemars：`#[schemars(extend("x-volatile" = true))]`）只改了它们时不重启，loader 存下新配置并向插件发 `VolatileUpdate`；插件在 apply 里 `ctx.events().on(ctx, &volatile_key(ctx), ...)` 接收。
+- **插件卸载自己**：插件调 `ctx.dispose_self()`，loader 把该行设为 disabled 写进可编辑层，并发 `LoaderChanged::SelfDisposed`。

@@ -12,6 +12,7 @@ mod loader;
 mod patch;
 mod persist;
 mod resolver;
+mod volatile;
 
 pub use catalog::{ExprScope, Expressions, ServiceCatalog};
 pub use edit::{apply_edit, Edit};
@@ -23,3 +24,4 @@ pub use loader::{
 pub use patch::{apply_patches, Composed, ComposedRow, Layer, Owner, Patch, PatchWarning};
 pub use persist::{NoPersist, Persist, Version};
 pub use resolver::{Builtins, Chain, Resolved, Resolver};
+pub use volatile::{volatile_key, volatile_paths, VolatileUpdate};

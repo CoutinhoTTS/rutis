@@ -106,6 +106,7 @@ pub fn loader(e: &LoaderChanged) -> Value {
         LoaderChanged::Edited(edit) => json!({ "edited": edit }),
         LoaderChanged::Reloaded(id) => json!({ "reloaded": id }),
         LoaderChanged::Overlay(name) => json!({ "overlay": name }),
+        LoaderChanged::SelfDisposed { id, error } => json!({ "selfDisposed": id, "error": error }),
         _ => json!("other"),
     };
     json!({ "event": "loader", "change": change })

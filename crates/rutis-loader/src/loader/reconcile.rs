@@ -10,11 +10,12 @@ use serde_json::Value;
 use crate::error::Failure;
 use crate::patch::{apply_patches, Layer};
 use crate::resolver::Resolved;
+use crate::volatile::{volatile_change, volatile_paths, VolatileUpdate};
 use crate::LoaderError;
 
 use super::desired::{Desired, Eval, Row, RowScope};
 use super::plugins::{EntryConfig, EntryFactory, GroupPlugin};
-use super::{EntryInfo, EntryStatus, Group, Inner, ReconcileReport, Running, State};
+use super::{EntryInfo, EntryStatus, Group, Inner, LoaderChanged, ReconcileReport, Running, State};
 
 /// The module's own injects followed by the row's `inject`, deduplicated.
 fn combined_injects(resolved: &Resolved, scope: &RowScope) -> Vec<TypeKey> {
@@ -142,6 +143,7 @@ impl Inner {
                     injects: extra,
                     token,
                 });
+                self.monitor(id.clone(), view.clone());
                 state.running.insert(
                     id,
                     Running {
@@ -199,6 +201,7 @@ impl Inner {
                     value: config.clone(),
                 },
             );
+            self.monitor(id.clone(), view.clone());
             state.running.insert(
                 id,
                 Running {
@@ -217,6 +220,50 @@ impl Inner {
                 },
             );
         }
+    }
+
+    /// Watch a spawned fiber; if it ends while still this row's record, the
+    /// plugin disposed itself: drop the record and disable the row, as
+    /// cordis's loader does. Disposals the loader starts (or a group's
+    /// cascade) remove the record first, so they are not mistaken for it.
+    fn monitor(self: &Arc<Self>, id: String, view: FiberView) {
+        let weak = Arc::downgrade(self);
+        let mut watch = view.watch();
+        tokio::spawn(async move {
+            loop {
+                if watch.borrow().state == FiberState::Disposed {
+                    break;
+                }
+                if watch.changed().await.is_err() {
+                    return;
+                }
+            }
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            {
+                let mut state = inner.state.lock().unwrap();
+                match state.running.get(&id) {
+                    Some(running) if running.view.id == view.id => {
+                        let running = state.running.remove(&id).unwrap();
+                        let key = Some(id.clone());
+                        if state.groups.get(&key).map(|g| g.token) == Some(running.token) {
+                            state.groups.remove(&key);
+                        }
+                    }
+                    _ => return,
+                }
+            }
+            let loader = super::Loader {
+                inner: inner.clone(),
+            };
+            let error = loader
+                .set_disabled(&id, true)
+                .await
+                .err()
+                .map(|e| e.to_string());
+            inner.emit(LoaderChanged::SelfDisposed { id, error });
+        });
     }
 
     pub(super) fn root(&self) -> Option<Ctx> {
@@ -403,11 +450,13 @@ impl Inner {
         }
 
         let mut updates = Vec::new();
+        let mut notifications = Vec::new();
         {
             let mut state = self.state.lock().unwrap();
             let state = &mut *state;
             let mut settled = Vec::new();
             let mut unevaluable = Vec::new();
+            let mut volatile = Vec::new();
             for (id, running) in state.running.iter() {
                 if running.group {
                     continue;
@@ -435,6 +484,17 @@ impl Inner {
                     settled.push(id.clone());
                     continue;
                 }
+                if same_module && running.view.state().state == FiberState::Active {
+                    let paths = resolved
+                        .schema
+                        .as_ref()
+                        .map(volatile_paths)
+                        .unwrap_or_default();
+                    if let Some(changed) = volatile_change(&running.config, &desired, &paths) {
+                        volatile.push((id.clone(), resolved.clone(), desired, changed));
+                        continue;
+                    }
+                }
                 let config = EntryConfig {
                     resolved: resolved.clone(),
                     value: desired,
@@ -453,10 +513,40 @@ impl Inner {
             for (id, error) in unevaluable {
                 state.rejected.insert(id, error);
             }
+            // Volatile-only changes: store without restarting, then tell the
+            // plugin. A refused store falls back to an ordinary update.
+            for (id, resolved, desired, paths) in volatile {
+                let Some(running) = state.running.get_mut(&id) else {
+                    continue;
+                };
+                let config = EntryConfig {
+                    resolved: resolved.clone(),
+                    value: desired.clone(),
+                };
+                if running.view.set_config(config.clone()).is_ok() {
+                    running.config = desired.clone();
+                    state.rejected.remove(&id);
+                    let running = &state.running[&id];
+                    notifications.push((
+                        running.ctx.clone(),
+                        crate::volatile::key_for(running.view.instance()),
+                        VolatileUpdate {
+                            paths,
+                            config: desired,
+                        },
+                    ));
+                } else {
+                    let name = running.name.clone();
+                    updates.push((id, running.view.clone(), running.view.update(config), name));
+                }
+            }
             let groups: Vec<Option<String>> = state.groups.keys().cloned().collect();
             for group in groups {
                 self.spawn_children(state, &group);
             }
+        }
+        for (ctx, key, update) in notifications {
+            let _ = ctx.events().emit(&ctx, &key, Arc::new(update));
         }
         for (id, view, update, name) in updates {
             let result = update.await;

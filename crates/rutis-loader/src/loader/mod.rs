@@ -163,6 +163,12 @@ pub enum LoaderChanged {
     Reloaded(String),
     /// An overlay layer was set or removed.
     Overlay(String),
+    /// A row's plugin disposed itself; the row was disabled in the editable
+    /// layer (`error` when that edit failed, e.g. no editable layer).
+    SelfDisposed {
+        id: String,
+        error: Option<String>,
+    },
 }
 
 impl Event for LoaderChanged {
