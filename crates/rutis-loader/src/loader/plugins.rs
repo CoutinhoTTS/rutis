@@ -44,6 +44,8 @@ impl PluginFactory<EntryConfig> for EntryFactory {
 pub(super) struct GroupPlugin {
     pub(super) inner: Weak<Inner>,
     pub(super) id: String,
+    /// Keys from the row's `inject`.
+    pub(super) injects: Vec<TypeKey>,
     /// The token of the spawn that created this plugin.
     pub(super) token: u64,
 }
@@ -51,6 +53,10 @@ pub(super) struct GroupPlugin {
 impl Plugin for GroupPlugin {
     fn name(&self) -> &str {
         &self.id
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
     }
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
@@ -84,6 +90,8 @@ impl LoaderPlugin {
                 inner: Arc::new(Inner {
                     resolver: Arc::new(resolver),
                     persist: options.persist,
+                    catalog: options.catalog,
+                    expressions: options.expressions,
                     op: tokio::sync::Mutex::new(()),
                     state: Mutex::new(State::default()),
                 }),

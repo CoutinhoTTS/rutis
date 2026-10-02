@@ -8,10 +8,9 @@ use rutis::CordisError;
 
 use crate::edit::{apply_edit, Edit};
 use crate::error::Failure;
-use crate::patch::{apply_patches, Layer};
+use crate::patch::Layer;
 use crate::{LoaderError, PersistError};
 
-use super::desired::Desired;
 use super::{Inner, LoaderChanged, PendingEditDropped};
 
 /// How many times a version conflict is resolved by replaying the pending
@@ -22,7 +21,16 @@ impl Inner {
     /// Check a row would start: resolve, validate the config, build and
     /// validate the instance. Nothing is spawned.
     pub(super) async fn dry_run(&self, layers: &[Layer], id: &str) -> Result<(), LoaderError> {
-        let desired = Desired::from_composed(apply_patches(layers));
+        let (desired, base) = {
+            let state = self.state.lock().unwrap();
+            let root = state.groups.get(&None).map(|g| g.ctx.clone());
+            let desired = self.build_desired(layers, root.as_ref());
+            let parent = desired
+                .row(id)
+                .and_then(|row| state.groups.get(&row.parent))
+                .map(|g| g.ctx.clone());
+            (desired, parent.or(root))
+        };
         let Some(row) = desired.row(id) else {
             return Ok(());
         };
@@ -37,7 +45,9 @@ impl Inner {
         }
         let name = row.name.clone().unwrap_or_default();
         let resolved = self.resolver.resolve(&name).await?;
-        let config = row.config.clone();
+        // Evaluate where the plugin would run: its group, with its isolates.
+        let ctx = base.map(|ctx| row.scope.context(&ctx));
+        let config = self.eval().value(&row.config, ctx.as_ref())?;
         let checked = catch_unwind(AssertUnwindSafe(|| {
             resolved.factory.validate_config(&config)?;
             resolved.factory.build(&config)?.validate()

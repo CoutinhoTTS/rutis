@@ -68,8 +68,14 @@ pub enum LoaderError {
     /// The edit is live but could not be persisted; it stays queued.
     #[error("edit applied but not persisted: {0}")]
     PersistFailed(String),
-    #[error("expression not supported: {0}")]
+    #[error("expression failed: {0}")]
     Expression(String),
+    /// Service names the catalog does not know.
+    #[error("unknown services: {}", .0.join(", "))]
+    UnknownService(Vec<String>),
+    /// An expression read a service that is not registered as readable.
+    #[error("service {0:?} is not readable from expressions")]
+    NotReadable(String),
     #[error("loader is closed")]
     Closed,
 }

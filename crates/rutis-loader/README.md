@@ -27,4 +27,4 @@ let report = loader
 loader.update("my-row", serde_json::json!({ "level": 2 })).await?;
 ```
 
-P1 尚未支持（P2 补上）：配置里的 `inject` / `isolate`、`!!js` 表达式；用到它们的行状态为 `Unresolved`。
+配置里的 `inject` / `isolate` 用 `ServiceCatalog` 把服务名对应到 `TypeKey`；`{ "__jsExpr": .. }` 表达式由 `LoaderOptions::expressions` 求值，loader 自己不带求值器（dsh 的在 rutis-dsh）。没登记的服务名、没装求值器时，相关行状态为 `Unresolved`。

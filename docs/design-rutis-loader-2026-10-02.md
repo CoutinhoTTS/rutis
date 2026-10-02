@@ -1,6 +1,6 @@
 # rutis-loader：插件管理层（设计稿）
 
-状态：P1 已实现（crates/rutis-loader），P2 起未实现。日期：2026-10-02。
+状态：P1 已实现；P2 的 rutis-loader 部分（服务名目录、表达式钩子）已实现，rutis-dsh 部分未实现。日期：2026-10-02。
 对照对象：dsh vendored 的 `@deepseek-ai/cordis-plugin-loader` 1.0.5（`src/config/{entry,tree,group}.ts`、`src/index.ts`）、`cordis-plugin-include` 1.0.9、`dsh-app-boot`、`dsh-config-editor`。
 
 ## 一、要解决什么
@@ -422,9 +422,11 @@ loader 只定义钩子，不带实现：
 ```rust
 pub trait Expressions: Send + Sync + 'static {
     /// 把一个表达式节点求值成 JSON 值。
-    fn evaluate(&self, expr: &str, ctx: &Ctx) -> Result<Value, LoaderError>;
+    fn evaluate(&self, expr: &str, scope: &ExprScope<'_>) -> Result<Value, LoaderError>;
 }
 ```
+
+实现时把求值器拿到的 `&Ctx` 换成了受限的 `ExprScope`：只能 `has(name)`（服务名目录里任意名字）和 `read(name)`（仅登记为可读、可序列化的服务），以结构保证 §十八-6，求值器拿不到完整的 ctx。`disabled` 用 loader 的根 ctx 求值；`config` 用该行自己的 ctx（父分组 + 本行 isolate）求值，每次 reconcile 重新求值，值变了就原地 update。
 
 - **求值时机**（与 cordis 一致）：`disabled` 由 loader 在决定是否装载时求值；`config` 里的表达式在每次装载或 update 前求值，结果交给插件；期望树和可编辑层里永远保留原始表达式。分组自身的 `config`（子行列表）不求值，子行由子行自己求值（cordis 的"树载体保持字面"规则）。
 - 没有装钩子时，遇到表达式节点，该 entry 进 `Unresolved("no expression evaluator")`。

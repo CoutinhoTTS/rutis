@@ -2,8 +2,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use rutis::{Ctx, TypeKey};
 use serde_json::Value;
 
+use crate::catalog::{ExprScope, Expressions, ServiceCatalog};
 use crate::patch::{truthy, Composed, Owner, PatchWarning};
 use crate::LoaderError;
 
@@ -23,9 +25,47 @@ pub(super) struct Row {
     pub(super) group: bool,
     pub(super) owner: Owner,
     pub(super) overridden: BTreeMap<String, usize>,
+    /// Evaluated with the loader's root context.
     pub(super) disabled: Result<bool, LoaderError>,
+    /// Raw; evaluated per spawn or update in the row's own context.
     pub(super) config: Value,
+    pub(super) scope: RowScope,
     pub(super) invalid: Option<LoaderError>,
+}
+
+/// The row's `isolate` and `inject`, resolved through the catalog.
+#[derive(Clone, Default)]
+pub(super) struct RowScope {
+    /// (service name, key, label), sorted by name.
+    pub(super) isolate: Vec<(String, TypeKey, String)>,
+    /// (service name, key), sorted by name.
+    pub(super) inject: Vec<(String, TypeKey)>,
+}
+
+impl RowScope {
+    /// What identifies the scope: a change means respawning.
+    pub(super) fn signature(&self) -> (Vec<(&str, &str)>, Vec<&str>) {
+        (
+            self.isolate
+                .iter()
+                .map(|(name, _, label)| (name.as_str(), label.as_str()))
+                .collect(),
+            self.inject.iter().map(|(name, _)| name.as_str()).collect(),
+        )
+    }
+
+    /// `parent` with every isolate applied.
+    pub(super) fn context(&self, parent: &Ctx) -> Ctx {
+        self.isolate
+            .iter()
+            .fold(parent.clone(), |ctx, (_, key, label)| {
+                ctx.isolate(key.clone(), label)
+            })
+    }
+
+    pub(super) fn inject_keys(&self) -> impl Iterator<Item = &TypeKey> {
+        self.inject.iter().map(|(_, key)| key)
+    }
 }
 
 pub(super) fn is_expression(value: &Value) -> bool {
@@ -41,8 +81,132 @@ pub(super) fn contains_expression(value: &Value) -> bool {
     }
 }
 
+/// Evaluates expression nodes in a raw value.
+pub(super) struct Eval<'a> {
+    pub(super) expressions: Option<&'a dyn Expressions>,
+    pub(super) catalog: &'a ServiceCatalog,
+}
+
+impl Eval<'_> {
+    /// `raw` with every expression node replaced by its value.
+    pub(super) fn value(&self, raw: &Value, ctx: Option<&Ctx>) -> Result<Value, LoaderError> {
+        if !contains_expression(raw) {
+            return Ok(raw.clone());
+        }
+        let Some(expressions) = self.expressions else {
+            return Err(LoaderError::Expression(
+                "no expression evaluator is installed".into(),
+            ));
+        };
+        let scope = ExprScope::new(ctx, self.catalog);
+        interpolate(raw, &|source| expressions.evaluate(source, &scope))
+    }
+}
+
+fn interpolate(
+    value: &Value,
+    evaluate: &dyn Fn(&str) -> Result<Value, LoaderError>,
+) -> Result<Value, LoaderError> {
+    if is_expression(value) {
+        return evaluate(value["__jsExpr"].as_str().unwrap_or_default());
+    }
+    Ok(match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| interpolate(item, evaluate))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| Ok((k.clone(), interpolate(v, evaluate)?)))
+                .collect::<Result<_, LoaderError>>()?,
+        ),
+        other => other.clone(),
+    })
+}
+
+fn parse_scope(id: &str, value: &Value, catalog: &ServiceCatalog) -> Result<RowScope, LoaderError> {
+    let mut isolate_names = Vec::new();
+    match value.get("isolate") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) => {
+            for (name, spec) in map {
+                let label = match spec {
+                    Value::Bool(true) => format!("rutis-loader/entry/{id}"),
+                    Value::String(label) => format!("rutis-loader/shared/{label}"),
+                    Value::Bool(false) | Value::Null => continue,
+                    other => {
+                        return Err(LoaderError::InvalidEntry(format!(
+                            "isolate.{name} of {id:?} must be true or a label, not {other}"
+                        )))
+                    }
+                };
+                isolate_names.push((name.clone(), label));
+            }
+        }
+        Some(other) => {
+            return Err(LoaderError::InvalidEntry(format!(
+                "isolate of {id:?} must be an object, not {other}"
+            )))
+        }
+    }
+    let inject_names: Vec<String> = match value.get("inject") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_owned).ok_or_else(|| {
+                    LoaderError::InvalidEntry(format!("inject of {id:?} must list service names"))
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        Some(Value::Object(map)) => {
+            // cordis's object form maps a name to intercept config, which
+            // rutis does not have; only a bare declaration is accepted.
+            for (name, config) in map {
+                let bare = matches!(config, Value::Null | Value::Bool(true))
+                    || config.as_object().is_some_and(|c| c.is_empty());
+                if !bare {
+                    return Err(LoaderError::Unsupported(format!(
+                        "intercept config for {name:?} in inject of {id:?}"
+                    )));
+                }
+            }
+            map.keys().cloned().collect()
+        }
+        Some(other) => {
+            return Err(LoaderError::InvalidEntry(format!(
+                "inject of {id:?} must be a list or an object, not {other}"
+            )))
+        }
+    };
+    isolate_names.sort();
+    let mut inject_names = inject_names;
+    inject_names.sort();
+    inject_names.dedup();
+
+    let keys = catalog.keys(
+        isolate_names
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(inject_names.iter().map(String::as_str)),
+    )?;
+    let (isolate_keys, inject_keys) = keys.split_at(isolate_names.len());
+    Ok(RowScope {
+        isolate: isolate_names
+            .into_iter()
+            .zip(isolate_keys)
+            .map(|((name, label), (_, key))| (name, key.clone(), label))
+            .collect(),
+        inject: inject_keys.to_vec(),
+    })
+}
+
 impl Desired {
-    pub(super) fn from_composed(composed: Composed) -> Self {
+    /// Read the composed rows. `disabled` expressions are evaluated with
+    /// `root`; config expressions are left for spawn time.
+    pub(super) fn from_composed(composed: Composed, eval: &Eval<'_>, root: Option<&Ctx>) -> Self {
         let mut desired = Desired {
             warnings: composed.warnings,
             ..Desired::default()
@@ -64,10 +228,7 @@ impl Desired {
             let group = value.get("group").is_some_and(truthy);
             let name = value.get("name").and_then(Value::as_str).map(str::to_owned);
             let disabled = match value.get("disabled") {
-                Some(d) if is_expression(d) => Err(LoaderError::Expression(
-                    "no expression evaluator is installed".into(),
-                )),
-                Some(d) => Ok(truthy(d)),
+                Some(d) => eval.value(d, root).map(|d| truthy(&d)),
                 None => Ok(false),
             };
             let config = if group {
@@ -75,21 +236,16 @@ impl Desired {
             } else {
                 value.get("config").cloned().unwrap_or(Value::Null)
             };
-            let invalid = if !group && name.is_none() {
-                Some(LoaderError::InvalidEntry(format!("{id:?} has no name")))
-            } else if ["inject", "isolate"]
-                .iter()
-                .any(|key| value.get(*key).is_some_and(|v| !v.is_null()))
-            {
-                Some(LoaderError::Unsupported(
-                    "inject / isolate in the config need the service catalog".into(),
-                ))
-            } else if contains_expression(&config) {
-                Some(LoaderError::Expression(
-                    "no expression evaluator is installed".into(),
-                ))
+            let (scope, invalid) = if !group && name.is_none() {
+                (
+                    RowScope::default(),
+                    Some(LoaderError::InvalidEntry(format!("{id:?} has no name"))),
+                )
             } else {
-                None
+                match parse_scope(&id, &value, eval.catalog) {
+                    Ok(scope) => (scope, None),
+                    Err(error) => (RowScope::default(), Some(error)),
+                }
             };
             desired.by_id.insert(id.clone(), desired.rows.len());
             desired.rows.push(Row {
@@ -102,6 +258,7 @@ impl Desired {
                 overridden: flat.overridden,
                 disabled,
                 config,
+                scope,
                 invalid,
             });
         }
