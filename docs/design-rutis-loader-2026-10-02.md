@@ -182,7 +182,9 @@ impl Loader {
     async fn schema_of(&self, name: &str) -> Result<Option<Value>, LoaderError>; // 只解析不装载，供"新建前先填表单"
     fn evaluated(&self, id: &str) -> Option<Result<Value, LoaderError>>; // 当前生效的求值后配置，只读（§十一之二）
 
-    // 改（= 改可编辑层 + reconcile + persist；任一步失败返回 Err，什么都不变）
+    // 改（= 改可编辑层 + reconcile + persist；等到稳定才返回）
+    // 校验或 reconcile 失败：回滚，可编辑层和存储不变（apply 失败的运行态见 §八）；
+    // 只有持久化失败（PersistFailed）时，修改已在运行态和可编辑层生效，留在待保存队列
     async fn create(&self, opts: NewEntry, parent: Option<&str>, position: Option<usize>) -> Result<(String, Option<FiberView>), LoaderError>; // 等到稳定才返回，§八
     async fn update(&self, id: &str, config: Value) -> Result<(), LoaderError>;
     async fn rename_module(&self, id: &str, name: &str) -> Result<(), LoaderError>; // 换 name，见 §五
@@ -256,7 +258,7 @@ pub struct EntryInfo {
 
 `create` 也不例外：dry-run 通过但 apply 失败 → 回滚（把刚插入的行从可编辑层去掉、再 reconcile），返回 `ApplyFailed`，不持久化；依赖没就绪 → 新行停在 `Pending`，算成功，正常持久化并返回 `(id, view)`。
 
-先 reconcile 后持久化，所以存下来的永远是跑通过的状态，不需要回滚存储。
+先 reconcile 后持久化，所以存下来的永远是**通过校验并完成本轮协调**的期望状态，不需要回滚存储。注意这不等于"都已启动"：依赖未就绪的行停在 `Pending` 也会被存下来。
 
 **apply 失败的细节**：内核 `FiberView::update` 不是原子替换：它先存新配置、卸载旧实例，再装新实例。dry-run 只能挡住校验和构造阶段的错误，挡不住 apply 阶段的。所以：
 
@@ -518,7 +520,7 @@ pub trait Expressions: Send + Sync + 'static {
 | `!!js` 表达式 | loader 提供钩子；JS 子集求值器在 rutis-dsh | §十一之二、§十二；超出子集的报错，不静默 |
 | volatile 字段（改了不重启） | P5 | 需要 schema 标记约定，以及插件侧接收不重启的更新 |
 | 插件卸载自己 → 标记 disabled | P5 | 已知缺口，§十三 |
-| 先写文件后校验 | 先校验、先 reconcile，最后持久化 | 存下来的永远是跑通过的状态 |
+| 先写文件后校验 | 先校验、先 reconcile，最后持久化 | 存下来的永远是通过校验并完成本轮协调的期望状态 |
 | 修改写回 | 写进可编辑层，上层覆盖则拒绝，失败回滚 | §八，与 dsh-config-editor 一致 |
 
 ## 十五、和现有东西的关系
