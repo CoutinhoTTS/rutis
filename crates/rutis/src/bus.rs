@@ -196,11 +196,24 @@ struct TailCleanup {
 impl Drop for TailCleanup {
     fn drop(&mut self) {
         let mut inner = self.bus.inner.lock().unwrap();
-        if matches!(inner.dispatch_tail.get(&self.key), Some((cur, _)) if *cur == self.generation) {
+        let Some(tail) = inner.dispatch_tail.get_mut(&self.key) else {
+            return;
+        };
+        tail.accepted.pop_front();
+        if tail.generation == self.generation {
             inner.dispatch_tail.remove(&self.key);
             shrink_if_sparse(&mut inner.dispatch_tail);
         }
     }
+}
+
+/// The dispatch chain of one event key: `emit`s run one after another.
+struct Tail {
+    /// The newest dispatch; it removes the chain when it finishes.
+    generation: u64,
+    task: tokio::task::JoinHandle<()>,
+    /// When each accepted, unfinished dispatch was emitted, oldest first.
+    accepted: std::collections::VecDeque<std::time::Instant>,
 }
 
 fn insert_hook<C>(list: &mut Vec<Arc<Hook<C>>>, hook: Arc<Hook<C>>, prepend: bool) {
@@ -232,9 +245,9 @@ struct BusInner {
     observers: Vec<Arc<DispatchObserver>>,
     /// 同事件键的派发尾链(D31):每次 emit 的派发任务 await 上一个,
     /// 保证同键多次 emit 按发射序执行(修 spawn 调度乱序)。
-    /// 值 = (代次, 任务):任务完成后自摘;代次防旧任务误删新尾链
+    /// 代次 = 最新派发:它完成时摘除整条链;代次防旧任务误删新尾链
     /// (0.2.1:keyed 通道随实例 churn,空尾链条目不残留)。
-    dispatch_tail: HashMap<TypeKey, (u64, tokio::task::JoinHandle<()>)>,
+    dispatch_tail: HashMap<TypeKey, Tail>,
 }
 
 /// Typed event bus: four async dispatch modes, plus synchronous bail/waterfall.
@@ -333,6 +346,26 @@ impl EventBus {
             inner.wf_hooks.len(),
             inner.dispatch_tail.len(),
         )
+    }
+
+    /// Accepted `emit` dispatches not yet finished, per event key.
+    pub(crate) fn backlogs(&self) -> Vec<crate::EventBacklog> {
+        let now = std::time::Instant::now();
+        let inner = self.inner.lock().unwrap();
+        let mut backlogs: Vec<_> = inner
+            .dispatch_tail
+            .iter()
+            .filter_map(|(key, tail)| {
+                let oldest = tail.accepted.front()?;
+                Some(crate::EventBacklog {
+                    key: key.clone(),
+                    pending: tail.accepted.len(),
+                    oldest: now.saturating_duration_since(*oldest),
+                })
+            })
+            .collect();
+        backlogs.sort_by_key(|backlog| std::cmp::Reverse(backlog.oldest));
+        backlogs
     }
 
     #[cfg(test)]
@@ -881,10 +914,11 @@ impl EventBus {
         let bus = self.clone();
         let tail_key = key.clone();
         let mut inner = self.inner.lock().unwrap();
-        let (gen, prev) = match inner.dispatch_tail.remove(&key) {
-            Some((gen, tail)) => (gen + 1, Some(tail)),
-            None => (0, None),
+        let (gen, prev, mut accepted) = match inner.dispatch_tail.remove(&key) {
+            Some(tail) => (tail.generation + 1, Some(tail.task), tail.accepted),
+            None => (0, None, std::collections::VecDeque::new()),
         };
+        accepted.push_back(std::time::Instant::now());
         let tail = handle.spawn(async move {
             let _flight = flight;
             let _pattern_flight = pattern_flight;
@@ -913,7 +947,14 @@ impl EventBus {
                 }
             }
         });
-        inner.dispatch_tail.insert(key, (gen, tail));
+        inner.dispatch_tail.insert(
+            key,
+            Tail {
+                generation: gen,
+                task: tail,
+                accepted,
+            },
+        );
         Ok(())
     }
 

@@ -44,6 +44,10 @@ let PluginDiagnostics { name, state, .. } = plugin;
 
 字段访问（`snapshot.state`）不受影响。
 
+## 新增
+
+- `RuntimeDiagnostics::event_backlogs`：各事件键已接收未完成的 `emit` 数量及最早一个的等待时长（`EventBacklog`），用于发现慢监听器（[#43](https://github.com/arcships/rutis/issues/43)）。
+
 ## 兼容检查
 
 发布 rutis 前，CI 用 [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) 对照 crates.io 上的最新版本：补丁版本含破坏性变更时发布失败。PR 中同样运行该检查并列出破坏性变更，提示发布时需要提升 minor 版本，但不阻止合并。

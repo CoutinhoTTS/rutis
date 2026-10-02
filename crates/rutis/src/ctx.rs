@@ -395,6 +395,7 @@ impl Ctx {
             shutting_down: self.0.shared.closing.load(Ordering::SeqCst),
             plugins,
             bindings: self.0.shared.registry.bindings_snapshot(),
+            event_backlogs: self.events().backlogs(),
         }
     }
 

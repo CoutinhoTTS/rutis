@@ -14,6 +14,21 @@ pub struct RuntimeDiagnostics {
     pub shutting_down: bool,
     pub plugins: Vec<PluginDiagnostics>,
     pub bindings: Vec<BindingDiagnostics>,
+    /// Event keys with `emit`s waiting or running, longest waiting first.
+    pub event_backlogs: Vec<EventBacklog>,
+}
+
+/// The `emit`s of one event key that were accepted and have not finished.
+/// Same-key emits are dispatched one after another, so a slow listener holds
+/// up the ones behind it; `emit` itself never waits for them.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct EventBacklog {
+    pub key: TypeKey,
+    /// Accepted dispatches not finished, including the one running.
+    pub pending: usize,
+    /// How long ago the oldest of them was emitted.
+    pub oldest: std::time::Duration,
 }
 
 #[derive(Debug, Clone)]

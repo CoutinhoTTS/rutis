@@ -294,7 +294,7 @@ emit、parallel 和 serial 使用 `on` 注册的普通监听器；waterfall 使�
 
 emit 和 parallel 忽略监听器返回的 `Some(value)`；serial 用它决定何时结束调用。选择分发方式时，应明确是否等待完成、是否需要返回值，以及处理函数之间的顺序要求。
 
-同键 `emit` 的后续分发会等待前一次完成。高频数据流可以使用有界队列，结合批处理或合并控制积压；需要重放的数据另行持久化。处理错误通过 `Result` 表达，waterfall 中的 panic 由调用方处理。
+同键 `emit` 的后续分发会等待前一次完成。`ctx.diagnostics().event_backlogs` 列出各事件键已接收未完成的 emit 数量和最早一个的等待时长，可据此发现慢监听器。高频数据流可以使用有界队列，结合批处理或合并控制积压；需要重放的数据另行持久化。处理错误通过 `Result` 表达，waterfall 中的 panic 由调用方处理。
 
 ## 实例子树
 
