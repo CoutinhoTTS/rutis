@@ -1,0 +1,187 @@
+[
+  {
+    "name": "insert then replace config",
+    "rows": [
+      {
+        "id": "a",
+        "name": "pa",
+        "config": {
+          "x": 3
+        }
+      }
+    ],
+    "warnings": 0
+  },
+  {
+    "name": "name assertion mismatch skips the patch",
+    "rows": [
+      {
+        "id": "a",
+        "name": "pa",
+        "config": 1
+      }
+    ],
+    "warnings": 1
+  },
+  {
+    "name": "missing targets and missing id warn",
+    "rows": [],
+    "warnings": 3
+  },
+  {
+    "name": "insert into a group and into a non-group",
+    "rows": [
+      {
+        "id": "g",
+        "name": "grp",
+        "group": true,
+        "config": [
+          {
+            "id": "c1",
+            "name": "p1"
+          },
+          {
+            "id": "c2",
+            "name": "p2",
+            "disabled": true
+          }
+        ]
+      },
+      {
+        "id": "leaf",
+        "name": "pl"
+      }
+    ],
+    "warnings": 1
+  },
+  {
+    "name": "replaced group children are invisible to later patches",
+    "rows": [
+      {
+        "id": "g",
+        "name": "grp",
+        "group": true,
+        "config": [
+          {
+            "id": "new",
+            "name": "pn"
+          }
+        ]
+      }
+    ],
+    "warnings": 1
+  },
+  {
+    "name": "insert after a whole config replacement mixes raw and indexed rows",
+    "rows": [
+      {
+        "id": "g",
+        "name": "grp",
+        "group": true,
+        "config": [
+          {
+            "id": "raw",
+            "name": "pr"
+          },
+          {
+            "id": "added",
+            "name": "pad",
+            "config": {
+              "k": true
+            }
+          }
+        ]
+      }
+    ],
+    "warnings": 1
+  },
+  {
+    "name": "empty insert and empty id insert go to the root",
+    "rows": [
+      {
+        "id": "r",
+        "name": "pr"
+      }
+    ],
+    "warnings": 0
+  },
+  {
+    "name": "null override is written as null",
+    "rows": [
+      {
+        "id": "a",
+        "name": "pa",
+        "disabled": null,
+        "config": null
+      }
+    ],
+    "warnings": 0
+  },
+  {
+    "name": "nested groups",
+    "rows": [
+      {
+        "id": "outer",
+        "name": "go",
+        "group": true,
+        "config": [
+          {
+            "id": "inner",
+            "name": "gi",
+            "group": true,
+            "config": [
+              {
+                "id": "deep",
+                "name": "pd",
+                "config": {
+                  "v": 2
+                }
+              },
+              {
+                "id": "deep2",
+                "name": "pd2"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "warnings": 0
+  },
+  {
+    "name": "duplicate ids: the later row takes the index",
+    "rows": [
+      {
+        "id": "d",
+        "name": "first"
+      },
+      {
+        "id": "d",
+        "name": "second",
+        "disabled": true
+      }
+    ],
+    "warnings": 0
+  },
+  {
+    "name": "override can turn a row into a group",
+    "rows": [
+      {
+        "id": "a",
+        "name": "pa",
+        "config": [
+          {
+            "id": "c",
+            "name": "pc"
+          },
+          {
+            "id": "c2",
+            "name": "pc2"
+          }
+        ],
+        "group": true
+      }
+    ],
+    "warnings": 1
+  }
+]
