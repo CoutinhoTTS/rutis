@@ -31,8 +31,25 @@ pub fn bundle_patch_files() -> Option<Vec<PathBuf>> {
 
 /// Run `tests/support/dsh.mjs` and parse its JSON output.
 pub fn node<'a>(args: &[&str], rest: impl IntoIterator<Item = &'a str>) -> Value {
+    node_with(args, rest, &[])
+}
+
+/// `node`, with an exact environment: only `vars` (and `PATH`).
+pub fn node_with<'a>(
+    args: &[&str],
+    rest: impl IntoIterator<Item = &'a str>,
+    vars: &[(&str, &str)],
+) -> Value {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/dsh.mjs");
-    let output = Command::new("node")
+    let mut command = Command::new("node");
+    if !vars.is_empty() {
+        command.env_clear();
+        command.env("PATH", std::env::var("PATH").unwrap_or_default());
+        for (key, value) in vars {
+            command.env(key, value);
+        }
+    }
+    let output = command
         .arg(script)
         .args(args)
         .args(rest)

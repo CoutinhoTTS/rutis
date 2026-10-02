@@ -26,6 +26,22 @@ if (command === 'yaml') {
   const warnings = []
   const rows = boot.composeEntries([patches], m => warnings.push(m))
   process.stdout.write(JSON.stringify({ rows, skipped: profile.skippedBundles.map(b => b.packageName), warnings: warnings.length }))
+} else if (command === 'eval') {
+  // { exprs, services, cwd }: evaluate each expression the way the Loader
+  // does (`with (ctx) eval(expr)`), with `process.env` from this process.
+  const { exprs, services, cwd } = JSON.parse(args[0])
+  const { dshHomePath } = await load('@deepseek-ai/dsh-home-paths')
+  process.chdir(cwd)
+  const ctx = Object.assign(Object.create({ get: name => services[name] }), services)
+  const out = exprs.map(source => {
+    try {
+      const value = new Function('ctx', 'dshHomePath', `return (${source});`)(ctx, dshHomePath)
+      return { value: value === undefined ? null : value }
+    } catch (error) {
+      return { error: String(error) }
+    }
+  })
+  process.stdout.write(JSON.stringify(out))
 } else {
   throw new Error(`unknown command ${command}`)
 }

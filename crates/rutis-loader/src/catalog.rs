@@ -127,7 +127,9 @@ pub struct ExprScope<'a> {
 }
 
 impl<'a> ExprScope<'a> {
-    pub(crate) fn new(ctx: Option<&'a Ctx>, catalog: &'a ServiceCatalog) -> Self {
+    /// A scope over `ctx` (`None`: no service is available). The loader
+    /// builds these itself; this is public so evaluators can be tested.
+    pub fn new(ctx: Option<&'a Ctx>, catalog: &'a ServiceCatalog) -> Self {
         Self { ctx, catalog }
     }
 

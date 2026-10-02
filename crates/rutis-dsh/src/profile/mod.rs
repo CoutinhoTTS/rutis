@@ -6,4 +6,6 @@
 //! [`rutis_loader::Layer`]s, stores the user layer, and evaluates `!!js`.
 //! Design: `docs/design-rutis-loader-2026-10-02.md` §十二.
 
+pub mod expr;
+pub mod paths;
 pub mod yaml;
