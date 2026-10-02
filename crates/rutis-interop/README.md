@@ -31,12 +31,12 @@ npm --prefix cordis ci
 ```toml
 [dependencies]
 rutis = "…"
-# 尚未发布到 crates.io：以 git 依赖引用，版本与 npm 运行时对应。
-rutis-interop = { git = "https://github.com/arcships/rutis" }
+# 与 npm 运行时 @arcships/rutis-interop 同版本发布。
+rutis-interop = "0.1"
 tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
-rutis-interop = { git = "https://github.com/arcships/rutis" }
+rutis-interop = "0.1"
 
 [package.metadata.rutis-interop]
 npm = "cordis"                   # 第 1 步的 npm 项目，相对 Cargo.toml

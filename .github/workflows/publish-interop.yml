@@ -1,6 +1,7 @@
-# The rutis-interop npm package (interop/node, @arcships/rutis-interop) is
-# released with tags interop-vX.Y.Z; the core crate uses rutis-vX.Y.Z.
-name: publish rutis-interop npm package
+# rutis-interop releases with tags interop-vX.Y.Z: the crate (crates.io) and
+# its Node runtime @arcships/rutis-interop (npm, interop/node) at the same
+# version. The core crate uses rutis-vX.Y.Z.
+name: publish rutis-interop
 
 on:
   push:
@@ -18,30 +19,49 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     environment: release
-    defaults:
-      run:
-        working-directory: interop/node
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.98.1
 
       - uses: actions/setup-node@v4
         with:
           node-version: '26'
           registry-url: https://registry.npmjs.org
 
-      # The tag names the package version, and the package speaks the
-      # protocol of the rutis-interop crate in the same commit.
-      - name: Verify tag and protocol
+      # The tag names both versions, and the runtime speaks the protocol of
+      # the crate in the same commit.
+      - name: Verify tag, versions and protocol
         run: |
-          version=$(node -p "require('./package.json').version")
-          test "$GITHUB_REF_NAME" = "interop-v$version"
-          protocol=$(node -p "require('./package.json').rutisProtocol")
-          grep -q "^pub const PROTOCOL: u32 = $protocol;" ../../crates/rutis-interop/src/lib.rs
+          crate_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rutis-interop") | .version')
+          npm_version=$(node -p "require('./interop/node/package.json').version")
+          test "$GITHUB_REF_NAME" = "interop-v$crate_version"
+          test "$npm_version" = "$crate_version"
+          protocol=$(node -p "require('./interop/node/package.json').rutisProtocol")
+          grep -q "^pub const PROTOCOL: u32 = $protocol;" crates/rutis-interop/src/lib.rs
 
-      - run: npm ci
-      - run: npm test
+      - name: Test the Node runtime
+        working-directory: interop/node
+        run: |
+          npm ci
+          npm test
 
-      - name: Publish to npm
+      # Both packages are checked before either is published; the crate
+      # dry run also builds it against the rutis release it depends on.
+      - name: Dry runs
+        run: |
+          cargo publish --locked -p rutis-interop --dry-run
+          (cd interop/node && npm publish --provenance --access public --dry-run)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish rutis-interop to crates.io
+        run: cargo publish --locked -p rutis-interop
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+
+      - name: Publish @arcships/rutis-interop to npm
+        working-directory: interop/node
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
