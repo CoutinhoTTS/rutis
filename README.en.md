@@ -162,7 +162,7 @@ view.update(cfg_v2).await?;   // dry-run failure leaves everything untouched; su
 **Dynamic event names** — events whose names are only known at runtime (host events, script-registered channels): typed events + dynamic qualifiers inherit all four dispatch semantics and lifecycle cleanup for free:
 
 ```rust
-let key = rutis::EventKey::<HostEvent>::dynamic(name);
+let key = rutis::EventKey::<RoomEvent>::dynamic(name);
 ctx.events().on(&ctx, &key, listener)?;
 ctx.events().emit(&ctx, &key, Arc::new(event))?;
 ```
@@ -180,7 +180,7 @@ Synchronous and asynchronous `apply` panics become plugin errors; a `check()` pa
 | Project | Description |
 |---|---|
 | [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | A minimal coding agent sample: aimux `LanguageModel` service + tool plugin + streaming driver plugin + ratatui TUI; `cargo install rutis-cli` |
-| [rutis-dsh](crates/rutis-dsh) + [host/](host) | A bridge feeding LLM services to the dsh host process: Rust composition root ↔ loopback TCP ↔ TS bridge plugin; host events flow `evt/emit` → `HostEvent` into the kernel bus |
+| [rutis-dsh](crates/rutis-dsh) | Runs dsh in a rutis host: `rutis-dsh up` starts dsh's full web UI through [rutis-interop](crates/rutis-interop), with model calls served by aimux in the same process; the dsh agent loop can also be driven from Rust without a UI |
 | [aimux-llm](crates/aimux-llm) | A standalone LLM service plugin: apply → registers the `llm` service, 329 providers |
 
 Sample commands inside this repo:
@@ -189,6 +189,7 @@ Sample commands inside this repo:
 cargo run -p rutis-cli -- --scripted          # offline agent demo, no API key
 cargo run -p rutis-agent --example tui_scripted   # scripted-backend TUI
 cargo test                                    # full test suite
+npm --prefix crates/rutis-dsh/dsh ci && cargo run -p rutis-dsh -- up   # dsh web UI (needs Node and a model key)
 ```
 
 > agent / cli consume [aimux](https://crates.io/crates/aimux-core) (unified LLM access layer) from crates.io — no sibling checkout needed; to hack a local aimux, add an uncommitted `[patch]` at the workspace root.
@@ -199,7 +200,7 @@ cargo test                                    # full test suite
 
 **Kernel & paradigm** — [kernel design (D1–D31 decision table)](docs/design-rust-port.md) · [96-spec parity ruling](docs/cordis-spec-parity-2026-08-18.md) · [hot update + dynamic events (design / three review rounds / post-mortem / audit)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md)
 
-**Bridge & host** — [Protocol plugin design (Chinese)](docs/design-protocol-plugins-2026-09-25.md) · [dual-core architecture & rustification roadmap](docs/design-dual-core-2026-08-20.md) · [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
+**Mounting Cordis / dsh** — [rutis-interop guide (Chinese)](crates/rutis-interop/README.md) · [requirements](docs/requirements-protocol-plugins.md) · [design](docs/design-protocol-plugin-mount.md) · [roadmap](docs/roadmap-native-plugin-mount.md) · [rutis-dsh](crates/rutis-dsh/README.md) · history: [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
 
 **Agent** — [agent framework](docs/design-min-agent-2026-08-18.md) · [verification & TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 

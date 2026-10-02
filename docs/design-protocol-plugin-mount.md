@@ -193,7 +193,7 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 **Cordis → rutis（已实现）**：应用在 `build.rs` 中用 `Bindings::event("名字")` 选择要转发的事件。
 
 - **生成**：每个选中的事件生成一个 Rust 结构体（字段即事件参数，类型映射同 §2），实现 `rutis::Event`（`NAME` 为事件名，`Value = ()`）并提供 `from_args`。rutis 插件按原生方式订阅：`ctx.events().on(&ctx, &EventKey::<CredentialsRecordUpdated>::of(), listener)`。
-- **只转发通知**：只接受返回 `void` 的事件。waterfall、bail 等有返回值的事件在构建时报错，因为由转发监听替 rutis 作答会改变原事件链（`rutis-cordis` 在 dsh 上实测过，被动订阅 waterfall 事件会中断整条链）。`internal/*` 事件不转发。
+- **只转发通知**：只接受返回 `void` 的事件。waterfall、bail 等有返回值的事件在构建时报错，因为由转发监听替 rutis 作答会改变原事件链（已移除的旧桥 `rutis-cordis` 在 dsh 上实测过，被动订阅 waterfall 事件会中断整条链）。`internal/*` 事件不转发。
 - **Node 侧**：原插件启动完成后，runner 为每个选中的事件在 Cordis 中登记一个转发监听，把参数经协议发给 Rust，返回一个在 rutis 侧处理完后 resolve 的 Promise。Cordis `emit` 忽略这个 Promise（发出即忘，边界规则 2）；`parallel` / `serial` 会等待它。被忽略的拒绝不会成为未处理拒绝。
 - **Rust 侧**：参数解码成事件类型后，用 rutis `parallel` 从挂载插件的 Context 发出。
 - **顺序**：转发监听在原插件启动之后登记，所以 Cordis 侧的顺序为：启动期间登记的监听 → rutis 一组 → 之后登记的监听；组内按 rutis 原生顺序执行（边界规则 3）。原插件启动期间发出的事件不会转发。
@@ -207,7 +207,7 @@ Node 侧为每个导出的服务槽位维护一串**对象句柄**：
 
 ## 8. 反方向：Cordis 应用挂载 rutis 插件（冻结）
 
-"Cordis / dsh 宿主使用 Rust"由已在用的 `rutis-cordis` + `host/` 负责。这里的实现保留代码和测试，不再增加能力：
+由 dsh 做宿主、使用 Rust 的旧桥（`rutis-cordis` + `host/`）已移除，dsh 界面改由 rutis 宿主经本兼容层挂载运行（`crates/rutis-dsh`）。这里的实现保留代码和测试，不再增加能力：
 
 - `rutis_interop::build::rutis_plugin` 用 syn 解析单个入口源码，生成 Rust 导出分发、Cordis 挂载插件（`rutis.mjs`）和 Context 类型声明（`rutis.d.mts`）。
 - 只支持单文件中的公开具体插件、`&self` 方法和基本类型；遇到模块声明、宏、泛型、借用、公开字段时报错。
