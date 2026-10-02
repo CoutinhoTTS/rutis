@@ -23,7 +23,7 @@
     "@deepseek-ai/dsh-web-app": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
     "@rutis/dsh-aimux": "file:./aimux",
-    "@rutis/interop": "file:../../../interop/node"
+    "@arcships/rutis-interop": "file:../../../interop/node"
   },
   "devDependencies": {
     "@types/node": "24.19.1"

@@ -6,7 +6,7 @@ rutis 应用可以直接挂载已发布的 Cordis（Node）插件：插件在真
 
 ## 1. 准备 npm 项目
 
-在应用旁边准备一个 npm 项目，安装要挂载的插件和运行时 `@rutis/interop`（仓库中的 `interop/node`）。版本以这个项目的锁文件为准：
+在应用旁边准备一个 npm 项目，安装要挂载的插件和运行时 [`@arcships/rutis-interop`](https://www.npmjs.com/package/@arcships/rutis-interop)（源码在仓库的 `interop/node`）。版本以这个项目的锁文件为准；运行时的协议版本须与 crate 一致（构建时检查）：
 
 ```json
 {
@@ -15,7 +15,7 @@ rutis 应用可以直接挂载已发布的 Cordis（Node）插件：插件在真
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-credentials-local": "0.2.0-rc.1",
-    "@rutis/interop": "file:../path/to/rutis/interop/node"
+    "@arcships/rutis-interop": "0.1.0"
   }
 }
 ```
@@ -24,22 +24,23 @@ rutis 应用可以直接挂载已发布的 Cordis（Node）插件：插件在真
 npm --prefix cordis ci
 ```
 
-构建不会自动安装 npm 依赖；缺少包时构建失败，并给出要执行的命令。
+构建不会自动安装 npm 依赖；缺少包时构建失败，并给出要执行的命令。在本仓库内开发时可改用 `"file:../path/to/rutis/interop/node"` 引用源码。
 
 ## 2. 在 Cargo.toml 中声明挂载
 
 ```toml
 [dependencies]
 rutis = "…"
-rutis-interop = "…"
+# 与 npm 运行时 @arcships/rutis-interop 同版本发布。
+rutis-interop = "0.1"
 tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
-rutis-interop = "…"
+rutis-interop = "0.1"
 
 [package.metadata.rutis-interop]
 npm = "cordis"                   # 第 1 步的 npm 项目，相对 Cargo.toml
-# runtime = "…"                  # 默认 <npm>/node_modules/@rutis/interop
+# runtime = "…"                  # 默认 <npm>/node_modules/@arcships/rutis-interop
 
 # 一个挂载 = 一个生成的模块
 [package.metadata.rutis-interop.mounts.credentials]
@@ -110,7 +111,7 @@ cp -RL cordis /opt/app/cordis        # -L：file: 依赖等符号链接展开为
 RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 ```
 
-未设置时使用构建时的位置，开发期无需配置。用 `path` 挂载的 TypeScript 源文件应放在 npm 项目内，部署时随项目一起复制；运行时用默认的 `node_modules/@rutis/interop`（不设 `runtime`）即可随项目移动。
+未设置时使用构建时的位置，开发期无需配置。用 `path` 挂载的 TypeScript 源文件应放在 npm 项目内，部署时随项目一起复制；运行时用默认的 `node_modules/@arcships/rutis-interop`（不设 `runtime`）即可随项目移动。
 
 ## 4. Cordis 插件需要遵守的边界
 
@@ -131,5 +132,5 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 | `the Cordis plugins are not installed: run npm --prefix … ci` | 安装 npm 项目的依赖 |
 | `… is not installed: add it to …/package.json` | 把插件加入 npm 项目并安装 |
 | `… 1.0.0 is installed, 2.0.0 is required` | 让 npm 项目与 `version` 一致 |
-| `… speaks protocol N, this rutis-interop speaks M` | 安装与 crate 匹配的 `@rutis/interop` |
+| `… speaks protocol N, this rutis-interop speaks M` | 安装与 crate 匹配的 `@arcships/rutis-interop` |
 | `native plugin dependencies are unresolved: … (name)`（运行时） | 缺少的服务需要放进同一个 `group`，或在 `provide` 中由 rutis 提供 |

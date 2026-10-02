@@ -219,7 +219,7 @@ fn generate(
 /// ```toml
 /// [package.metadata.rutis-interop]
 /// npm = "."                      # npm project with the plugins installed
-/// # runtime = "..."              # default: <npm>/node_modules/@rutis/interop
+/// # runtime = "..."              # default: <npm>/node_modules/@arcships/rutis-interop
 ///
 /// [package.metadata.rutis-interop.mounts.credentials]
 /// plugin = "@deepseek-ai/dsh-credentials-local"   # or path = "src/plugin.ts"
@@ -286,7 +286,7 @@ pub fn from_manifest() -> Result<(), Box<dyn std::error::Error>> {
     }
     let runtime = match text(config, "runtime") {
         Some(runtime) => root.join(runtime),
-        None => modules.join("@rutis/interop"),
+        None => modules.join("@arcships/rutis-interop"),
     };
     check_runtime(&runtime, &install)?;
 
@@ -367,14 +367,14 @@ pub fn from_manifest() -> Result<(), Box<dyn std::error::Error>> {
 fn check_runtime(runtime: &Path, install: &str) -> Result<(), Box<dyn std::error::Error>> {
     let manifest = runtime.join("package.json");
     if !manifest.exists() {
-        return Err(format!("the @rutis/interop runtime is missing at {}: add it to the npm project and run `{install}`", runtime.display()).into());
+        return Err(format!("the @arcships/rutis-interop runtime is missing at {}: add it to the npm project and run `{install}`", runtime.display()).into());
     }
     println!("cargo:rerun-if-changed={}", manifest.display());
     let package: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest)?)?;
     let protocol = package["rutisProtocol"].as_u64();
     if protocol != Some(crate::PROTOCOL as u64) {
         return Err(format!(
-            "{} speaks protocol {}, this rutis-interop speaks {}: install a matching @rutis/interop",
+            "{} speaks protocol {}, this rutis-interop speaks {}: install a matching @arcships/rutis-interop",
             runtime.display(),
             protocol.map_or("(unknown)".into(), |protocol| protocol.to_string()),
             crate::PROTOCOL
@@ -382,7 +382,7 @@ fn check_runtime(runtime: &Path, install: &str) -> Result<(), Box<dyn std::error
         .into());
     }
     if !runtime.join("node_modules").exists() && !runtime.join("../../typescript").exists() {
-        return Err(format!("the @rutis/interop runtime at {} has no dependencies installed: run `npm --prefix {} ci`", runtime.display(), runtime.display()).into());
+        return Err(format!("the @arcships/rutis-interop runtime at {} has no dependencies installed: run `npm --prefix {} ci`", runtime.display(), runtime.display()).into());
     }
     Ok(())
 }
@@ -430,7 +430,7 @@ mod manifest_tests {
             "{error}"
         );
 
-        let runtime = root.join("cordis/node_modules/@rutis/interop");
+        let runtime = root.join("cordis/node_modules/@arcships/rutis-interop");
         write(&runtime.join("package.json"), r#"{ "rutisProtocol": 99 }"#);
         let error = failure(root, config);
         assert!(error.contains("speaks protocol 99"), "{error}");

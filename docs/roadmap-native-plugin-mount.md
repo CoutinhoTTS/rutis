@@ -104,7 +104,7 @@ W3 的实测暴露出比单个成员更大的缺口：已发布插件通常设�
 
 应用在 `Cargo.toml` 的 `[package.metadata.rutis-interop]` 中声明 npm 项目和挂载，`build.rs` 只调用 `from_manifest()`，代码中 `include_mounts!()`。构建检查插件是否安装、版本是否一致、运行时协议版本是否匹配，出错时给出处理命令（`crates/rutis-interop/src/build.rs` 的 `manifest_tests`）。两个示例都改为清单驱动。接入文档：[crates/rutis-interop/README.md](../crates/rutis-interop/README.md)。
 
-未做：`@rutis/interop` 尚未发布到 npm，应用需要以 `file:` 依赖引用仓库中的 `interop/node`。
+发布（2026-10-02）：crate `rutis-interop`（crates.io）与运行时 `@arcships/rutis-interop`（npm，带 provenance）同版本发布，推送 `interop-vX.Y.Z` 标签由 `publish-interop.yml` 完成；发布前检查标签与两个版本一致、运行时协议版本与 crate 一致，两者都先试发布再正式发布。
 
 可迁移部署（2026-10-02，已完成）：清单驱动的挂载按 npm 项目的相对位置定位运行时和插件，运行时由 `RUTIS_INTEROP_ROOT` 指定部署的副本，未设置时用构建时位置（`crates/rutis-dsh/tests/relocate.rs`）。
 
