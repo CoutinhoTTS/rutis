@@ -214,17 +214,15 @@ async fn update_pending_uses_new_config_when_gate_opens() {
         cfg("v1", 1),
     );
     // 依赖未到:Pending
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    settle(&view).await;
     assert_eq!(view.state().state, FiberState::Pending);
 
     // Pending 态热更新(不该触发装载)
-    let upd = view.update(cfg("v2", 2));
-    let v = view.clone();
-    tokio::spawn(async move {
-        let _ = upd.await;
-        let _ = v;
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), view.update(cfg("v2", 2)))
+        .await
+        .expect("update on Pending returns")
+        .expect("update");
+    settle(&view).await;
     assert_eq!(view.state().state, FiberState::Pending);
 
     // 门开:装载用的是新 config
@@ -388,7 +386,7 @@ async fn factory_injects_gate_plugin_until_ready() {
         },
         cfg("v1", 1),
     );
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    settle(&view).await;
     assert_eq!(view.state().state, FiberState::Pending);
     assert!(ctx.get::<ConfigSvc>().is_none());
 
@@ -486,7 +484,7 @@ async fn dependency_reload_rebuilds_with_current_config() {
         cfg("v1", 1),
     );
     // 依赖未到:Pending
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    settle(&view).await;
     assert_eq!(seen.lock().unwrap().len(), 0);
 
     let d1 = ctx.provide(Dep).unwrap();
