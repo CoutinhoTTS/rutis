@@ -1219,6 +1219,22 @@ impl Ctx {
         view
     }
 
+    /// Close the plugin's own fiber, as cordis's `ctx.fiber.dispose()`.
+    /// Returns at once; the fiber unloads after the current apply or
+    /// callback returns, so never wait for it from inside the plugin. The
+    /// root cannot dispose itself this way (use [`Ctx::shutdown`]).
+    pub fn dispose_self(&self) -> Result<(), CordisError> {
+        let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        if fiber.is_root {
+            return Err(CordisError::Validation {
+                issues: vec!["the root disposes through shutdown".into()],
+            });
+        }
+        // Registration happens in the call; the join future is not needed.
+        drop(FiberView::from_inner(fiber).dispose());
+        Ok(())
+    }
+
     /// 当前 fiber 代的取消 token(D27:每代独立 token,卸载第②步取消)。
     pub fn cancellation_token(&self) -> CancellationToken {
         if let Some(token) = &self.0.generation_token {
