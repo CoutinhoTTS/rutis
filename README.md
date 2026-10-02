@@ -31,7 +31,7 @@ Cordis 核心范式的 Rust 惯用实现 · [English](README.en.md)
 ## 🚀 快速上手
 
 ```bash
-cargo add rutis@0.5
+cargo add rutis@0.6
 ```
 
 一个 provider、一个声明依赖的 consumer、一次换 provider——完整代码见 [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs)(`cargo run -p rutis --example quickstart`):

@@ -14,18 +14,22 @@ Cordis 核心范式的 Rust 惯用实现(自 [min-cordis](https://github.com/eri
 
 ```toml
 [dependencies]
-rutis = "0.5.0"
+rutis = "0.6.0"
 ```
 
 内核零 serde、零 unsafe,依赖仅 tokio / tokio-util / thiserror。设计与对拍文档见[仓库 docs](https://github.com/arcships/rutis/tree/main/docs)。
 
 首次使用建议先读[应用设计指南](https://github.com/arcships/rutis/blob/main/docs/development-guide.md)，再按[开发手册](https://github.com/arcships/rutis/blob/main/docs/development-handbook.md)实现。配套示例可在仓库中运行：`cargo run -p rutis --example development_workflow`。
 
+## 0.6
+
+会继续扩展的错误、诊断与观察类型标为 `#[non_exhaustive]`，此后增加字段或变体不再是破坏性变更；`EventOptions` 改用 `EventOptions::default().prepend(true)` 构造。诊断新增同键 emit 积压（`event_backlogs`）。见 [0.5 → 0.6 迁移说明](../../docs/migration-0.5-to-0.6.md)。
+
 ## 0.5 事件接口
 
 通过 `EventKey<E>` 统一默认、命名与实例通道；`EventPattern<E>` 支持带来源键的前缀订阅。`SyncEvent` 增加 `bail_sync` / `waterfall_sync`，同步终点可以借用当前调用栈。
 
-见 [迁移说明](../../docs/migration-0.3-to-0.5.md)。
+见 [0.3 → 0.5 迁移说明](../../docs/migration-0.3-to-0.5.md)。
 
 ## License
 
