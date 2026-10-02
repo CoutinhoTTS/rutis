@@ -41,6 +41,7 @@ jobs:
       - run: npm --prefix interop/baseline ci
       # dsh (web UI and agent loop) served by aimux in the rutis-dsh host.
       - run: npm --prefix crates/rutis-dsh/dsh ci
+      - run: npm --prefix crates/rutis-dsh/dsh test
 
       - name: cargo test (workspace)
         run: cargo test --workspace

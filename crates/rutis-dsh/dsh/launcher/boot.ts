@@ -50,12 +50,28 @@ export function boot(ctx: Context, config: Config) {
 
   let ready = false
   const waiting = new Set<() => void>()
+  // An exit request (`--help`, a usage error) can come while the profile is
+  // still starting, and that startup then never completes. As dsh's own
+  // launcher does, the tree is disposed right away, before plugins settle
+  // into waiting for a startup that will not come; the host hears about the
+  // exit once the tree is gone and then disposes the mount.
+  let exitRequested: () => void = () => {}
+  const exiting = new Promise<'exit'>(resolve => { exitRequested = () => resolve('exit') })
+  let tree: { dispose(): Promise<unknown> } | undefined
+  let exited = false
   ctx.provide('dshHomePath', dshHomePath)
   ctx.provide('profileContext', profileContext)
   ctx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, loadLayeredEnv('rutis-dsh'))
   provideCmdline(ctx, {
     args: config.args ?? [],
-    exit: code => { ctx.emit('rutis-dsh/exit', code) },
+    exit: code => {
+      if (exited) return
+      exited = true
+      exitRequested()
+      Promise.resolve(tree?.dispose())
+        .catch(error => { ctx.logger.error(error) })
+        .finally(() => { ctx.emit('rutis-dsh/exit', code) })
+    },
     ready: {
       onReady(listener) {
         if (ready) { listener(); return () => {} }
@@ -79,7 +95,7 @@ export function boot(ctx: Context, config: Config) {
     console.error(message)
     ctx.emit('rutis-dsh/startup-failed', message)
   }
-  ctx.plugin({
+  tree = ctx.plugin({
     name: 'rutis-dsh-launcher:loader',
     async apply(ctx: Context) {
       try {
@@ -93,14 +109,24 @@ export function boot(ctx: Context, config: Config) {
         name: 'rutis-dsh-launcher:tree',
         inject: ['loader', 'pluginPackages'],
         async apply(ctx: Context) {
-          try {
+          const startup = (async () => {
             // Keyed by the root: settings saves reconcile the profile through it.
             await mountRootInclude(ctx.root, rootConfig, patches, undefined, 'rutis-dsh')
             await (ctx as unknown as { loader: { await(): Promise<void> } }).loader.await()
             await auditStartupEntries(ctx.root, 'rutis-dsh')
+            return 'started' as const
+          })()
+          let outcome: 'started' | 'exit'
+          try {
+            outcome = await Promise.race([startup, exiting])
           } catch (error) {
             failed(error)
             throw error
+          }
+          if (outcome === 'exit') {
+            // The tree is disposed with the mount; its startup may fail then.
+            startup.catch(() => {})
+            return
           }
           ready = true
           for (const listener of waiting) listener()

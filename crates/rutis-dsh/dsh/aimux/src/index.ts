@@ -28,17 +28,38 @@ export function apply(ctx: Context, config: { providers: Volatile<Record<string,
   const entries = () => Object.entries(routes()).map(([provider, route]) => ({
     provider, displayName: route.displayName ?? provider, settingsNs: ns, settingsPath: ['providers', provider], declared: true,
   }))
-  const directory = ctx.llm.registerConfigurableProviders(entries())
+  // dsh-llm rejects an empty first registration of configurable providers:
+  // the directory is registered with the first route and emptied in place.
+  let directory: { replace(entries: ReturnType<typeof entries>): void } | undefined
+  const list = () => {
+    const current = entries()
+    if (directory) directory.replace(current)
+    else if (current.length) directory = ctx.llm.registerConfigurableProviders(current)
+  }
+  list()
   let child = ctx.plugin(adapter, { providers: routes() })
-  ctx.on('loader/volatile-update' as never, async () => {
-    // An exception here would end the whole Node process: report it instead.
-    try {
-      directory.replace(entries())
-      await child.dispose()
-      child = ctx.plugin(adapter, { providers: routes() })
-    } catch (error) {
+
+  // Saves apply one at a time, each with the routes current when it runs; a
+  // save arriving while one is waiting to run joins it.
+  const reload = async () => {
+    list()
+    await child.dispose()
+    child = ctx.plugin(adapter, { providers: routes() })
+    // Rejects when the adapter fails to start, e.g. a route another adapter serves.
+    await child.await()
+  }
+  let applying = Promise.resolve()
+  let waiting = false
+  ctx.on('loader/volatile-update' as never, () => {
+    if (waiting) return
+    waiting = true
+    applying = applying.then(() => {
+      waiting = false
+      return reload()
+    }).catch(error => {
+      // An exception here would end the whole Node process: report it instead.
       ctx.logger.error(error)
       console.error(`[llm-aimux] route update failed: ${error instanceof Error ? error.message : error}`)
-    }
+    })
   })
 }

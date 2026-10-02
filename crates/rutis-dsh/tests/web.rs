@@ -107,6 +107,29 @@ async fn the_web_ui_starts_reports_failures_and_stops_with_its_mount() {
     assert!(failed.message.contains("EADDRINUSE"), "{}", failed.message);
     busy.shutdown().await.unwrap();
 
+    // An exit request while starting (help, a usage error) reaches rutis
+    // with its code, and the mount then stops promptly.
+    for (arg, code) in [("--help", 0.0), ("--no-such-option", 1.0)] {
+        let quitting = Ctx::root().unwrap();
+        let exit = first::<web::RutisDshExit>(&quitting);
+        rutis_dsh::provide_web_aimux(&quitting, Arc::new(Scripted::default())).unwrap();
+        let view = quitting.plugin(web::Plugin::new(web::Config {
+            profile: Some("rutis-web-quit".into()),
+            args: Some(vec!["--no-open".into(), arg.into()]),
+            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+        }));
+        (&view).await.unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(60), exit)
+            .await
+            .expect("exit requested")
+            .unwrap();
+        assert_eq!(exit.code, code, "{arg}");
+        tokio::time::timeout(Duration::from_secs(5), quitting.shutdown())
+            .await
+            .unwrap_or_else(|_| panic!("{arg}: the mount stops promptly"))
+            .unwrap();
+    }
+
     // Disposing the mount stops dsh.
     ctx.shutdown().await.unwrap();
     assert_eq!(status(port).await, None);
