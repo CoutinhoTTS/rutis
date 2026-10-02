@@ -9,6 +9,7 @@ use crate::{CordisError, FiberState, InstanceId, PluginId, ServiceReadFailure, T
 /// can make entries reflect different moments. A retained snapshot does not
 /// update itself; call [`crate::Ctx::diagnostics`] again for a fresh view.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuntimeDiagnostics {
     pub shutting_down: bool,
     pub plugins: Vec<PluginDiagnostics>,
@@ -16,6 +17,7 @@ pub struct RuntimeDiagnostics {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PluginDiagnostics {
     pub id: PluginId,
     pub instance: InstanceId,
@@ -30,6 +32,7 @@ pub struct PluginDiagnostics {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DependencyDiagnostics {
     pub key: TypeKey,
     pub scope: Option<String>,
@@ -37,6 +40,7 @@ pub struct DependencyDiagnostics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DependencyStatus {
     OutOfScope,
     Missing,
@@ -64,6 +68,7 @@ impl std::fmt::Display for DependencyStatus {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ResolvedDependency {
     pub key: TypeKey,
     pub scope: Option<String>,
@@ -72,6 +77,7 @@ pub struct ResolvedDependency {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ServiceAccess {
     pub key: TypeKey,
     pub scope: Option<String>,
@@ -87,6 +93,7 @@ pub struct ServiceAccess {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BindingDiagnostics {
     pub key: TypeKey,
     pub scope: Option<String>,

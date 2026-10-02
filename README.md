@@ -210,7 +210,7 @@ cargo test                                    # 全量测试
 
 **Agent** — [agent 框架](docs/design-min-agent-2026-08-18.md) · [验证与 TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 
-**升级** — [0.3 → 0.5 迁移说明](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 迁移说明](docs/migration-0.1-to-0.2.md)
+**升级** — [0.5 → 0.6 迁移说明](docs/migration-0.5-to-0.6.md) · [0.3 → 0.5 迁移说明](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 迁移说明](docs/migration-0.1-to-0.2.md)
 
 ## License
 

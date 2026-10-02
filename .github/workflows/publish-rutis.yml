@@ -27,6 +27,13 @@ jobs:
           package_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rutis") | .version')
           test "$GITHUB_REF_NAME" = "rutis-v$package_version"
 
+      # A release whose version does not allow its API changes (a breaking
+      # change in a patch release) fails here, before publishing.
+      - name: Check semver against the latest crates.io release
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: rutis
+
       - name: Publish rutis to crates.io
         run: cargo publish --locked -p rutis
         env:

@@ -194,12 +194,27 @@ impl<'a, E: Event> Next<'a, E> {
 
 /// `on()`/`on_waterfall()` 注册选项(§四偏差清单:prepend 保留,影响 serial/waterfall 结果)。
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct EventOptions {
     /// 插到现有监听器之前(默认追加在后)。
     pub prepend: bool,
     /// Claim this registration at most once, when a dispatch selects its
     /// snapshot. A preceding short circuit can still skip its actual call.
     pub once: bool,
+}
+
+impl EventOptions {
+    /// Insert before the existing listeners instead of after them.
+    pub const fn prepend(mut self, prepend: bool) -> Self {
+        self.prepend = prepend;
+        self
+    }
+
+    /// Claim this registration at most once; see [`EventOptions::once`](#structfield.once).
+    pub const fn once(mut self, once: bool) -> Self {
+        self.once = once;
+        self
+    }
 }
 
 // ── 类型擦除适配层(内部) ────────────────────────────────────────

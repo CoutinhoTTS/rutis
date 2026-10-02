@@ -203,7 +203,7 @@ cargo test                                    # full test suite
 
 **Agent** — [agent framework](docs/design-min-agent-2026-08-18.md) · [verification & TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 
-**Upgrading** — [0.3 → 0.5 migration guide (Chinese)](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 migration guide (Chinese)](docs/migration-0.1-to-0.2.md)
+**Upgrading** — [0.5 → 0.6 migration guide (Chinese)](docs/migration-0.5-to-0.6.md) · [0.3 → 0.5 migration guide (Chinese)](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 migration guide (Chinese)](docs/migration-0.1-to-0.2.md)
 
 ## License
 

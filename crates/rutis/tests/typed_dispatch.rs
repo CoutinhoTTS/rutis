@@ -200,10 +200,7 @@ async fn deprecated_named_wrappers_share_keys_order_once_and_waterfall() {
         &root,
         "legacy",
         record("prepend", &log),
-        EventOptions {
-            prepend: true,
-            ..Default::default()
-        },
+        EventOptions::default().prepend(true),
     )
     .unwrap();
     bus.once_keyed(&root, "legacy", record("once", &log))
@@ -429,10 +426,7 @@ async fn exact_and_pattern_share_registration_and_prepend_order() {
             log: log.clone(),
             result: None,
         },
-        EventOptions {
-            prepend: true,
-            ..Default::default()
-        },
+        EventOptions::default().prepend(true),
     )
     .unwrap();
     assert_eq!(bus.serial(&root, &key, &Ping(0)).await.unwrap(), None);
@@ -472,10 +466,7 @@ async fn grouped_once_is_claimed_once_across_concurrent_names() {
                 log: log.clone(),
                 result: None,
             },
-            EventOptions {
-                once: true,
-                ..Default::default()
-            },
+            EventOptions::default().once(true),
         )
         .unwrap();
     let barrier = Arc::new(Barrier::new(3));
@@ -513,10 +504,7 @@ async fn waterfall_pattern_wraps_and_instance_options_work() {
             &root,
             EventPattern::prefix("room/"),
             Around(log.clone(), "pattern"),
-            EventOptions {
-                prepend: true,
-                ..Default::default()
-            },
+            EventOptions::default().prepend(true),
         )
         .unwrap();
     fn terminal<'a>(_: &'a Ctx, event: &'a Ping) -> BoxFuture<'a, Result<u64, CordisError>> {
@@ -539,10 +527,7 @@ async fn waterfall_pattern_wraps_and_instance_options_work() {
             &root,
             &scoped,
             Around(log, "scoped"),
-            EventOptions {
-                once: true,
-                prepend: true,
-            },
+            EventOptions::default().prepend(true).once(true),
         )
         .unwrap();
     assert_eq!(
@@ -666,10 +651,7 @@ async fn sync_bail_short_circuits_and_once_selection_is_not_actual_invocation() 
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(None)
             },
-            EventOptions {
-                once: true,
-                ..Default::default()
-            },
+            EventOptions::default().once(true),
         )
         .unwrap();
     assert_eq!(
@@ -720,10 +702,7 @@ async fn sync_waterfall_borrows_mutex_and_veto_skips_terminal() {
             &root,
             &key,
             |_: &Ctx, _: &Ping, _: SyncNext<'_, Ping>| Ok(99),
-            EventOptions {
-                prepend: true,
-                once: true,
-            },
+            EventOptions::default().prepend(true).once(true),
         )
         .unwrap();
     assert_eq!(
@@ -754,10 +733,7 @@ async fn sync_patterns_expose_keys_and_share_order_for_both_modes() {
                 assert_eq!(key.name(), Some("room/1"));
                 Ok(Some(20))
             },
-            EventOptions {
-                prepend: true,
-                ..Default::default()
-            },
+            EventOptions::default().prepend(true),
         )
         .unwrap();
     assert_eq!(

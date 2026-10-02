@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 /// Why a strict service read was rejected. Optional `get` reads do not use this check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServiceReadFailure {
     Undeclared,
     Unavailable(DependencyStatus),
@@ -33,6 +34,7 @@ impl std::fmt::Display for ServiceReadFailure {
 /// A strict read error with the key, caller identity, and source location.
 #[derive(Debug, thiserror::Error)]
 #[error("strict service read {key:?} by fiber {plugin_id:?} instance {instance} at {location}: {reason}")]
+#[non_exhaustive]
 pub struct ServiceReadError {
     pub key: TypeKey,
     pub plugin_id: PluginId,
@@ -43,6 +45,7 @@ pub struct ServiceReadError {
 
 /// Why a provider-owned mutable service update was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServiceWriteFailure {
     WrongOwner,
     Stale,
@@ -72,6 +75,7 @@ impl std::fmt::Display for ServiceWriteFailure {
 #[error(
     "service write {key:?} by fiber {provider:?} generation {generation} at {location}: {reason}"
 )]
+#[non_exhaustive]
 pub struct ServiceWriteError {
     pub key: TypeKey,
     pub provider: PluginId,
@@ -85,6 +89,7 @@ pub struct ServiceWriteError {
 /// 变体分层(D25):`PluginFailed` 仅包装 apply/清理边界外来的非 Cordis 错误;
 /// apply 自身返回的 `CordisError` 直接传播,不再递归包一层。
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CordisError {
     #[error(transparent)]
     ServiceRead(#[from] ServiceReadError),

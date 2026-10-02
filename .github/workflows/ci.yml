@@ -53,6 +53,18 @@ jobs:
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
 
+  # rutis 相对 crates.io 最新版的公开 API 变化：列出破坏性变更，提示发布时
+  # 需要提升的版本；不阻止合并（0.x 允许在 minor 版本中破坏）。真正的拦截在
+  # publish-rutis.yml：版本号不允许的破坏性变更会使发布失败。
+  semver-rutis:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: rutis
+
   dylib-linux:
     runs-on: ubuntu-24.04
     steps:
