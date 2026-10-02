@@ -116,3 +116,29 @@ pub struct BindingDiagnostics {
     pub generation: u64,
     pub removing: bool,
 }
+
+/// A service binding was registered or finally removed. Emitted on the bus
+/// of the provider's context, after the registry change and outside every
+/// lock. A registered binding becomes visible once its provider is active;
+/// removal is reported after consumers were evicted.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ServiceChanged {
+    pub key: TypeKey,
+    pub scope: Option<String>,
+    pub provider: PluginId,
+    pub generation: u64,
+    pub change: ServiceChange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ServiceChange {
+    Provided,
+    Removed,
+}
+
+impl crate::Event for ServiceChanged {
+    const NAME: &'static str = "rutis::ServiceChanged";
+    type Value = ();
+}
