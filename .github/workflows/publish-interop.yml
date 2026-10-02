@@ -1,0 +1,47 @@
+# The rutis-interop npm package (interop/node, @arcships/rutis-interop) is
+# released with tags interop-vX.Y.Z; the core crate uses rutis-vX.Y.Z.
+name: publish rutis-interop npm package
+
+on:
+  push:
+    tags: ["interop-v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+concurrency:
+  group: publish-interop-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: release
+    defaults:
+      run:
+        working-directory: interop/node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          registry-url: https://registry.npmjs.org
+
+      # The tag names the package version, and the package speaks the
+      # protocol of the rutis-interop crate in the same commit.
+      - name: Verify tag and protocol
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "interop-v$version"
+          protocol=$(node -p "require('./package.json').rutisProtocol")
+          grep -q "^pub const PROTOCOL: u32 = $protocol;" ../../crates/rutis-interop/src/lib.rs
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

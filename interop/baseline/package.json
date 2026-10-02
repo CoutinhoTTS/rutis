@@ -1,5 +1,5 @@
 {
-  "name": "@rutis/interop-baseline",
+  "name": "@arcships/rutis-interop-baseline",
   "private": true,
   "type": "module",
   "description": "Real published Cordis plugins mounted from rutis, compared with native Cordis",

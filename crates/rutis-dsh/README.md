@@ -46,7 +46,7 @@ rutis-dsh up [--profile <name>] [dsh 选项...]
 
 ## 部署
 
-二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_INTEROP_ROOT` 指向它（见 rutis-interop README 的“部署”）。`@rutis/interop` 尚未发布到 npm（[#80](https://github.com/arcships/rutis/issues/80)），目前以 `file:` 依赖引用仓库中的 `interop/node`。
+二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_INTEROP_ROOT` 指向它（见 rutis-interop README 的“部署”）。仓库内的 npm 项目以 `file:` 依赖引用 `interop/node`；独立部署时可改为 npm 上的 `@arcships/rutis-interop`。
 
 ## 从旧桥迁移
 
