@@ -274,3 +274,25 @@ async fn the_claim_is_a_plain_failure_while_dependencies_are_present() {
     assert!(matches!(*error, CordisError::InjectUnsatisfied(_)));
     assert_eq!(view.state().state, FiberState::Failed);
 }
+
+#[test]
+fn a_key_named_twice_gates_once() {
+    struct Twice;
+    impl TypedPlugin for Twice {
+        type Deps = (Arc<Llm>, Option<Arc<Logger>>, Arc<Llm>);
+        fn name(&self) -> &str {
+            "twice"
+        }
+        fn gates(&self) -> Vec<TypeKey> {
+            vec![TypeKey::of::<Llm>()]
+        }
+        fn apply<'a>(
+            &'a self,
+            _: &'a Ctx,
+            _: Self::Deps,
+        ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            Box::pin(async { Ok(Effect::Done) })
+        }
+    }
+    assert_eq!(Typed::new(Twice).injects(), [TypeKey::of::<Llm>()]);
+}

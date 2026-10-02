@@ -72,10 +72,14 @@ issue 要求一并设计，第一版先不做，等形状定下来再补：
 1. **包装方式**：`ctx.plugin(Typed::new(p))` 显式包装，不给 `Ctx` 加方法。不用 blanket
    `impl<P: TypedPlugin> Plugin for P`：`injects()` 返回借用切片，需要实例里存一份。
 2. **门控通过后、取用前依赖消失**：回到 Pending，不进 Failed。
-   - typed 读取遇到 `Unavailable` 时返回 `CordisError::InjectUnsatisfied`（该变体此前未被使用）。
+   - typed 读取遇到 `Unavailable` 时返回 `CordisError::InjectUnsatisfied`。内核此前不认这个变体；
+     rutis-agent 的 driver 已在"门控保证必在却取不到"时返回它（现在同样回到 Pending），
+     tui 用它表示未声明的 agent 不在（声明的依赖齐全，仍按普通失败处理，行为不变）。
    - 内核规则：apply 返回 `InjectUnsatisfied` 且此刻确有依赖缺失 → 这一代回滚（清理照常
      LIFO 排干，清理错误进 ErrorSink）并回到 Pending；依赖回来时照常装载。
    - 依赖其实齐全时不认这个理由，按普通失败进 Failed，避免装载循环。
    - 非 typed 插件也可以主动返回这个错误得到同样效果。
+   - 这一代的 `InjectUnsatisfied` 本身不进 ErrorSink（与驱逐一样静默）；落在这个窗口里的
+     `restart()` 返回 Ok，fiber 处于 Pending。
    - 与 Cordis 的差异：Cordis 在此窗口内 apply 抛错会进 FAILED（依赖回来时重试）；
      rutis 只对这个明确的错误变体放宽，其它错误仍是粘性 Failed。

@@ -152,7 +152,8 @@ pub trait TypedPlugin: Send + Sync + 'static {
     fn name(&self) -> &str;
 
     /// Keys that gate the plugin without being passed to `apply`, such as a
-    /// readiness marker. They join the keys of `Deps`.
+    /// readiness marker. They join the keys of `Deps`. Read once, by
+    /// [`Typed::new`]: like [`Plugin::injects`], the declaration is fixed.
     fn gates(&self) -> Vec<TypeKey> {
         Vec::new()
     }
@@ -178,9 +179,11 @@ pub struct Typed<P> {
 
 impl<P: TypedPlugin> Typed<P> {
     pub fn new(plugin: P) -> Self {
-        let mut injects = Vec::new();
-        P::Deps::injects(&mut injects);
-        for key in plugin.gates() {
+        let mut keys = Vec::new();
+        P::Deps::injects(&mut keys);
+        keys.extend(plugin.gates());
+        let mut injects = Vec::with_capacity(keys.len());
+        for key in keys {
             if !injects.contains(&key) {
                 injects.push(key);
             }
