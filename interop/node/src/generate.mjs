@@ -427,6 +427,18 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
         for (const [name, entry] of augmentations) if (entry.file.startsWith(packageDir) && !provide.includes(name)) services.set(name, entry)
       }
     }
+    // A declared Config schema is callable with the input configuration and
+    // returns the resolved one the plugin receives; the rutis side builds the
+    // input (defaults and live values are filled in by the schema).
+    const configExport = pluginClass
+      ? checker.getTypeOfSymbolAtLocation(pluginClass, pluginClass.valueDeclaration).getProperty('Config')
+      : exports.find(symbol => symbol.name === 'Config' && resolveAlias(symbol).flags & ts.SymbolFlags.Value)
+    if (configExport) {
+      const declaration = configExport.valueDeclaration ?? configExport.declarations?.[0]
+      const input = checker.getTypeOfSymbolAtLocation(configExport, declaration).getCallSignatures()[0]?.parameters[0]
+      const inputType = input && checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(input, input.valueDeclaration))
+      if (inputType && !(inputType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))) configType = inputType
+    }
     return { services, configType }
   }
 
@@ -454,9 +466,13 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
   const serviceCode = []
   const structs = new Map() // service name -> Rust struct name
   const manifest = {}
+  // Every service keeps its plain name: binding one service can reach another
+  // service's class as a live object first (e.g. through a Context-typed
+  // member), which then gets an \`Object\` suffix instead.
+  for (const [serviceName, { type }] of services) structs.set(serviceName, claim(typeName(type, serviceName)))
+  const serviceStructNames = new Set(structs.values())
   for (const [serviceName, { type, node }] of services) {
-    const structName = claim(typeName(type, serviceName))
-    structs.set(serviceName, structName)
+    const structName = structs.get(serviceName)
     const { methods, getters, unavailable } = bindMembers(type, serviceName, structName, { properties: true })
     manifest[serviceName] = [...methods, ...getters].map(member => member.name)
     serviceCode.push(serviceStruct(serviceName, structName, methods, getters, unavailable))
@@ -649,7 +665,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
       return '::rutis_interop::ObjectRef'
     }
     const label = typeName(type, hint)
-    const name = claim(label)
+    const name = claim(serviceStructNames.has(label) ? `${label}Object` : label)
     named.set(type, name)
     if (generic) expanding.push(type)
     let bound

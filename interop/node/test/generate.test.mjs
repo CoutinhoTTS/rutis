@@ -79,6 +79,42 @@ test('relocatable mounts address the runtime and plugins from the npm project', 
   })
 })
 
+test('service proxies keep their names when another member reaches the same class first', async () => {
+  // Binding alpha reaches Beta through a member before the beta service is
+  // bound; the service still gets the plain name, the live object a suffix.
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    declare module '@deepseek-ai/cordis' { interface Context { alpha: Alpha, beta: Beta } }
+    export class Beta { ping(): number { return 1 } }
+    export class Alpha { peer(): Beta { return new Beta() } }
+    export function apply(ctx: Context) { ctx.provide('alpha', new Alpha()); ctx.provide('beta', new Beta()) }
+  `, file => {
+    const { rust } = generate(file, root)
+    assert.match(rust, /pub struct Beta \{\s*process:/)
+    assert.match(rust, /pub struct BetaObject\(pub ::rutis_interop::ObjectRef\);/)
+    assert.match(rust, /pub fn peer\(&self\) -> Result<BetaObject, ::rutis_interop::Error>/)
+    assert.doesNotMatch(rust, /Beta2/)
+  })
+})
+
+test('configuration uses the input type of a declared Config schema', async () => {
+  // A Schema is callable with its input and returns the resolved config; the
+  // plugin receives the resolved type, the rutis side builds the input.
+  await fixture(`import type { Context } from '@deepseek-ai/cordis'
+    interface Schema<S, T> { (data?: S | null): T }
+    declare class Volatile<T> { get(): T }
+    declare module '@deepseek-ai/cordis' { interface Context { loop: Loop } }
+    export default class Loop {
+      static Config: Schema<{ max?: number, name?: string }, { max: Volatile<number>, name: string }>
+      constructor(ctx: Context, config: { max: Volatile<number>, name: string }) { ctx.provide('loop', this) }
+      run(): number { return 1 }
+    }
+  `, file => {
+    const { rust } = generate(file, root)
+    assert.match(rust, /pub struct Config \{[^}]*pub max: Option<f64>,[^}]*pub name: Option<String>,/)
+    assert.doesNotMatch(rust, /Volatile/)
+  })
+})
+
 test('public state cannot silently become a copied value', async () => {
   await fixture(`import type { Context } from '@deepseek-ai/cordis'
     class Service { value = 1; read(): number { return this.value } }
