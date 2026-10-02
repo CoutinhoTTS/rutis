@@ -1,0 +1,304 @@
+//! The public `Loader` methods.
+
+use std::collections::HashMap;
+
+use rutis::{FiberView, PluginId};
+use serde_json::Value;
+
+use crate::edit::Edit;
+use crate::patch::Layer;
+use crate::LoaderError;
+
+use super::desired::contains_expression;
+use super::{
+    Editable, EntryInfo, Inner, Loader, LoaderChanged, NewEntry, PendingEditDropped,
+    ReconcileReport,
+};
+
+fn generate_id(taken: impl Fn(&str) -> bool) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mixed =
+            (seed ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let id = format!("{:08x}", (mixed >> 32) as u32);
+        if !taken(&id) {
+            return id;
+        }
+    }
+}
+
+impl Loader {
+    /// Replace the layers and bring the running tree to them. Queued,
+    /// unsaved edits are replayed on the new editable layer and saved.
+    pub async fn reconcile(
+        &self,
+        layers: Vec<Layer>,
+        editable: Option<Editable>,
+    ) -> Result<ReconcileReport, LoaderError> {
+        let inner = &self.inner;
+        let _op = inner.op.lock().await;
+        inner.check_open()?;
+        let replay = {
+            let mut state = inner.state.lock().unwrap();
+            let index = match &editable {
+                None => None,
+                Some(e) => Some(layers.iter().position(|l| l.name == e.layer).ok_or_else(
+                    || LoaderError::InvalidEntry(format!("no layer named {:?}", e.layer)),
+                )?),
+            };
+            state.layers = layers;
+            state.editable = index;
+            if let Some(e) = editable {
+                state.version = e.version;
+            }
+            if index.is_some() {
+                std::mem::take(&mut state.pending)
+            } else {
+                Vec::new()
+            }
+        };
+        let mut report = inner.reconcile_inner().await;
+        if !replay.is_empty() {
+            for edit in replay {
+                match inner.commit(&edit).await {
+                    Ok(()) => inner.state.lock().unwrap().pending.push(edit),
+                    Err(error) => inner.emit(PendingEditDropped { edit, error }),
+                }
+            }
+            let _ = inner.persist_queue(None).await;
+            let state = inner.state.lock().unwrap();
+            report.failures = Inner::failures(&state)
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
+        }
+        inner.emit(LoaderChanged::Reconciled);
+        Ok(report)
+    }
+
+    /// The current layers.
+    pub fn layers(&self) -> Vec<Layer> {
+        self.inner.state.lock().unwrap().layers.clone()
+    }
+
+    /// Edits applied but not yet persisted.
+    pub fn pending(&self) -> Vec<Edit> {
+        self.inner.state.lock().unwrap().pending.clone()
+    }
+
+    /// Retry persisting the pending queue.
+    pub async fn flush(&self) -> Result<(), LoaderError> {
+        let _op = self.inner.op.lock().await;
+        self.inner.persist_queue(None).await
+    }
+
+    /// Every row in tree order.
+    pub fn entries(&self) -> Vec<EntryInfo> {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .desired
+            .rows
+            .iter()
+            .map(|row| Inner::info(&state, row))
+            .collect()
+    }
+
+    pub fn get(&self, id: &str) -> Option<EntryInfo> {
+        let state = self.inner.state.lock().unwrap();
+        state.desired.row(id).map(|row| Inner::info(&state, row))
+    }
+
+    /// The row whose fiber is `plugin` or an ancestor of it.
+    pub fn locate(&self, plugin: PluginId) -> Option<String> {
+        let (records, root) = {
+            let state = self.inner.state.lock().unwrap();
+            let records: HashMap<PluginId, String> = state
+                .running
+                .iter()
+                .map(|(id, r)| (r.view.id, id.clone()))
+                .collect();
+            (records, state.groups.get(&None).cloned())
+        };
+        if let Some(id) = records.get(&plugin) {
+            return Some(id.clone());
+        }
+        let parents: HashMap<PluginId, Option<PluginId>> = root?
+            .diagnostics()
+            .plugins
+            .into_iter()
+            .map(|p| (p.id, p.parent))
+            .collect();
+        let mut current = parents.get(&plugin).copied().flatten();
+        while let Some(id) = current {
+            if let Some(entry) = records.get(&id) {
+                return Some(entry.clone());
+            }
+            current = parents.get(&id).copied().flatten();
+        }
+        None
+    }
+
+    /// The config schema of a module, without loading it.
+    pub async fn schema_of(&self, name: &str) -> Result<Option<Value>, LoaderError> {
+        Ok(self.inner.resolver.resolve(name).await?.schema.clone())
+    }
+
+    /// The config a row's plugin receives (read-only).
+    pub fn evaluated(&self, id: &str) -> Option<Result<Value, LoaderError>> {
+        let state = self.inner.state.lock().unwrap();
+        let row = state.desired.row(id)?;
+        Some(if contains_expression(&row.config) {
+            Err(LoaderError::Expression(
+                "no expression evaluator is installed".into(),
+            ))
+        } else {
+            Ok(row.config.clone())
+        })
+    }
+
+    /// Add a row to the editable layer. Waits until the tree settles; a
+    /// row waiting for dependencies (`Pending`) counts as settled.
+    pub async fn create(
+        &self,
+        entry: NewEntry,
+        parent: Option<&str>,
+        position: Option<usize>,
+    ) -> Result<(String, Option<FiberView>), LoaderError> {
+        let id = match entry.id {
+            Some(id) => id,
+            None => {
+                let state = self.inner.state.lock().unwrap();
+                generate_id(|id| state.desired.by_id.contains_key(id))
+            }
+        };
+        let mut object = serde_json::Map::new();
+        object.insert("id".into(), Value::String(id.clone()));
+        object.insert("name".into(), Value::String(entry.name));
+        if entry.group {
+            object.insert("group".into(), Value::Bool(true));
+        }
+        if entry.disabled {
+            object.insert("disabled".into(), Value::Bool(true));
+        }
+        if !entry.config.is_null() || entry.group {
+            let config = if entry.group && entry.config.is_null() {
+                Value::Array(Vec::new())
+            } else {
+                entry.config
+            };
+            object.insert("config".into(), config);
+        }
+        self.inner
+            .edit(Edit::Create {
+                entry: Value::Object(object),
+                parent: parent.map(str::to_owned),
+                position,
+            })
+            .await?;
+        let view = self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .running
+            .get(&id)
+            .map(|r| r.view.clone());
+        Ok((id, view))
+    }
+
+    pub async fn update(&self, id: &str, config: Value) -> Result<(), LoaderError> {
+        self.inner
+            .edit(Edit::Update {
+                id: id.to_owned(),
+                config,
+            })
+            .await
+    }
+
+    pub async fn set_disabled(&self, id: &str, disabled: bool) -> Result<(), LoaderError> {
+        self.inner
+            .edit(Edit::SetDisabled {
+                id: id.to_owned(),
+                disabled,
+            })
+            .await
+    }
+
+    pub async fn rename_module(&self, id: &str, name: &str) -> Result<(), LoaderError> {
+        self.inner
+            .edit(Edit::Rename {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            })
+            .await
+    }
+
+    pub async fn move_to(
+        &self,
+        id: &str,
+        parent: Option<&str>,
+        position: Option<usize>,
+    ) -> Result<(), LoaderError> {
+        self.inner
+            .edit(Edit::Move {
+                id: id.to_owned(),
+                parent: parent.map(str::to_owned),
+                position,
+            })
+            .await
+    }
+
+    pub async fn remove(&self, id: &str) -> Result<(), LoaderError> {
+        self.inner.edit(Edit::Remove { id: id.to_owned() }).await
+    }
+
+    /// Resolve a row's module again (a dylib upgrade, say) and apply it.
+    /// Changes no layer and persists nothing.
+    pub async fn reload(&self, id: &str) -> Result<ReconcileReport, LoaderError> {
+        let inner = &self.inner;
+        let _op = inner.op.lock().await;
+        inner.check_open()?;
+        {
+            let mut state = inner.state.lock().unwrap();
+            let name = state
+                .desired
+                .row(id)
+                .ok_or_else(|| LoaderError::UnknownEntry(id.to_owned()))?
+                .name
+                .clone()
+                .unwrap_or_default();
+            state.resolved.remove(&name);
+        }
+        let report = inner.reconcile_inner().await;
+        inner.emit(LoaderChanged::Reloaded(id.to_owned()));
+        Ok(report)
+    }
+
+    /// Restart a row's fiber. Changes no layer and persists nothing.
+    pub async fn restart(&self, id: &str) -> Result<(), LoaderError> {
+        let view = self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .running
+            .get(id)
+            .map(|r| r.view.clone())
+            .ok_or_else(|| LoaderError::UnknownEntry(id.to_owned()))?;
+        view.restart().await.map_err(|error| LoaderError::Rejected {
+            id: id.to_owned(),
+            error,
+        })
+    }
+
+    /// Wait until no row is in transition.
+    pub async fn settled(&self) {
+        self.inner.settle().await
+    }
+}
