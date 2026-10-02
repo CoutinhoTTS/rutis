@@ -1,6 +1,6 @@
 # rutis 0.5 → 0.6：可扩展的公开类型
 
-0.6.0 把会继续扩展的公开类型标为 `#[non_exhaustive]`（[#44](https://github.com/arcships/rutis/issues/44)）。之后给这些类型加字段或加变体不再是破坏性变更，补丁版本可以放心升级。服务、事件、插件等接口不变。
+0.6.0 把会继续扩展的公开类型标为 `#[non_exhaustive]`（[#44](https://github.com/arcships/rutis/issues/44)）。之后给这些结构体加字段、给这些枚举加变体不再是破坏性变更。给已有的带字段变体（例如 `CordisError::StaleGeneration { expected, current }`）加字段仍是破坏性变更，由发布前的兼容检查拦截（见文末）。服务、事件、插件等接口不变。
 
 ## 构造 `EventOptions`
 
@@ -28,7 +28,7 @@ match error {
 }
 ```
 
-`FiberState`、`EffectPhase`、`Effect` 不变，仍可穷尽匹配。
+`FiberState`、`EffectPhase`、`Effect` 不变，仍可穷尽匹配；`Snapshot` 不变，仍可用字面量构造（例如插件把它作为服务提供，或测试中构造假数据）。
 
 ## 解构诊断与记录
 
@@ -36,7 +36,7 @@ match error {
 
 - `ServiceReadError`、`ServiceWriteError`
 - `RuntimeDiagnostics`、`PluginDiagnostics`、`DependencyDiagnostics`、`ResolvedDependency`、`ServiceAccess`、`BindingDiagnostics`、`EffectMeta`
-- `DispatchAttempt`、`Snapshot`、`FiberStatusChanged`
+- `DispatchAttempt`、`FiberStatusChanged`
 
 ```rust
 let PluginDiagnostics { name, state, .. } = plugin;

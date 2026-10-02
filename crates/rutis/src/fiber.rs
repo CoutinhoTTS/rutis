@@ -34,7 +34,6 @@ pub enum FiberState {
 
 /// fiber 快照(watch 载荷,generation 兼作 sequence,D24)。
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct Snapshot {
     pub generation: u64,
     pub state: FiberState,
