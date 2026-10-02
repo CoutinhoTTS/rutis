@@ -45,7 +45,9 @@ pub use fiber::{DisposeWaitError, FiberState, FiberStatusChanged, FiberView, Plu
 pub use intercept::{ServiceIntercept, ServiceWriter};
 pub use key::{EventKey, EventPattern, InstanceId, Key, ServiceKey, TypeKey};
 pub use plugin::{Plugin, PluginFactory};
-pub use typed::{Deps, Typed, TypedPlugin};
+pub use typed::{
+    DepKey, Deps, Gate, Keyed, KeyedGate, Typed, TypedFactory, TypedPlugin, TypedPluginFactory,
+};
 
 /// dyn 兼容的 future 别名(与 `futures::future::BoxFuture` 同一定义,D1)。
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;

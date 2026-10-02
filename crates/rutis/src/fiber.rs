@@ -489,6 +489,23 @@ impl FiberInner {
         (satisfied, missing)
     }
 
+    /// The binding behind each declared dependency, `None` where there is
+    /// none or it is being removed. A `Weak` keeps the allocation, so a
+    /// later binding never reuses the address.
+    fn dep_bindings(&self) -> Vec<Option<Weak<crate::registry::Binding>>> {
+        let registry = &self.ctx.shared().registry;
+        self.declared_injects
+            .iter()
+            .map(|key| {
+                let scope = self.ctx.scope_for(key);
+                registry
+                    .lookup(key, scope.as_ref())
+                    .filter(|binding| !binding.removing.load(Ordering::SeqCst))
+                    .map(|binding| Arc::downgrade(&binding))
+            })
+            .collect()
+    }
+
     async fn refresh_deps(this: &Arc<Self>) {
         if this.closing.load(Ordering::SeqCst) || this.ctx.shared().closing.load(Ordering::SeqCst) {
             return;
@@ -572,6 +589,8 @@ impl FiberInner {
 
         // 依赖快照(D21:装载窗口内即"绑定中",驱逐判定读它)
         *this.last_deps.lock().unwrap() = Some(deps.clone());
+        // 本代门控所见的绑定:apply 报告依赖丢失时据此核实
+        let bindings = this.dep_bindings();
 
         // apply:直接等待退出(D7 第③步"等 apply 退出",不中止)。
         // 预取消(dispose/restart/驱逐)使观察 token 的插件经 ctx.cancelled()
@@ -617,11 +636,18 @@ impl FiberInner {
                     shared.registry.notify_key_changed(&key);
                 }
             }
-            // apply 报告声明的依赖在门控之后、取用之前消失:这一代视同被驱逐,
-            // 回滚后回到 Pending,依赖回来时照常装载(不进粘性 Failed)。依赖
-            // 仍齐全时不认这个理由,按普通失败处理,避免装载循环。
-            Err(CordisError::InjectUnsatisfied(_)) if !this.resolve_deps().1.is_empty() => {
+            // apply 报告声明的依赖在门控之后、取用之前消失。证据是本代装载
+            // 时各依赖的绑定:此刻有一个已不是那个绑定(被摘除、或摘除后又
+            // 提供了新的)——依赖确实变动过,即使已经恢复。这一代视同被驱逐,
+            // 回滚后回到 Pending(不进粘性 Failed);已恢复则立即重查装载。
+            // 快照未变时不认这个理由,按普通失败处理,避免装载循环。
+            Err(CordisError::InjectUnsatisfied(_))
+                if !same_bindings(&bindings, &this.dep_bindings()) =>
+            {
                 Self::unload(this, NextState::Pending).await;
+                if this.resolve_deps().1.is_empty() {
+                    this.post(Intent::RefreshDeps);
+                }
             }
             Err(e) => Self::fail_load(this, e).await,
         }
@@ -1516,6 +1542,19 @@ impl std::future::IntoFuture for &FiberView {
     fn into_future(self) -> Self::IntoFuture {
         settle(&self.inner)
     }
+}
+
+/// Whether two [`FiberInner::dep_bindings`] snapshots name the same bindings.
+fn same_bindings(
+    a: &[Option<Weak<crate::registry::Binding>>],
+    b: &[Option<Weak<crate::registry::Binding>>],
+) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|pair| match pair {
+            (None, None) => true,
+            (Some(a), Some(b)) => Weak::ptr_eq(a, b),
+            _ => false,
+        })
 }
 
 #[cfg(test)]
