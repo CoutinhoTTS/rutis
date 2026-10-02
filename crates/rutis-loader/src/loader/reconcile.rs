@@ -306,7 +306,7 @@ impl Inner {
             let mut state = self.state.lock().unwrap();
             let before = Self::failures(&state);
             let root = state.groups.get(&None).map(|g| g.ctx.clone());
-            state.desired = self.build_desired(&state.layers, root.as_ref());
+            state.desired = self.build_desired(&state.composed_layers(), root.as_ref());
             let names: Vec<String> = state
                 .desired
                 .rows
@@ -560,11 +560,7 @@ impl Inner {
                 .overridden
                 .iter()
                 .map(|(field, &layer)| {
-                    let name = state
-                        .layers
-                        .get(layer)
-                        .map(|l| l.name.clone())
-                        .unwrap_or_default();
+                    let name = state.layer_name(layer).unwrap_or_default().to_owned();
                     (field.clone(), name)
                 })
                 .collect(),

@@ -20,7 +20,13 @@ const CONFLICT_RETRIES: usize = 3;
 impl Inner {
     /// Check a row would start: resolve, validate the config, build and
     /// validate the instance. Nothing is spawned.
-    pub(super) async fn dry_run(&self, layers: &[Layer], id: &str) -> Result<(), LoaderError> {
+    /// With `resolved`, check that module instead of resolving the name.
+    pub(super) async fn dry_run(
+        &self,
+        layers: &[Layer],
+        id: &str,
+        resolved: Option<Arc<crate::resolver::Resolved>>,
+    ) -> Result<(), LoaderError> {
         let (desired, base) = {
             let state = self.state.lock().unwrap();
             let root = state.groups.get(&None).map(|g| g.ctx.clone());
@@ -44,7 +50,10 @@ impl Inner {
             return Ok(());
         }
         let name = row.name.clone().unwrap_or_default();
-        let resolved = self.resolver.resolve(&name).await?;
+        let resolved = match resolved {
+            Some(resolved) => resolved,
+            None => self.resolver.resolve(&name).await?,
+        };
         // Evaluate where the plugin would run: its group, with its isolates.
         let ctx = base.map(|ctx| row.scope.context(&ctx));
         let config = self.eval().value(&row.config, ctx.as_ref())?;
@@ -68,12 +77,19 @@ impl Inner {
     /// Apply one edit in memory: rewrite the editable layer, dry-run,
     /// reconcile, and roll back if rows newly fail. Nothing is persisted.
     pub(super) async fn commit(self: &Arc<Self>, edit: &Edit) -> Result<(), LoaderError> {
-        let (layers, editable, before) = {
+        let (layers, overlays, editable, before) = {
             let state = self.state.lock().unwrap();
             let editable = state.editable.ok_or(LoaderError::NoEditableLayer)?;
-            (state.layers.clone(), editable, Self::failures(&state))
+            (
+                state.layers.clone(),
+                state.overlays.clone(),
+                editable,
+                Self::failures(&state),
+            )
         };
-        let patches = apply_edit(&layers, editable, edit)?;
+        // Overlays sit above the editable layer: their rows are not owned.
+        let composed: Vec<Layer> = layers.iter().chain(&overlays).cloned().collect();
+        let patches = apply_edit(&composed, editable, edit)?;
         let mut next = layers.clone();
         next[editable].patches = patches;
         if !matches!(
@@ -81,7 +97,8 @@ impl Inner {
             Edit::Remove { .. } | Edit::SetDisabled { disabled: true, .. }
         ) {
             if let Some(id) = edit.id() {
-                self.dry_run(&next, id).await?;
+                let next_composed: Vec<Layer> = next.iter().chain(&overlays).cloned().collect();
+                self.dry_run(&next_composed, id, None).await?;
             }
         }
         // A rename changes the module: resolve it afresh.
