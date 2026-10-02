@@ -33,3 +33,11 @@ loader.update("my-row", serde_json::json!({ "level": 2 })).await?;
 
 - **volatile 字段**：配置 schema 中带 `"x-volatile": true` 的字段（schemars：`#[schemars(extend("x-volatile" = true))]`）只改了它们时不重启，loader 存下新配置并向插件发 `VolatileUpdate`；插件在 apply 里 `ctx.events().on(ctx, &volatile_key(ctx), ...)` 接收。
 - **插件卸载自己**：插件调 `ctx.dispose_self()`，loader 把该行设为 disabled 写进可编辑层，并发 `LoaderChanged::SelfDisposed`。
+
+插件来源（`Resolver`）：
+
+| 来源 | 名字 | 说明 |
+| --- | --- | --- |
+| `Builtins` | 注册时给的任意名字 | 编译进宿主的插件 |
+| `rutis_dylib::DylibResolver` | `dylib:<目录>` | Linux 上的 dylib 插件（rutis-dylib 的 `loader` feature） |
+| `InteropResolver` | npm 包名、包的子路径、文件路径 | JavaScript（Cordis）插件，共用一个 Node 进程与 Cordis Context（本 crate 的 `interop` feature，Unix） |

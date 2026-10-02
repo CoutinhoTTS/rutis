@@ -28,15 +28,14 @@ fn combined_injects(resolved: &Resolved, scope: &RowScope) -> Vec<TypeKey> {
     keys
 }
 
-fn owned_signature(scope: &RowScope) -> (Vec<(String, String)>, Vec<String>) {
-    let (isolate, inject) = scope.signature();
-    (
-        isolate
-            .into_iter()
-            .map(|(n, l)| (n.to_owned(), l.to_owned()))
-            .collect(),
-        inject.into_iter().map(str::to_owned).collect(),
-    )
+/// The catalog scope a row runs with: none for a resolver that handles
+/// scope itself, else the row's resolved scope (`None` when it failed).
+fn effective_scope(resolved: &Resolved, row: &Row) -> Option<RowScope> {
+    if resolved.foreign_scope {
+        Some(RowScope::default())
+    } else {
+        row.scope.as_ref().ok().cloned()
+    }
 }
 
 impl Inner {
@@ -131,9 +130,31 @@ impl Inner {
             }
             let id = row.id.clone();
             let name = row.name.clone().unwrap_or_default();
-            let row_ctx = row.scope.context(&ctx);
-            let scope = owned_signature(&row.scope);
-            let extra: Vec<TypeKey> = row.scope.inject_keys().cloned().collect();
+            let scope = row.raw_scope.signature();
+            // A resolver that handles isolate/inject itself (foreign scope)
+            // gets the parent context as is; others need the catalog's keys.
+            let resolved = if row.group {
+                None
+            } else {
+                match state.resolved.get(&name).cloned() {
+                    Some(Ok(resolved)) => Some(resolved),
+                    _ => continue,
+                }
+            };
+            let foreign = resolved.as_ref().is_some_and(|r| r.foreign_scope);
+            let rust_scope = if foreign {
+                RowScope::default()
+            } else {
+                match &row.scope {
+                    Ok(scope) => scope.clone(),
+                    Err(error) => {
+                        state.rejected.insert(id, error.clone());
+                        continue;
+                    }
+                }
+            };
+            let row_ctx = rust_scope.context(&ctx);
+            let extra: Vec<TypeKey> = rust_scope.inject_keys().cloned().collect();
             state.next_token += 1;
             let token = state.next_token;
             if row.group {
@@ -163,9 +184,7 @@ impl Inner {
                 );
                 continue;
             }
-            let Some(Ok(resolved)) = state.resolved.get(&name).cloned() else {
-                continue;
-            };
+            let resolved = resolved.expect("a leaf row resolved above");
             let config = match self.eval().value(&row.config, Some(&row_ctx)) {
                 Ok(config) => config,
                 Err(error) => {
@@ -190,7 +209,7 @@ impl Inner {
                 continue;
             }
             state.rejected.remove(&id);
-            let injects = combined_injects(&resolved, &row.scope);
+            let injects = combined_injects(&resolved, &rust_scope);
             let view = row_ctx.plugin_with(
                 EntryFactory {
                     name: name.clone(),
@@ -386,7 +405,7 @@ impl Inner {
                 if row.parent != running.parent
                     || row.group != running.group
                     || !state.desired.wanted(row)
-                    || owned_signature(&row.scope) != running.scope
+                    || row.raw_scope.signature() != running.scope
                 {
                     continue;
                 }
@@ -394,8 +413,9 @@ impl Inner {
                     let name = row.name.clone().unwrap_or_default();
                     match state.resolved.get(&name) {
                         Some(Ok(resolved))
-                            if combined_injects(resolved, &row.scope) == running.injects
-                                && resolved.factory.name() == running.factory_name => {}
+                            if effective_scope(resolved, row).is_some_and(|s| {
+                                combined_injects(resolved, &s) == running.injects
+                            }) && resolved.factory.name() == running.factory_name => {}
                         _ => continue,
                     }
                 }

@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { Process } from './client.mjs'
+import { toJsonSchema } from './schema.mjs'
 
 const [socketPath, pluginPath] = process.argv.slice(2)
 
@@ -19,6 +20,8 @@ let closing = false
 let disposing
 let version = 0
 let emits = new Set() // events the rutis side may emit here
+// Rows: plugins rutis-loader manages one by one in this Context (`rows.*`).
+const rows = new Map() // key -> fiber
 
 // Each exported service slot is projected as a sequence of object handles.
 // A handle always addresses the object it was created for; when the slot
@@ -101,13 +104,47 @@ ctx.on('internal/set', (_ctx, _name, _value, _error, next) => {
   return result
 })
 
-// Exporters go first (they consume the services), then the plugins in
-// reverse load order, like a native composition unwinding.
+// Exporters go first (they consume the services), then rows and the
+// plugins in reverse load order, like a native composition unwinding.
 function dispose() {
   return disposing ??= (async () => {
     for (const slot of slots.values()) await slot.exporter?.dispose()
+    for (const fiber of [...rows.values()].reverse()) await fiber.dispose()
+    rows.clear()
     for (const fiber of [...(fibers ?? [])].reverse()) await fiber.dispose()
   })()
+}
+
+// A plugin module: an `apply` export is a function plugin; otherwise the
+// default export, which is how packaged plugins ship their Service class.
+async function pluginOf(entry) {
+  const own = cordisOf(entry)
+  if (cordisPath && own && own !== cordisPath) {
+    throw new Error(`${entry} resolves a different Cordis (${own}) than ${pluginPath} (${cordisPath})`)
+  }
+  const module = await import(pathToFileURL(entry).href)
+  return typeof module.apply === 'function' ? module : (module.default ?? module)
+}
+
+// One row: `isolate` as [name, label] pairs (rows naming a label share its
+// scope), `inject` as extra service names gating the row.
+async function loadRow([key, entry, config, isolate, inject]) {
+  if (rows.has(key)) throw new Error(`row ${key} is already loaded`)
+  const plugin = await pluginOf(entry)
+  let scope = ctx
+  for (const [name, label] of isolate ?? []) scope = scope.isolate(name, Symbol.for(`rutis-row:${label}`))
+  const fiber = inject?.length
+    ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { gated.plugin(plugin, config) } })
+    : scope.plugin(plugin, config)
+  rows.set(key, fiber)
+  try {
+    await fiber.await()
+  } catch (error) {
+    rows.delete(key)
+    await fiber.dispose()
+    throw error
+  }
+  return null
 }
 
 // A rutis service seen from Cordis: bound methods call the Rust host
@@ -136,7 +173,7 @@ function hostProxy(name, methods) {
 function mount(args) {
   if (fibers) throw new Error('plugins are already mounted')
   fibers = []
-  for (const [name, methods] of Object.entries(args.services)) {
+  for (const [name, methods] of Object.entries(args.services ?? {})) {
     if (name.includes('#')) throw new Error(`service name ${name} cannot be projected`)
     slots.set(name, { methods: new Set(methods), scope: undefined, object: undefined, identity: undefined, handle: null, generation: 0, version: 0 })
   }
@@ -153,11 +190,7 @@ function mount(args) {
       }
     }
     for (const { entry, config } of plugins) {
-      const module = await import(pathToFileURL(entry).href)
-      // An `apply` export is a function plugin; otherwise use the default
-      // export, which is how packaged plugins ship their Service class.
-      const plugin = typeof module.apply === 'function' ? module : (module.default ?? module)
-      fibers.push(ctx.plugin(plugin, config))
+      fibers.push(ctx.plugin(await pluginOf(entry), config))
     }
     for (const [name, slot] of slots) slot.exporter = exporter(name, slot)
     await Promise.all([...fibers, ...[...slots.values()].map(slot => slot.exporter)].map(fiber => fiber.await()))
@@ -206,6 +239,16 @@ function dispatch(target, method, args) {
         if (!slots.get(entry.name).methods.has(property)) throw new Error(`unknown service property ${entry.name}.${property}`)
         return entry.object[property]
       }
+      case 'rows.load': return loadRow(args ?? [])
+      case 'rows.unload': {
+        const fiber = rows.get(args?.[0])
+        rows.delete(args?.[0])
+        return fiber ? fiber.dispose().then(() => null) : null
+      }
+      case 'rows.schema': return pluginOf(args?.[0]).then(plugin => {
+        const schema = plugin.Config ?? plugin.schema
+        return schema ? toJsonSchema(schema) : null
+      })
       case 'release': {
         const entry = handles.get(args?.[0])
         if (entry) { entry.released = true; if (!entry.current) handles.delete(args[0]) }

@@ -70,6 +70,7 @@ impl Resolver for DylibResolver {
                             "dir": dir.to_string_lossy(),
                         }),
                         factory: Arc::new(ModuleFactory { module }),
+                        foreign_scope: false,
                     })
                 });
             Ok(entry.clone())

@@ -46,6 +46,9 @@ impl Inner {
         if let Err(e) = &row.disabled {
             return Err(e.clone());
         }
+        if row.group {
+            row.scope.as_ref().map_err(Clone::clone)?;
+        }
         if row.group || !desired.wanted(row) {
             return Ok(());
         }
@@ -55,7 +58,12 @@ impl Inner {
             None => self.resolver.resolve(&name).await?,
         };
         // Evaluate where the plugin would run: its group, with its isolates.
-        let ctx = base.map(|ctx| row.scope.context(&ctx));
+        let scope = if resolved.foreign_scope {
+            super::desired::RowScope::default()
+        } else {
+            row.scope.clone()?
+        };
+        let ctx = base.map(|ctx| scope.context(&ctx));
         let config = self.eval().value(&row.config, ctx.as_ref())?;
         let checked = catch_unwind(AssertUnwindSafe(|| {
             resolved.factory.validate_config(&config)?;

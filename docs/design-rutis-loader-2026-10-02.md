@@ -1,6 +1,6 @@
 # rutis-loader：插件管理层（设计稿）
 
-状态：P1–P5 已实现（rutis-loader、rutis-dsh 的 `profile` 模块、rutis-dylib 的 `DylibResolver`、rutis-dev），P6 见其 PR。日期：2026-10-02。
+状态：P1–P6 已实现（rutis-loader、rutis-dsh 的 `profile` 模块、rutis-dylib 的 `DylibResolver`、rutis-dev、rutis-loader 的 `InteropResolver`）。日期：2026-10-02。
 对照对象：dsh vendored 的 `@deepseek-ai/cordis-plugin-loader` 1.0.5（`src/config/{entry,tree,group}.ts`、`src/index.ts`）、`cordis-plugin-include` 1.0.9、`dsh-app-boot`、`dsh-config-editor`。
 
 ## 一、要解决什么
@@ -546,7 +546,7 @@ pub trait Expressions: Send + Sync + 'static {
 3. **P3 `DylibResolver`**（Linux）+ SDK 元数据加 schema；macOS dylib 单独立项。（已实现：`rutis-dylib` 的 `loader` feature；名字 `dylib:<目录>`。服务名没有放进 SDK：服务名目录要登记带类型的探针，dylib 插件给不了，需要把 rutis-loader 编进 SDK 的 ABI；改为由宿主用共享的接口 crate 登记。）
 4. **P4 dev 通道**建在 loader 上。（已实现：`crates/rutis-dev`。loader 为此新增 overlay 层 `set_overlay`：装载项不进用户配置、不被应用的 reconcile 冲掉；`reload` 改为全有或全无。）
 5. **P5 volatile 字段；插件卸载自己**（内核 `dispose_self` + loader 识别）。（已实现：schema 里带 `"x-volatile": true` 的字段只改了它们时，loader 用内核新增的 `FiberView::set_config` 存下新配置、不重启，并向插件发 `VolatileUpdate`（`volatile_key(ctx)`；用以实例 id 命名的事件，因为内核只允许实例自己的子树使用实例限定键）。插件调 `ctx.dispose_self()` 后，loader 把该行设为 disabled 并持久化，发 `LoaderChanged::SelfDisposed`；loader 自己发起的卸载和分组级联不会被误认。）
-6. **P6 `InteropResolver`**：逐个管理 JS 插件，含 schema 导出、isolate 转发。
+6. **P6 `InteropResolver`**：逐个管理 JS 插件，含 schema 导出、isolate 转发。（已实现：rutis-loader 的 `interop` feature。所有 JS 行共用一个 Node 进程和一个 Cordis Context，行之间的服务原生解析；名字按 Node 规则解析（`exports`），也可以是文件路径；schemastery `Config` 转 JSON Schema（`meta.volatile` → `x-volatile`）；isolate / inject 由 resolver 转发给 Cordis（`Resolved::foreign_scope` + `Loader::row`）。JS 行与 Rust 插件之间的服务不互通，Rust 服务以 host 提供给 JS 行。）
 
 ## 十七、要写的测试
 

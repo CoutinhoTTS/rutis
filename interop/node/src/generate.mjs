@@ -1009,6 +1009,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
             hosts,
             events: Some((events.names(), events.clone())),
             emits: vec![${emitted.map(event => `${literal(event.name)}.into()`).join(', ')}],
+            anchor: None,
           },
         ).await?;
         // Registered before any service binding, so native cleanup withdraws

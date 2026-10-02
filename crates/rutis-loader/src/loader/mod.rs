@@ -66,6 +66,18 @@ impl Editable {
     }
 }
 
+/// Which row a fiber belongs to, for plugins that act on their row's
+/// settings themselves (see `Resolved::foreign_scope`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowInfo {
+    pub id: String,
+    /// `isolate` as (service name, scope label): rows naming the same label
+    /// share a scope; a private scope's label is unique to the row.
+    pub isolate: Vec<(String, String)>,
+    /// `inject`: extra service names the row waits for.
+    pub inject: Vec<String>,
+}
+
 /// A new row for [`Loader::create`].
 #[derive(Debug, Clone, Default)]
 pub struct NewEntry {

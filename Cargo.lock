@@ -2938,9 +2938,11 @@ name = "rutis-loader"
 version = "0.1.0"
 dependencies = [
  "rutis",
+ "rutis-interop",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]

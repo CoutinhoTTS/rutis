@@ -29,7 +29,10 @@ pub(super) struct Row {
     pub(super) disabled: Result<bool, LoaderError>,
     /// Raw; evaluated per spawn or update in the row's own context.
     pub(super) config: Value,
-    pub(super) scope: RowScope,
+    pub(super) raw_scope: RawScope,
+    /// The scope resolved through the catalog. Rows whose resolver handles
+    /// scope itself (`Resolved::foreign_scope`) do without it.
+    pub(super) scope: Result<RowScope, LoaderError>,
     pub(super) invalid: Option<LoaderError>,
 }
 
@@ -43,17 +46,6 @@ pub(super) struct RowScope {
 }
 
 impl RowScope {
-    /// What identifies the scope: a change means respawning.
-    pub(super) fn signature(&self) -> (Vec<(&str, &str)>, Vec<&str>) {
-        (
-            self.isolate
-                .iter()
-                .map(|(name, _, label)| (name.as_str(), label.as_str()))
-                .collect(),
-            self.inject.iter().map(|(name, _)| name.as_str()).collect(),
-        )
-    }
-
     /// `parent` with every isolate applied.
     pub(super) fn context(&self, parent: &Ctx) -> Ctx {
         self.isolate
@@ -126,7 +118,45 @@ fn interpolate(
     })
 }
 
-fn parse_scope(id: &str, value: &Value, catalog: &ServiceCatalog) -> Result<RowScope, LoaderError> {
+/// A row's `isolate` and `inject` as written: service names, before the
+/// catalog maps them to keys.
+#[derive(Clone, Default, PartialEq)]
+pub(super) struct RawScope {
+    /// (service name, label), sorted by name.
+    pub(super) isolate: Vec<(String, String)>,
+    /// Service names, sorted.
+    pub(super) inject: Vec<String>,
+}
+
+impl RawScope {
+    /// What identifies the scope: a change means respawning.
+    pub(super) fn signature(&self) -> (Vec<(String, String)>, Vec<String>) {
+        (self.isolate.clone(), self.inject.clone())
+    }
+
+    /// Map the names to keys through the catalog.
+    pub(super) fn resolve(&self, catalog: &ServiceCatalog) -> Result<RowScope, LoaderError> {
+        let keys = catalog.keys(
+            self.isolate
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .chain(self.inject.iter().map(String::as_str)),
+        )?;
+        let (isolate_keys, inject_keys) = keys.split_at(self.isolate.len());
+        Ok(RowScope {
+            isolate: self
+                .isolate
+                .iter()
+                .cloned()
+                .zip(isolate_keys)
+                .map(|((name, label), (_, key))| (name, key.clone(), label))
+                .collect(),
+            inject: inject_keys.to_vec(),
+        })
+    }
+}
+
+fn parse_scope(id: &str, value: &Value) -> Result<RawScope, LoaderError> {
     let mut isolate_names = Vec::new();
     match value.get("isolate") {
         None | Some(Value::Null) => {}
@@ -185,21 +215,9 @@ fn parse_scope(id: &str, value: &Value, catalog: &ServiceCatalog) -> Result<RowS
     let mut inject_names = inject_names;
     inject_names.sort();
     inject_names.dedup();
-
-    let keys = catalog.keys(
-        isolate_names
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .chain(inject_names.iter().map(String::as_str)),
-    )?;
-    let (isolate_keys, inject_keys) = keys.split_at(isolate_names.len());
-    Ok(RowScope {
-        isolate: isolate_names
-            .into_iter()
-            .zip(isolate_keys)
-            .map(|((name, label), (_, key))| (name, key.clone(), label))
-            .collect(),
-        inject: inject_keys.to_vec(),
+    Ok(RawScope {
+        isolate: isolate_names,
+        inject: inject_names,
     })
 }
 
@@ -236,17 +254,18 @@ impl Desired {
             } else {
                 value.get("config").cloned().unwrap_or(Value::Null)
             };
-            let (scope, invalid) = if !group && name.is_none() {
+            let (raw_scope, invalid) = if !group && name.is_none() {
                 (
-                    RowScope::default(),
+                    RawScope::default(),
                     Some(LoaderError::InvalidEntry(format!("{id:?} has no name"))),
                 )
             } else {
-                match parse_scope(&id, &value, eval.catalog) {
-                    Ok(scope) => (scope, None),
-                    Err(error) => (RowScope::default(), Some(error)),
+                match parse_scope(&id, &value) {
+                    Ok(raw) => (raw, None),
+                    Err(error) => (RawScope::default(), Some(error)),
                 }
             };
+            let scope = raw_scope.resolve(eval.catalog);
             desired.by_id.insert(id.clone(), desired.rows.len());
             desired.rows.push(Row {
                 id,
@@ -258,6 +277,7 @@ impl Desired {
                 overridden: flat.overridden,
                 disabled,
                 config,
+                raw_scope,
                 scope,
                 invalid,
             });

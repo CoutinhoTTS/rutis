@@ -19,6 +19,11 @@ pub struct Resolved {
     pub schema: Option<Value>,
     /// Diagnostics: version, source path, hash and the like.
     pub meta: Value,
+    /// The plugin handles its row's `isolate` and `inject` itself (they
+    /// name services of another runtime, as for JavaScript rows): the loader
+    /// neither resolves them through its catalog nor applies them, and the
+    /// plugin reads them with `Loader::row`.
+    pub foreign_scope: bool,
 }
 
 impl std::fmt::Debug for Resolved {
@@ -100,6 +105,7 @@ impl Builtins {
                 factory,
                 schema,
                 meta,
+                foreign_scope: false,
             }),
         );
         self

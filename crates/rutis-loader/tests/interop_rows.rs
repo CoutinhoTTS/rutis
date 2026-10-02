@@ -1,0 +1,197 @@
+//! JavaScript plugins as loader rows (P6): one shared Cordis Context,
+//! services resolved between rows natively, per-row load/update/unload,
+//! isolate and inject forwarded, schemastery schema exported.
+#![cfg(all(unix, feature = "interop"))]
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use rutis::Ctx;
+use rutis_interop::rpc::{Reply, Value as RpcValue};
+use rutis_interop::{Host, HostDispatch};
+use rutis_loader::{
+    Chain, EntryStatus, InteropResolver, Layer, LoaderError, LoaderOptions, LoaderPlugin, Patch,
+};
+use serde_json::{json, Value};
+
+const PROVIDER: &str = r#"
+export const name = 'provider'
+// A schemastery-shaped schema, with the standard-schema hook Cordis calls.
+export const Config = {
+  type: 'object', meta: {},
+  dict: {
+    who: { type: 'string', meta: { default: 'world', description: 'who to greet' } },
+    level: { type: 'number', meta: { default: 1, volatile: true } },
+  },
+  '~standard': { validate: value => ({ value }) },
+}
+export function apply(ctx, config) {
+  ctx.provide('greeter', { hello: () => `hello ${config.who}` })
+}
+"#;
+
+const CONSUMER: &str = r#"
+export const name = 'consumer'
+export const inject = ['greeter', 'probe']
+export function apply(ctx, config) {
+  ctx.probe.record(`${config.tag}: ${ctx.greeter.hello()}`)
+  ctx.effect(() => () => ctx.probe.record(`${config.tag}: bye`))
+}
+"#;
+
+const FLAG: &str = r#"
+export const name = 'flag'
+export function apply(ctx) { ctx.provide('late', { on: true }) }
+"#;
+
+#[derive(Clone, Default)]
+struct Probe(Arc<Mutex<Vec<String>>>);
+
+impl HostDispatch for Probe {
+    fn invoke(&self, method: &str, args: RpcValue) -> Reply {
+        assert_eq!(method, "record");
+        let [line]: [String; 1] = rutis_interop::decode_value(args)?;
+        self.0.lock().unwrap().push(line);
+        Ok(RpcValue::Undefined)
+    }
+}
+
+impl Probe {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+
+    async fn wait_for(&self, line: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !self.0.lock().unwrap().iter().any(|l| l == line) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{line:?} not recorded: {:?}", self.0.lock().unwrap()));
+    }
+}
+
+fn node_package() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/node")
+}
+
+fn row(id: &str, file: &Path, config: Value, extra: Value) -> Value {
+    let mut row = json!({ "id": id, "name": file.to_string_lossy(), "config": config });
+    if let Value::Object(extra) = extra {
+        row.as_object_mut().unwrap().extend(extra);
+    }
+    row
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn javascript_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    let provider = write("provider.mjs", PROVIDER);
+    let consumer = write("consumer.mjs", CONSUMER);
+    let flag = write("flag.mjs", FLAG);
+
+    let probe = Probe::default();
+    let resolver = InteropResolver::new(node_package(), node_package().join("package.json"))
+        .with_hosts(vec![Host {
+            name: "probe".into(),
+            methods: json!({ "record": "sync" }),
+            dispatch: Arc::new(probe.clone()),
+        }]);
+    let root = Ctx::root().unwrap();
+    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+
+    let layer = |rows: Vec<Value>| -> Vec<Layer> {
+        let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+        vec![Layer::new("rows", patches)]
+    };
+    let base = vec![
+        row("p", &provider, json!({ "who": "rust" }), json!(null)),
+        row("c", &consumer, json!({ "tag": "c" }), json!(null)),
+        // A separate scope for `greeter`: its own provider and consumer.
+        row(
+            "p2",
+            &provider,
+            json!({ "who": "boxed" }),
+            json!({ "isolate": { "greeter": "box" } }),
+        ),
+        row(
+            "c2",
+            &consumer,
+            json!({ "tag": "c2" }),
+            json!({ "isolate": { "greeter": "box" } }),
+        ),
+        // An empty private scope: the consumer finds no greeter.
+        row(
+            "c3",
+            &consumer,
+            json!({ "tag": "c3" }),
+            json!({ "isolate": { "greeter": true } }),
+        ),
+        // Waits for `late`, which no row provides yet.
+        row(
+            "c4",
+            &consumer,
+            json!({ "tag": "c4" }),
+            json!({ "inject": ["late"] }),
+        ),
+    ];
+    let report = loader.reconcile(layer(base.clone()), None).await.unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    probe.wait_for("c: hello rust").await;
+    probe.wait_for("c2: hello boxed").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let lines = probe.take();
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.starts_with("c3") || l.starts_with("c4")),
+        "{lines:?}"
+    );
+
+    // The schemastery schema arrives as JSON Schema.
+    let schema = loader.get("p").unwrap().schema.unwrap();
+    assert_eq!(schema["properties"]["who"]["default"], "world");
+    assert_eq!(schema["properties"]["level"]["x-volatile"], true);
+
+    // A config update reloads the provider; Cordis reloads its consumer.
+    let mut updated = base.clone();
+    updated[0] = row("p", &provider, json!({ "who": "there" }), json!(null));
+    // `late` arrives: the gated consumer starts.
+    updated.push(row("f", &flag, json!({}), json!(null)));
+    loader
+        .reconcile(layer(updated.clone()), None)
+        .await
+        .unwrap();
+    probe.wait_for("c: hello there").await;
+    probe.wait_for("c4: hello there").await;
+    assert!(probe.take().contains(&"c: bye".to_owned()));
+
+    // Removing a row disposes it on the Cordis side.
+    updated.retain(|r| r["id"] != "c");
+    loader.reconcile(layer(updated), None).await.unwrap();
+    probe.wait_for("c: bye").await;
+
+    // A name that is no package here does not resolve.
+    loader
+        .reconcile(
+            layer(vec![json!({ "id": "x", "name": "no-such-package" })]),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        loader.get("x").unwrap().status,
+        EntryStatus::Unresolved(LoaderError::NotFound { .. })
+    ));
+
+    root.shutdown().await.unwrap();
+}

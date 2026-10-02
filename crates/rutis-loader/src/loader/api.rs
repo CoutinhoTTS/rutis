@@ -12,7 +12,7 @@ use crate::LoaderError;
 
 use super::{
     Editable, EntryInfo, Inner, Isolate, Loader, LoaderChanged, NewEntry, PendingEditDropped,
-    ReconcileReport,
+    ReconcileReport, RowInfo,
 };
 
 fn generate_id(taken: impl Fn(&str) -> bool) -> String {
@@ -164,6 +164,23 @@ impl Loader {
         state.desired.row(id).map(|row| Inner::info(&state, row))
     }
 
+    /// The row whose fiber has `instance` (the plugin's `ctx.instance()`).
+    /// Answers from inside `apply`: the loader records a fiber before its
+    /// first load runs.
+    pub fn row(&self, instance: rutis::InstanceId) -> Option<RowInfo> {
+        let state = self.inner.state.lock().unwrap();
+        let (id, _) = state
+            .running
+            .iter()
+            .find(|(_, r)| r.view.instance() == instance)?;
+        let row = state.desired.row(id)?;
+        Some(RowInfo {
+            id: id.clone(),
+            isolate: row.raw_scope.isolate.clone(),
+            inject: row.raw_scope.inject.clone(),
+        })
+    }
+
     /// The row whose fiber is `plugin` or an ancestor of it.
     pub fn locate(&self, plugin: PluginId) -> Option<String> {
         let (records, root) = {
@@ -214,7 +231,10 @@ impl Loader {
             .groups
             .get(&row.parent)
             .or(state.groups.get(&None))
-            .map(|g| row.scope.context(&g.ctx));
+            .map(|g| match &row.scope {
+                Ok(scope) => scope.context(&g.ctx),
+                Err(_) => g.ctx.clone(),
+            });
         Some(self.inner.eval().value(&row.config, base.as_ref()))
     }
 
