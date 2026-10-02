@@ -31,7 +31,7 @@ When your application needs a plugin architecture — editors, bots, agent hosts
 ## 🚀 Getting started
 
 ```bash
-cargo add rutis@0.5
+cargo add rutis@0.6
 ```
 
 A provider, a consumer that declares a dependency, and a provider swap — full code at [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs) (`cargo run -p rutis --example quickstart`):
