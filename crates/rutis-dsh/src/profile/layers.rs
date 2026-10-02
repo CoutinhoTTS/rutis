@@ -19,7 +19,7 @@ use rutis_loader::{apply_patches, Editable, Layer, Patch, Version};
 use semver::Version as SemVer;
 use serde_json::{json, Value};
 
-use super::{npm_semver, paths, yaml};
+use super::{include, npm_semver, paths, yaml};
 
 pub const USER_LAYER: &str = "user";
 pub const HOME_LAYER: &str = "home";
@@ -89,6 +89,8 @@ pub struct Profile {
     /// The user layer, at the version just read.
     pub editable: Editable,
     pub skipped: Vec<SkippedBundle>,
+    /// Includes that could not be expanded.
+    pub issues: Vec<String>,
     /// Every file read; watch these to reload.
     pub files: Vec<PathBuf>,
 }
@@ -534,10 +536,17 @@ pub fn load(context: &ProfileContext) -> Result<Profile, ProfileError> {
     };
     layers.push(Layer::new(TELEMETRY_LAYER, telemetry));
 
+    let expansion = include::expand(&layers, &context.dir);
+    files.extend(expansion.files);
+    if let Some(layer) = expansion.layer {
+        layers.push(layer);
+    }
+
     Ok(Profile {
         layers,
         editable: Editable::new(USER_LAYER, version),
         skipped,
+        issues: expansion.issues,
         files,
     })
 }

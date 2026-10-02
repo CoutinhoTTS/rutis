@@ -17,6 +17,7 @@ rutis-interop = { path = "../rutis-interop" }
 rutis-loader = { path = "../rutis-loader" }
 saphyr-parser = "0.0.12"
 semver = "1"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = { workspace = true }

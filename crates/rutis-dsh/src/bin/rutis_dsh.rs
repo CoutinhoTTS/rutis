@@ -2,16 +2,72 @@
 //! aimux-llm in this process. dsh runs in a Node process that rutis starts,
 //! owns and stops; see the crate docs.
 
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("dump-config") {
+        std::process::exit(dump_config(&args[1..]));
+    }
+    run(args);
+}
+
 #[cfg(all(unix, dsh_installed))]
 #[tokio::main]
-async fn main() {
-    std::process::exit(host::run(std::env::args().skip(1).collect()).await);
+async fn run(args: Vec<String>) {
+    std::process::exit(host::run(args).await);
 }
 
 #[cfg(not(all(unix, dsh_installed)))]
-fn main() {
+fn run(_args: Vec<String>) {
     eprintln!("rutis-dsh was built without its npm project: run `npm --prefix crates/rutis-dsh/dsh ci` and rebuild (Unix only)");
     std::process::exit(1);
+}
+
+const DUMP_USAGE: &str = "\
+usage: rutis-dsh dump-config [--profile <name>] [--patch <file>]...
+
+Prints the profile's composed entry list, as rutis-loader sees it, in dsh's
+entry-list YAML (`!!js` kept). Compare with `dsh --profile <name> --dump-config`.
+
+  --profile <name>   dsh profile under $DSH_HOME/profiles (default: rutis-web)
+  --patch <file>     an overlay applied after the user and home layers";
+
+/// `rutis-dsh dump-config`: compose the profile in Rust and print it.
+fn dump_config(args: &[String]) -> i32 {
+    use rutis_dsh::profile;
+    let mut name = "rutis-web".to_owned();
+    let mut overlays = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match (arg.as_str(), args.next()) {
+            ("--profile", Some(value)) => name = value.clone(),
+            ("--patch", Some(value)) => overlays.push(value.into()),
+            _ => {
+                eprintln!("{DUMP_USAGE}");
+                return 2;
+            }
+        }
+    }
+    let mut context = profile::ProfileContext::named(&name, profile::install_anchor());
+    context.overlays = overlays;
+    match profile::load(&context) {
+        Ok(loaded) => {
+            for skipped in &loaded.skipped {
+                eprintln!(
+                    "rutis-dsh: skipping profile bundle {:?}: {}",
+                    skipped.package, skipped.reason
+                );
+            }
+            for issue in &loaded.issues {
+                eprintln!("rutis-dsh: {issue}");
+            }
+            print!("{}", profile::dump(&loaded));
+            0
+        }
+        Err(error) => {
+            eprintln!("rutis-dsh: {error}");
+            1
+        }
+    }
 }
 
 #[cfg(all(unix, dsh_installed))]
