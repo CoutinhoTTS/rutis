@@ -135,6 +135,35 @@ fn main() {
         report(&format!("serial exact + patterns={patterns}"), samples);
         runtime.block_on(root.shutdown()).unwrap();
     }
+    // emit returns once the dispatch is queued; same-key dispatches then run
+    // one after another. "accept" is the caller's cost, "drain" the time per
+    // event until the chain behind one listener is empty.
+    for listeners in [0, 1] {
+        let root = Ctx::root().unwrap();
+        let key = EventKey::named("queue");
+        for _ in 0..listeners {
+            root.events().on(&root, &key, Pass).unwrap();
+        }
+        let ping = std::sync::Arc::new(Ping);
+        let loops = iterations / 10 + 1;
+        let start = Instant::now();
+        for _ in 0..loops {
+            root.events().emit(&root, &key, ping.clone()).unwrap();
+        }
+        let accept = start.elapsed().as_nanos() as f64 / loops as f64;
+        runtime.block_on(async {
+            while !root.diagnostics().event_backlogs.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        });
+        let drain = start.elapsed().as_nanos() as f64 / loops as f64;
+        report(
+            &format!("emit accept same key listeners={listeners}"),
+            accept,
+        );
+        report(&format!("emit drain same key listeners={listeners}"), drain);
+        runtime.block_on(root.shutdown()).unwrap();
+    }
     let root = Ctx::root().unwrap();
     let scoped = EventKey::<Ping>::of().instance(root.instance());
     report(

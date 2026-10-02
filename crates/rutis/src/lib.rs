@@ -24,7 +24,7 @@ mod registry;
 pub use bus::{DispatchAttempt, DispatchMode, EventBus, EventSubscription, ListenerKind};
 pub use ctx::Ctx;
 pub use diagnostics::{
-    BindingDiagnostics, DependencyDiagnostics, DependencyStatus, PluginDiagnostics,
+    BindingDiagnostics, DependencyDiagnostics, DependencyStatus, EventBacklog, PluginDiagnostics,
     ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
 };
 pub use effect::{Disposer, Effect, EffectMeta, EffectPhase};

@@ -18,3 +18,7 @@ thiserror = { workspace = true }
 [[bench]]
 name = "events"
 harness = false
+
+[[bench]]
+name = "runtime"
+harness = false
