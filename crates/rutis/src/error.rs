@@ -113,8 +113,9 @@ pub enum CordisError {
     Closed,
     #[error("config validation failed: {issues:?}")]
     Validation { issues: Vec<String> },
-    /// A dependency is gone. Returned from `apply` while one of the plugin's
-    /// declared dependencies is missing, it rolls the load back to Pending
+    /// A dependency is gone. Returned from `apply` after a strict read
+    /// (`require` / `require_as`) of a declared dependency found it
+    /// unavailable in the same load, it rolls the load back to Pending
     /// instead of Failed; otherwise it is an ordinary load failure.
     #[error("dependency unsatisfied: {0:?}")]
     InjectUnsatisfied(Vec<String>),

@@ -485,7 +485,191 @@ async fn a_dependency_back_before_the_failure_is_handled_still_reloads() {
     assert!(!states.contains(&FiberState::Failed), "{states:?}");
 }
 
-/// Claims a lost dependency while nothing changed.
+type Withdrawal = Arc<Mutex<Option<std::thread::JoinHandle<Result<(), Arc<CordisError>>>>>>;
+
+/// Withdraws its `Llm` while being validated, after the gate opened and
+/// before `apply` reads it.
+struct WithdrawnWhileValidating {
+    ctx: Ctx,
+    withdraw: Mutex<Option<rutis::Disposer>>,
+    withdrawal: Withdrawal,
+    seen: Seen,
+}
+
+impl TypedPlugin for WithdrawnWhileValidating {
+    type Deps = Arc<Llm>;
+
+    fn name(&self) -> &str {
+        "withdrawn-while-validating"
+    }
+
+    fn validate(&self) -> Result<(), CordisError> {
+        if let Some(disposer) = self.withdraw.lock().unwrap().take() {
+            // From another thread: a task spawned here would wait in this
+            // (blocked) worker's own slot.
+            let runtime = tokio::runtime::Handle::current();
+            let withdrawal = std::thread::spawn(move || runtime.block_on(disposer.dispose()));
+            *self.withdrawal.lock().unwrap() = Some(withdrawal);
+            // The removal is marked as soon as the withdrawal starts.
+            let start = std::time::Instant::now();
+            while self.ctx.get::<Llm>().is_some() {
+                assert!(start.elapsed() < Duration::from_secs(5), "never withdrawn");
+                std::thread::yield_now();
+            }
+        }
+        Ok(())
+    }
+
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        llm: Arc<Llm>,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        self.seen.lock().unwrap().push(llm.0);
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dependency_withdrawn_before_apply_starts_returns_the_plugin_to_pending() {
+    let ctx = Ctx::root().unwrap();
+    let first = ctx.provide(Llm(1)).unwrap();
+    let seen = Seen::default();
+    let withdrawal = Withdrawal::default();
+    let view = ctx.plugin(Typed::new(WithdrawnWhileValidating {
+        ctx: ctx.clone(),
+        withdraw: Mutex::new(Some(first)),
+        withdrawal: withdrawal.clone(),
+        seen: seen.clone(),
+    }));
+    // Settles once the first load has been handled (it starts Pending).
+    soon(&view).await.expect("back to Pending, not Failed");
+    assert_eq!(view.state().state, FiberState::Pending);
+    let withdrawal = withdrawal.lock().unwrap().take().expect("withdrawn");
+    soon(tokio::task::spawn_blocking(move || withdrawal.join()))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    ctx.provide(Llm(2)).unwrap();
+    reach(&view, FiberState::Active).await;
+    assert_eq!(*seen.lock().unwrap(), [2]);
+}
+
+/// Requires `Llm` and records nothing; another consumer, whose refresh
+/// evaluates the provider's check.
+struct Bystander(Vec<TypeKey>);
+
+impl Plugin for Bystander {
+    fn name(&self) -> &str {
+        "bystander"
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        &self.0
+    }
+
+    fn apply<'a>(&'a self, _: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+
+/// The first generation waits for `go` before reading its `Llm` the typed
+/// way, then for `hold` before reporting the read.
+struct HeldRead {
+    generations: AtomicUsize,
+    entered: Arc<Notify>,
+    go: Arc<Notify>,
+    read: Arc<Notify>,
+    hold: Arc<Notify>,
+    seen: Seen,
+    injects: Vec<TypeKey>,
+}
+
+impl Plugin for HeldRead {
+    fn name(&self) -> &str {
+        "held-read"
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let first = self.generations.fetch_add(1, Ordering::SeqCst) == 0;
+            if first {
+                self.entered.notify_one();
+                self.go.notified().await;
+            }
+            let read = <Arc<Llm> as Deps>::resolve(&(), ctx);
+            if first {
+                assert!(matches!(read, Err(CordisError::InjectUnsatisfied(_))));
+                self.read.notify_one();
+                self.hold.notified().await;
+            }
+            self.seen.lock().unwrap().push(read?.0);
+            Ok(Effect::Done)
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_check_rejected_after_the_gate_returns_the_plugin_to_pending_even_if_it_recovers() {
+    let ctx = Ctx::root().unwrap();
+    let states = Arc::new(Mutex::new(Vec::new()));
+    let healthy = Arc::new(AtomicBool::new(true));
+    let check = healthy.clone();
+    ctx.provide_as_with_check(TypeKey::of::<Llm>(), Arc::new(Llm(1)), move || {
+        check.load(Ordering::SeqCst)
+    })
+    .unwrap();
+    let bystander = ctx.plugin(Bystander(vec![TypeKey::of::<Llm>()]));
+    soon(&bystander).await.unwrap();
+    let seen = Seen::default();
+    let plugin = HeldRead {
+        generations: AtomicUsize::new(0),
+        entered: Arc::new(Notify::new()),
+        go: Arc::new(Notify::new()),
+        read: Arc::new(Notify::new()),
+        hold: Arc::new(Notify::new()),
+        seen: seen.clone(),
+        injects: vec![TypeKey::of::<Llm>()],
+    };
+    let (entered, go, read, hold) = (
+        plugin.entered.clone(),
+        plugin.go.clone(),
+        plugin.read.clone(),
+        plugin.hold.clone(),
+    );
+    let view = ctx.plugin(plugin);
+    soon(entered.notified()).await;
+    ctx.events()
+        .on(&ctx, &rutis::EventKey::of(), States(states.clone()))
+        .unwrap();
+
+    // Same binding, but its check now rejects; the bystander's refresh
+    // records that before the held plugin reads.
+    healthy.store(false, Ordering::SeqCst);
+    ctx.refresh();
+    reach(&bystander, FiberState::Pending).await;
+    go.notify_one();
+    soon(read.notified()).await;
+
+    // The check passes again before the failed read is handled.
+    healthy.store(true, Ordering::SeqCst);
+    ctx.refresh();
+    reach(&bystander, FiberState::Active).await;
+    hold.notify_one();
+
+    reach(&view, FiberState::Active).await;
+    assert!(view.state().error.is_none());
+    assert_eq!(*seen.lock().unwrap(), [1]);
+    let states = states.lock().unwrap().clone();
+    assert!(!states.contains(&FiberState::Failed), "{states:?}");
+}
+
+/// Claims a lost dependency without a failed read.
 struct FalseClaim(Vec<TypeKey>);
 
 impl Plugin for FalseClaim {
@@ -503,7 +687,7 @@ impl Plugin for FalseClaim {
 }
 
 #[tokio::test]
-async fn the_claim_is_a_plain_failure_while_dependencies_are_unchanged() {
+async fn the_claim_without_a_failed_read_is_a_plain_failure() {
     let ctx = Ctx::root().unwrap();
     ctx.provide(Llm(1)).unwrap();
     let view = ctx.plugin(FalseClaim(vec![TypeKey::of::<Llm>()]));
