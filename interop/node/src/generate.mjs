@@ -1,7 +1,7 @@
 import ts from 'typescript'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 
 const keywords = new Set('as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while'.split(' '))
 function ident(name) {
@@ -40,7 +40,9 @@ function locate(pluginPath) {
 // the plugins; their interface comes from the plugins' Context declarations.
 // `options.events` lists Cordis events forwarded to rutis listeners.
 // `options.emits` lists events the rutis side emits into Cordis.
-export function generate(plugins, nodePackage, { provide = [], events = [], emits = [] } = {}) {
+// `options.root` is the npm project: the runtime and plugins are then
+// addressed relative to it, found at run time through `npm_root`.
+export function generate(plugins, nodePackage, { provide = [], events = [], emits = [], root } = {}) {
   const single = !Array.isArray(plugins)
   const group = (single ? [{ path: plugins }] : plugins).map(plugin => ({ ...plugin, ...locate(plugin.path) }))
   if (!group.length) throw new Error('a mount needs at least one plugin')
@@ -194,6 +196,8 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
   // What is being mapped, for diagnostics raised while mapping its types.
   let mapping
   const notes = new Set()
+  // Instantiations of generic live objects whose members are being bound.
+  const expanding = []
   function unionMembers(type, members, hint) {
     // Function members (e.g. `string | ((ctx) => string)`) cannot cross as
     // data: bind the data members and report the rest.
@@ -623,12 +627,34 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
 
   // An object with methods, or a class instance, crosses by reference: the
   // proxy reads its properties live and calls its methods on the original.
+  // Whether `type` holds `target` among its type arguments, at any depth.
+  function nests(type, target, depth = 0) {
+    if (type === target) return true
+    if (depth > 8) return false
+    const members = type.isUnion() || type.isIntersection() ? type.types
+      : type.objectFlags & ts.ObjectFlags.Reference ? checker.getTypeArguments(type) : []
+    return members.some(member => nests(member, target, depth + 1))
+  }
   function liveObject(type, hint) {
     if (named.has(type)) return named.get(type)
+    // Generics whose members return them wrapped again (Zod's
+    // `optional(): ZodOptional<this>`) have no fixed point: every expansion is
+    // a new instantiation. One that wraps an instantiation still being bound
+    // stays an untyped reference.
+    const generic = type.objectFlags & ts.ObjectFlags.Reference ? type.target : undefined
+    const outer = generic && expanding.find(outer => checker.getTypeArguments(type).some(argument => nests(argument, outer)))
+    if (outer) {
+      const note = `${mapping ?? 'type'}: ${checker.typeToString(type)} wraps ${checker.typeToString(outer)} again; bound as an untyped ObjectRef`
+      if (!notes.has(note)) { notes.add(note); diagnostics.push(note) }
+      return '::rutis_interop::ObjectRef'
+    }
     const label = typeName(type, hint)
     const name = claim(label)
     named.set(type, name)
-    const { methods, getters, unavailable } = bindMembers(type, label, name, { properties: true })
+    if (generic) expanding.push(type)
+    let bound
+    try { bound = bindMembers(type, label, name, { properties: true }) } finally { if (generic) expanding.pop() }
+    const { methods, getters, unavailable } = bound
     const getterCode = getters.map(getter => `/// Reads \`${label}.${getter.name}\` from the live object.
       pub fn ${getter.rustName}(&self) -> Result<${getter.result}, ::rutis_interop::Error> {
         ::rutis_interop::decode_value(self.0.get(${literal(getter.name)})?)
@@ -895,12 +921,17 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     }
   }
   let configCode, configChecks, launched
+  // Paths of the runtime and plugins: relative to the npm project when it is
+  // given, so a deployed copy can stand in for it.
+  const located = path => root
+    ? `__rutis_root.join(${literal(relative(root, path).replaceAll('\\', '/'))})`
+    : `::std::path::PathBuf::from(${literal(path)})`
   const toValue = accessor => `::rutis_interop::serde_json::to_value(&${accessor}).map_err(|e| ::rutis::CordisError::PluginFailed(Box::new(e)))?`
   if (single) {
     const config = configFor(group[0].configType, 'Config', 'self.config')
     configCode = config.code
     configChecks = config.checks.join('\n')
-    launched = [`(::std::path::Path::new(${literal(group[0].entry)}), ${toValue('self.config')})`]
+    launched = [toValue('self.config')]
   } else {
     // One Config field per group member, each with that plugin's own type.
     const parts = group.map(plugin => ({ plugin, ...configFor(plugin.configType, claim(`${plugin.name}Config`), `self.config.${plugin.name}`) }))
@@ -911,7 +942,7 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
   #[derive(Debug, Clone${defaultable ? ', Default' : ''})]
   pub struct Config { ${parts.map(part => `pub ${part.plugin.name}: ${part.structName},`).join(' ')} }`
     configChecks = parts.flatMap(part => part.checks).join('\n')
-    launched = group.map(plugin => `(::std::path::Path::new(${literal(plugin.entry)}), ${toValue(`self.config.${plugin.name}`)})`)
+    launched = group.map(plugin => toValue(`self.config.${plugin.name}`))
   }
 
   const serviceNames = [...services.keys()]
@@ -944,10 +975,12 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
         }`).join(', ')}];
         let events = ::rutis_interop::Events::new();
         ${forwarded.map(event => `events.forward::<${event.type}>(${literal(event.name)}, ${event.type}::from_args);`).join('\n')}
+        ${root ? `let __rutis_root = ::rutis_interop::npm_root(${literal(root)});` : ''}
+        let __rutis_entries: [::std::path::PathBuf; ${group.length}] = [${group.map(plugin => located(plugin.entry)).join(', ')}];
         let process = ::rutis_interop::Process::mount(
-          ::std::path::Path::new(${literal(nodePackage)}),
+          &${located(nodePackage)},
           ::rutis_interop::Mount {
-            plugins: vec![${launched.join(',\n            ')}],
+            plugins: vec![${launched.map((config, index) => `(__rutis_entries[${index}].as_path(), ${config})`).join(',\n            ')}],
             services: ::rutis_interop::serde_json::json!(${JSON.stringify(manifest)}),
             observer: Some(projection.clone()),
             hosts,
@@ -977,18 +1010,19 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
   return { rust: rust_, inputs: program.getSourceFiles().map(file => file.fileName), diagnostics }
 }
 
-// `node generate.mjs <node package> [--provide=<service>...] [--event=<name>...] [--emit=<name>...] <plugin>` or,
+// `node generate.mjs <node package> [--root=<npm project>] [--provide=<service>...] [--event=<name>...] [--emit=<name>...] <plugin>` or,
 // for a group, `... <name>=<plugin> ...`.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [nodePackage, ...rest] = process.argv.slice(2)
     const provide = rest.filter(arg => arg.startsWith('--provide=')).map(arg => arg.slice('--provide='.length))
     const events = rest.filter(arg => arg.startsWith('--event=')).map(arg => arg.slice('--event='.length))
     const emits = rest.filter(arg => arg.startsWith('--emit=')).map(arg => arg.slice('--emit='.length))
-    const members = rest.filter(arg => !/^--(provide|event|emit)=/.test(arg))
+    const root = rest.find(arg => arg.startsWith('--root='))?.slice('--root='.length)
+    const members = rest.filter(arg => !/^--(provide|event|emit|root)=/.test(arg))
     const plugins = members.length === 1 && !members[0].includes('=')
       ? resolve(members[0])
       : members.map(member => { const at = member.indexOf('='); return { name: member.slice(0, at), path: resolve(member.slice(at + 1)) } })
-    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage), { provide, events, emits })))
+    process.stdout.write(JSON.stringify(generate(plugins, resolve(nodePackage), { provide, events, emits, ...(root ? { root: resolve(root) } : {}) })))
   } catch (error) { console.error(error.message); process.exitCode = 1 }
 }

@@ -101,6 +101,17 @@ store.set(&credentials::CredentialRef::from("app/api-key"), "s3cret").await?;
 | 事件 | `events` 中的事件生成 rutis 事件类型，用 `ctx.events().on(&ctx, &EventKey::<CredentialsRecordUpdated>::of(), listener)` 订阅；`emits` 中的事件由 rutis `emit` / `parallel` 发往 Cordis |
 | 宿主服务 | `provide` 中的服务生成 trait（例如 `SystemPromptHost`），实现后用生成的 `provide_system_prompt(&ctx, host)` 注册；挂载会等它就绪 |
 
+## 部署
+
+清单驱动的挂载按 npm 项目的相对位置定位运行时和插件。二进制换到别的机器或目录时，把 npm 项目（含已解析的 `node_modules`）一起部署，并用 `RUTIS_INTEROP_ROOT` 指向它：
+
+```sh
+cp -RL cordis /opt/app/cordis        # -L：file: 依赖等符号链接展开为实际文件
+RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
+```
+
+未设置时使用构建时的位置，开发期无需配置。用 `path` 挂载的 TypeScript 源文件应放在 npm 项目内，部署时随项目一起复制；运行时用默认的 `node_modules/@rutis/interop`（不设 `runtime`）即可随项目移动。
+
 ## 4. Cordis 插件需要遵守的边界
 
 跨进程后，少数由 JS 语言栈带来的行为无法保持，写成了 [需求 §5](../../docs/requirements-protocol-plugins.md) 的边界规则，主要是：
