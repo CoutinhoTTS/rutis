@@ -2,7 +2,7 @@
 //! (决策:docs/decision-aimux-llm-plugin-2026-08-23.md v2 对象 A)。
 //!
 //! 层次纪律:依赖 rutis 内核 + aimux;**零桥知识、零宿主形态知识**——
-//! 不知道 dsh,不知道 wire,不依赖 rutis-cordis。任何宿主(rutis 运行时
+//! 不知道 dsh,不知道 wire,不依赖任何桥。任何宿主(rutis 运行时
 //! 内的消费者,或经业务无关桥过线的远端消费者)都以同一服务面使用它。
 //!
 //! 服务面(即中性协议的 schema 所在,DTO 见 [`service`]):

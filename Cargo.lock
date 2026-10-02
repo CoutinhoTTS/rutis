@@ -972,23 +972,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dsh-llm-mount"
-version = "0.1.0"
-dependencies = [
- "aimux-core",
- "aimux-llm",
- "async-stream",
- "async-trait",
- "futures",
- "rutis",
- "rutis-interop",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2828,19 +2811,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rutis-cordis"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "futures",
- "rutis",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
 name = "rutis-dsh"
 version = "0.5.0"
 dependencies = [
@@ -2850,10 +2820,12 @@ dependencies = [
  "async-trait",
  "futures",
  "rutis",
- "rutis-cordis",
+ "rutis-interop",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

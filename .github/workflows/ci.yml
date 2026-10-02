@@ -1,10 +1,7 @@
 # 常规 CI:push / PR 自动跑全量测试 + 编译检查。
-# 防回归:任何改动(agent/cli/内核/桥)引入的失败在此显式变红。
+# 防回归:任何改动(agent/cli/内核/interop/rutis-dsh)引入的失败在此显式变红。
 #
 # rutis-agent 的 rutui 依赖已从 crates.io 解析,无需额外 checkout。
-#
-# node e2e(rutis-cordis host_cordis)需要外部 checkout(DSH_ROOT /
-# MIN_CORDIS_ROOT),CI 环境没有,经 RUTIS_SKIP_NODE_E2E=1 跳过。
 
 name: ci
 
@@ -37,18 +34,16 @@ jobs:
           cache-dependency-path: |
             interop/node/package-lock.json
             interop/baseline/package-lock.json
-            examples/dsh-llm/cordis/package-lock.json
+            crates/rutis-dsh/dsh/package-lock.json
       - run: npm --prefix interop/node ci
       - run: npm --prefix interop/node test
       # Real published Cordis plugins for the rutis-interop baseline test.
       - run: npm --prefix interop/baseline ci
-      # dsh-llm served by aimux-llm (examples/dsh-llm).
-      - run: npm --prefix examples/dsh-llm/cordis ci
+      # dsh (web UI and agent loop) served by aimux in the rutis-dsh host.
+      - run: npm --prefix crates/rutis-dsh/dsh ci
 
-      - name: cargo test (workspace, skip external host e2e)
+      - name: cargo test (workspace)
         run: cargo test --workspace
-        env:
-          RUTIS_SKIP_NODE_E2E: "1"
 
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets

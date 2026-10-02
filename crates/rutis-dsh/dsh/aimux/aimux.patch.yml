@@ -1,0 +1,10 @@
+# The rutis bundle layer: dsh-llm provider routes served by aimux, as an
+# ordinary profile row so its `llm-aimux` settings section is editable on the
+# web Models page. Route names must not collide with other adapters' routes.
+- insert:
+    - id: llm-aimux
+      name: '@rutis/dsh-aimux'
+      config:
+        providers:
+          aimux:
+            displayName: aimux (rutis)

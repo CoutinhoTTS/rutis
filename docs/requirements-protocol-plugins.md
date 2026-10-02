@@ -8,7 +8,7 @@
 - 一次挂载可以是一组彼此依赖的 Cordis 插件（已发布插件通常设计成组合使用），组内依赖按 Cordis 原生规则解析。
 - **依赖是双向的**：rutis 插件可以依赖被挂载插件提供的服务；被挂载的 Cordis 插件也可以按原生方式（`inject` / `ctx.xxx`）依赖 rutis 应用提供的服务，例如宿主把 llm、存储等能力交给插件使用。两个方向都遵守各自框架的依赖门控和清理顺序。
 - 兼容层是外挂库（`crates/rutis-interop`、`interop/node`），不是另一个宿主，也不是新的插件框架。
-- 反方向（Cordis / dsh 应用做宿主、使用 Rust）由已在用的 `rutis-cordis` + `host/` 负责（见 [dsh 桥设计](design-dsh-bridge-2026-08-21.md)）。`rutis-interop` 中已有的这部分实现（Cordis 应用挂载 rutis 插件）冻结，不再增加能力。注意区分：rutis 应用向它挂载的 Cordis 插件提供服务，属于本需求的主方向，不在冻结范围内。
+- 由 rutis 做宿主：dsh 的完整 web 界面也通过本兼容层挂载运行（`crates/rutis-dsh`），模型调用由 rutis 应用提供的服务承担。原先由 dsh 做宿主、经 `rutis-cordis` + `host/` 使用 Rust 的旧桥已移除（[#83](https://github.com/arcships/rutis/issues/83)）。`rutis-interop` 中 Cordis 应用挂载 rutis 插件的实现冻结，不再增加能力。注意区分：rutis 应用向它挂载的 Cordis 插件提供服务，属于本需求的主方向，不在冻结范围内。
 
 ## 2. 使用方式
 

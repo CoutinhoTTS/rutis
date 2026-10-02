@@ -18,7 +18,7 @@ use crate::service::{
 /// per-key provider 工厂:(provider, api_key, model) → model。默认实现走
 /// aimux;测试注入 fake 以断言 keyed 路由(不联网)。
 pub type ProviderFactory =
-    Arc<dyn Fn(&str, &str, &str) -> Result<Arc<dyn LanguageModel>, String> + Send + Sync>;
+    Arc<dyn Fn(&str, Option<&str>, &str) -> Result<Arc<dyn LanguageModel>, String> + Send + Sync>;
 
 /// 未配置的模型占位:构造失败(如缺 key)不阻止宿主启动;真正的调用
 /// 发生时错误才产生。
@@ -76,8 +76,8 @@ impl AimuxLlm {
             fallback,
             provider_name.clone(),
             fallback_model,
-            Arc::new(move |provider, key, model| {
-                aimux_providers::provider(provider, Some(key.to_owned()), model, None)
+            Arc::new(move |provider, key: Option<&str>, model| {
+                aimux_providers::provider(provider, key.map(str::to_owned), model, None)
                     .map(|m| Arc::from(m) as Arc<dyn LanguageModel>)
                     .map_err(|e| e.to_string())
             }),
@@ -125,32 +125,41 @@ impl AimuxLlm {
     }
 
     fn model_for(&self, req: &StreamRequest) -> Result<Arc<dyn LanguageModel>, LlmServiceError> {
-        let wire_provider = req
-            .provider
-            .clone()
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| self.provider_name.clone());
         let wire_model = req
             .model
             .clone()
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| self.fallback_model.clone());
-        match &req.api_key {
-            Some(api_key) => {
-                let cache_key = format!("{api_key}\u{0}{wire_provider}\u{0}{wire_model}");
-                let mut keyed = self.keyed.lock().unwrap();
-                if let Some(model) = keyed.get(&cache_key) {
-                    return Ok(Arc::clone(model));
-                }
-                match (self.factory)(&wire_provider, api_key, &wire_model) {
-                    Ok(model) => {
-                        keyed.insert(cache_key, Arc::clone(&model));
-                        Ok(model)
-                    }
-                    Err(e) => Err(LlmServiceError::new("llmProvider", e)),
-                }
+        let key = req.api_key.as_deref();
+        if key.is_none() && wire_model == self.fallback_model {
+            return Ok(Arc::clone(&self.fallback));
+        }
+        // Without a key the request runs on the fallback provider with its
+        // environment credentials; the requested model still applies.
+        let wire_provider = self.backend(req.provider.as_deref(), key);
+        let cache_key = format!(
+            "{}\u{0}{wire_provider}\u{0}{wire_model}",
+            key.unwrap_or_default()
+        );
+        let mut keyed = self.keyed.lock().unwrap();
+        if let Some(model) = keyed.get(&cache_key) {
+            return Ok(Arc::clone(model));
+        }
+        match (self.factory)(&wire_provider, key, &wire_model) {
+            Ok(model) => {
+                keyed.insert(cache_key, Arc::clone(&model));
+                Ok(model)
             }
-            None => Ok(Arc::clone(&self.fallback)),
+            Err(e) => Err(LlmServiceError::new("llmProvider", e)),
+        }
+    }
+
+    /// The aimux provider a request runs on: the requested one with a key,
+    /// the fallback provider (environment credentials) without.
+    fn backend(&self, provider: Option<&str>, api_key: Option<&str>) -> String {
+        match (provider.filter(|p| !p.is_empty()), api_key) {
+            (Some(provider), Some(_)) => provider.to_owned(),
+            _ => self.provider_name.clone(),
         }
     }
 }
@@ -301,6 +310,9 @@ impl LlmService for AimuxLlm {
         provider: &str,
         api_key: Option<&str>,
     ) -> Result<Vec<ModelBrief>, LlmServiceError> {
+        // Listed like a request runs: without a key, the fallback provider's catalog.
+        let provider = self.backend(Some(provider), api_key);
+        let provider = provider.as_str();
         let key = api_key.unwrap_or_default().to_owned();
         let cache_key = format!("list\u{0}{provider}\u{0}{key}");
         if let Some(cached) = self.list_cache.lock().unwrap().get(&cache_key).cloned() {

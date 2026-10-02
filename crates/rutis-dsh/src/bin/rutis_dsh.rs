@@ -1,201 +1,212 @@
-//! `rutis-dsh up`:入口与组合根(决策文档 v2 对象 D)。
-//!
-//! 1. 起 rutis 运行时,装载 aimux-llm 插件(apply → 注册 llm 服务);
-//! 2. 注册表中的服务经业务无关桥(rutis-cordis)供给宿主——hello 能力集
-//!    从注册表推导,不硬编码;
-//! 3. spawn 官方 dsh CLI(`RUTIS_DSH_BIN` 或 PATH 的 `dsh`),经
-//!    `RUTIS_BRIDGE_PORT` 告知桥端口;stdio 继承;
-//! 4. 事件链路:`evt/emit` → 内核 keyed 事件(`HostEvent`,stderr 摘要并行);
-//! 5. dsh 退出且桥断连即收敛。
-//!
-//! 本文件零 dsh 知识:dsh 只是它拉起的一个进程。
+//! `rutis-dsh up`: the dsh web UI in a rutis host, with model calls served by
+//! aimux-llm in this process. dsh runs in a Node process that rutis starts,
+//! owns and stops; see the crate docs.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use aimux_llm::{llm_service_key, AimuxLlmPlugin, LlmService};
-use rutis::{Ctx, FiberState, FiberView};
-use rutis_cordis::{
-    forward_host_events, Bridge, BridgeConfig, ExpectedHost, ServiceDispatch, TcpWire,
-};
-use serde_json::json;
-
+#[cfg(all(unix, dsh_installed))]
 #[tokio::main]
 async fn main() {
-    // 无声退出取证:panic 与正常返回都必须留下最后一行日志。
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("[rutis-dsh] PANIC: {info}");
-    }));
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("up") => up().await,
-        _ => {
-            eprintln!("usage: rutis-dsh up");
-            eprintln!();
-            eprintln!("env: RUTIS_DSH_BIN (default: dsh from PATH); model keys per provider");
-            std::process::exit(2)
-        }
-    }
-    eprintln!("[rutis-dsh] runner exiting");
+    std::process::exit(host::run(std::env::args().skip(1).collect()).await);
 }
 
-/// 极简空白分割(引用段不支持;路径含空格时 RUTIS_DSH_BIN 需自身可执行)。
-fn shell_split(s: &str) -> Vec<String> {
-    s.split_whitespace().map(str::to_owned).collect()
+#[cfg(not(all(unix, dsh_installed)))]
+fn main() {
+    eprintln!("rutis-dsh was built without its npm project: run `npm --prefix crates/rutis-dsh/dsh ci` and rebuild (Unix only)");
+    std::process::exit(1);
 }
 
-/// 按 char 边界截断(日志摘要用;`floor_char_boundary` 尚未稳定)。
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_owned();
+#[cfg(all(unix, dsh_installed))]
+mod host {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use aimux_llm::{llm_service_key, AimuxLlmPlugin, LlmService};
+    use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, Listener, Plugin, TypeKey};
+    use rutis_dsh::web;
+    use tokio::sync::mpsc;
+
+    const USAGE: &str = "\
+usage: rutis-dsh up [--profile <name>] [dsh options...]
+
+Starts the dsh web UI with model calls served by aimux in this process.
+Options after `up` other than --profile go to dsh, e.g. --port 3080 --no-open.
+
+  --profile <name>   dsh profile under $DSH_HOME/profiles (default: rutis-web)
+
+The `aimux` model routes are configured on the dsh Models page (settings
+section `llm-aimux`). Routes without a key use the fallback model from
+AIMUX_PROVIDER / AIMUX_MODEL (default deepseek / deepseek-chat) and that
+provider's key variable, e.g. DEEPSEEK_API_KEY.";
+
+    /// Why the host stops, and its exit code.
+    enum Stop {
+        Interrupted,
+        Exit(i32),
+        StartupFailed(String),
+        ProcessEnded,
     }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
 
-/// 等插件到达目标态(装载是异步的;服务就绪以 fiber Active 为准)。
-async fn wait_state(view: &FiberView, want: FiberState) {
-    let mut rx = view.watch();
-    loop {
-        if rx.borrow().state == want {
-            return;
-        }
-        rx.changed().await.expect("fiber driver alive");
-    }
-}
-
-async fn up() {
-    // ── rutis 运行时:装载 aimux-llm,llm 服务进注册表 ──
-    let ctx = Ctx::root().expect("rutis runtime root (needs tokio)");
-    let plugin = AimuxLlmPlugin::from_env();
-    let view = ctx.plugin(plugin);
-    wait_state(&view, FiberState::Active).await;
-    let llm: Arc<dyn LlmService> = ctx
-        .get_as::<dyn LlmService>(llm_service_key())
-        .expect("aimux-llm registered the llm service");
-
-    // ── 宿主进程:官方 dsh(stdio 归它自己)──
-    let dsh_bin = std::env::var("RUTIS_DSH_BIN").unwrap_or_else(|_| "dsh".into());
-    // RUTIS_DSH_BIN 支持空格分隔的多段命令(如 "node --import tsx bin.js")。
-    let mut dsh_command: Vec<String> = shell_split(&dsh_bin);
-    let dsh_display = dsh_command
-        .first()
-        .cloned()
-        .unwrap_or_else(|| dsh_bin.clone());
-    dsh_command.extend(std::env::args().skip(2));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind bridge channel");
-    let port = listener.local_addr().expect("addr").port();
-    eprintln!("[rutis-dsh] bridge channel on 127.0.0.1:{port} (services from registry)");
-
-    let mut dsh = match tokio::process::Command::new(&dsh_display)
-        .env("RUTIS_BRIDGE_PORT", port.to_string())
-        .args(dsh_command.iter().skip(1))
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(direct) => {
-            let fail_msg = || {
-                eprintln!("[rutis-dsh] cannot spawn {dsh_display}: {direct}");
-                eprintln!("[rutis-dsh] install the official CLI (npm i -g @deepseek-ai/dsh) or set RUTIS_DSH_BIN");
-                std::process::exit(1)
-            };
-            // Windows:npm 全局命令是 .cmd shim(CreateProcess 只认 .exe),
-            // 经 cmd /c 解析 PATH 里的 shim。RUTIS_DSH_BIN 显式多段
-            // (node bin.js)不经此层。
-            #[cfg(windows)]
-            {
-                let mut via_cmd = tokio::process::Command::new("cmd");
-                via_cmd.arg("/c").args(&dsh_command);
-                match via_cmd.env("RUTIS_BRIDGE_PORT", port.to_string()).spawn() {
-                    Ok(child) => child,
-                    Err(_) => fail_msg(),
-                }
+    pub async fn run(args: Vec<String>) -> i32 {
+        let Some((profile, dsh_args)) = parse(args) else {
+            eprintln!("{USAGE}");
+            return 2;
+        };
+        let root = match Ctx::root() {
+            Ok(root) => root,
+            Err(error) => {
+                eprintln!("[rutis-dsh] {error}");
+                return 1;
             }
-            #[cfg(not(windows))]
-            {
-                fail_msg()
+        };
+        let code = match serve(&root, profile, dsh_args).await {
+            Ok(stop) => match stop {
+                Stop::Interrupted => 130,
+                Stop::Exit(code) => code,
+                Stop::StartupFailed(message) => {
+                    eprintln!("[rutis-dsh] dsh failed to start: {message}");
+                    1
+                }
+                Stop::ProcessEnded => {
+                    eprintln!("[rutis-dsh] the dsh process ended");
+                    1
+                }
+            },
+            Err(error) => {
+                eprintln!("[rutis-dsh] {error}");
+                1
+            }
+        };
+        if let Err(error) = root.shutdown_with_timeout(Duration::from_secs(10)).await {
+            eprintln!("[rutis-dsh] shutdown: {error}");
+        }
+        code
+    }
+
+    fn parse(args: Vec<String>) -> Option<(Option<String>, Vec<String>)> {
+        let mut args = args.into_iter();
+        if args.next().as_deref() != Some("up") {
+            return None;
+        }
+        let (mut profile, mut rest) = (None, Vec::new());
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--profile" => profile = Some(args.next()?),
+                "-h" | "--help" if rest.is_empty() => return None,
+                _ => rest.push(arg),
             }
         }
-    };
-    eprintln!(
-        "[rutis-dsh] dsh started (pid {:?}) — stdio is the app's own",
-        dsh.id()
-    );
-
-    let (stream, _) = tokio::time::timeout(Duration::from_secs(60), listener.accept())
-        .await
-        .expect("dsh connects within 60s (is the rutis-bridge plugin in the profile?)")
-        .expect("accept");
-
-    // ── 桥:注册表驱动的服务分发 + 事件转发,合并为一套钩子 ──
-    let face = rutis_dsh::LlmFace::new(llm);
-    let dispatch = ServiceDispatch::new(vec![face]);
-    let mut hooks = dispatch.hooks();
-    // evt/emit → 内核 keyed 事件(HostEvent);stderr 摘要作为观察者并行保留
-    // (M3 事件链路,订阅方用 ctx.events().on::<HostEvent>(ctx, &rutis::EventKey::dynamic(name), ..))。
-    hooks.on_notify = Some(forward_host_events(
-        &ctx,
-        Some(Arc::new(|method, params, _origin| {
-            Box::pin(async move {
-                // 恶形帧(event 缺失或非字符串)由 forward 的截断日志负责,
-                // 这里按同一判定跳过,避免双重打印(观察者只打合法帧的摘要)。
-                let well_formed = params
-                    .get("event")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some();
-                if method == "evt/emit" && well_formed {
-                    // 载荷摘要(截断):形状级可见性;保真断言在测试里做。
-                    let summary =
-                        serde_json::to_string(&params["params"]).unwrap_or_else(|_| "?".into());
-                    let summary = truncate_chars(&summary, 160);
-                    eprintln!("[rutis-dsh] evt {} {}", params["event"], summary);
-                }
-            })
-        })),
-    ));
-    let mut bridge = Bridge::start(
-        Box::new(TcpWire::from_stream(stream)),
-        BridgeConfig::default(),
-        hooks,
-        ExpectedHost::protocol(1),
-        json!({ "services": dispatch.names(), "wfKinds": [], "scopes": [] }),
-    );
-    dispatch.attach(bridge.clone());
-    match bridge.ready().await {
-        Ok(hello) => {
-            eprintln!(
-                "[rutis-dsh] handshake ok: {} — bridged",
-                hello["base"].as_str().unwrap_or("?")
-            )
-        }
-        Err(e) => {
-            eprintln!("[rutis-dsh] handshake failed: {e}");
-            let _ = dsh.kill().await;
-            std::process::exit(1)
-        }
+        Some((profile, rest))
     }
 
-    // 收敛以**桥断连**为权威信号(时序不可信的包装层存在时,子进程退出
-    // 可能先于真实进程);两侧都等齐才退;退出**不杀 dsh**——桥断了宿主
-    // 继续跑(§十.4),模型调用由插件按 bridgeDisconnected 拒绝。
-    let mut dsh_exited = false;
-    let mut bridge_closed = false;
-    while !(dsh_exited && bridge_closed) {
+    async fn serve(
+        root: &Ctx,
+        profile: Option<String>,
+        args: Vec<String>,
+    ) -> Result<Stop, CordisError> {
+        let llm = root.plugin(AimuxLlmPlugin::from_env());
+        (&llm)
+            .await
+            .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?;
+        let service: Arc<dyn LlmService> = root
+            .get_as::<dyn LlmService>(llm_service_key())
+            .ok_or_else(|| CordisError::ServiceNotFound("aimux-llm".into()))?;
+        rutis_dsh::provide_web_aimux(root, service)?;
+
+        let (stop, mut stopped) = mpsc::unbounded_channel();
+        let events = root.events();
+        events.on(root, &EventKey::<web::RutisDshReady>::of(), Ready)?;
+        events.on(
+            root,
+            &EventKey::<web::RutisDshStartupFailed>::of(),
+            Forward(stop.clone()),
+        )?;
+        events.on(
+            root,
+            &EventKey::<web::RutisDshExit>::of(),
+            Forward(stop.clone()),
+        )?;
+
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|dir| dir.to_string_lossy().into_owned());
+        let view = root.plugin(web::Plugin::new(web::Config {
+            profile,
+            args: Some(args),
+            cwd,
+        }));
+        (&view)
+            .await
+            .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?;
+        // Withdrawn when the Node process goes away.
+        root.plugin(Watch(
+            Mutex::new(Some(stop)),
+            [TypeKey::of::<web::Launched>()],
+        ));
+
         tokio::select! {
-            status = dsh.wait(), if !dsh_exited => {
-                eprintln!("[rutis-dsh] dsh exited: {}", status.expect("wait dsh"));
-                dsh_exited = true;
-            }
-            _ = bridge.wait_disconnect(), if !bridge_closed => {
-                eprintln!("[rutis-dsh] bridge channel closed");
-                bridge_closed = true;
-            }
+            _ = tokio::signal::ctrl_c() => Ok(Stop::Interrupted),
+            stop = stopped.recv() => Ok(stop.unwrap_or(Stop::ProcessEnded)),
+        }
+    }
+
+    struct Ready;
+    impl Listener<web::RutisDshReady> for Ready {
+        fn call<'a>(
+            &'a self,
+            _: &'a Ctx,
+            event: &'a web::RutisDshReady,
+        ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+            Box::pin(async move {
+                eprintln!(
+                    "[rutis-dsh] dsh is up; model routes: {}",
+                    event.providers.join(", ")
+                );
+                Ok(None)
+            })
+        }
+    }
+
+    struct Forward(mpsc::UnboundedSender<Stop>);
+    impl Listener<web::RutisDshStartupFailed> for Forward {
+        fn call<'a>(
+            &'a self,
+            _: &'a Ctx,
+            event: &'a web::RutisDshStartupFailed,
+        ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+            let _ = self.0.send(Stop::StartupFailed(event.message.clone()));
+            Box::pin(async { Ok(None) })
+        }
+    }
+    impl Listener<web::RutisDshExit> for Forward {
+        fn call<'a>(
+            &'a self,
+            _: &'a Ctx,
+            event: &'a web::RutisDshExit,
+        ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+            let _ = self.0.send(Stop::Exit(event.code as i32));
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    /// Depends on the launcher's `rutisDsh` service; its cleanup runs when
+    /// the service is withdrawn, i.e. when the dsh process ended.
+    struct Watch(Mutex<Option<mpsc::UnboundedSender<Stop>>>, [TypeKey; 1]);
+    impl Plugin for Watch {
+        fn name(&self) -> &str {
+            "rutis-dsh:watch"
+        }
+        fn injects(&self) -> &[TypeKey] {
+            &self.1
+        }
+        fn apply<'a>(&'a self, _ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            let stop = self.0.lock().unwrap().take();
+            Box::pin(async move {
+                Ok(Effect::Disposer(Box::new(move || {
+                    if let Some(stop) = stop {
+                        let _ = stop.send(Stop::ProcessEnded);
+                    }
+                    Ok(())
+                })))
+            })
         }
     }
 }

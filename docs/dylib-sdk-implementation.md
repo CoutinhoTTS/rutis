@@ -47,7 +47,7 @@ cargo xtask pack-plugin \
 bash tools/test-dylib.sh
 bash tools/test-dylib-launcher.sh
 bash tools/test-dylib-repro.sh
-RUTIS_SKIP_NODE_E2E=1 cargo test --workspace
+cargo test --workspace
 ```
 
 测试覆盖插件内 `tokio::spawn`、跨库 `Snapshot` 类型和 `String` 服务读取与 downcast、v1→v2 换代后的消费者重载与旧插件析构、错误 L1/L2 在 `dlopen` 前拒绝且 ELF 初始化函数未运行、模块身份变更经 `swap` 与直接 `update` 均被拒绝、版本保留上限、损坏缓存的原子修复与失败入口的同版本重试、宿主/SDK/libstd 文件改动时启动器拒绝、环境库路径覆盖下从自身目录启动、不同源码与 target 路径的 SDK 字节一致，以及旧代迟到注册在两种 tokio 运行时及 Failed 状态下被拒绝。CI 另在两个独立 runner 上构建 SDK 并比较产物哈希。

@@ -1,0 +1,19 @@
+{
+  "name": "@rutis/dsh-aimux",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "dsh bundle: dsh-llm provider routes served by aimux in the rutis host",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapter": "./src/adapter.ts",
+    "./aimux.patch.yml": "./aimux.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": { "bundle": { "patch": "./aimux.patch.yml" } },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4"
+  }
+}

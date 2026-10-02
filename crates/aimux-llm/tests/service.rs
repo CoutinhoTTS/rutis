@@ -95,7 +95,7 @@ async fn stream_yields_parts_in_order_with_finish_last() {
         calls: Mutex::new(Vec::new()),
     });
     let rec2 = Arc::clone(&recorder);
-    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| {
+    let factory = Arc::new(move |_p: &str, _k: Option<&str>, _m: &str| {
         Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>)
     });
     let svc = AimuxLlm::with_factory(
@@ -135,11 +135,12 @@ async fn keyed_request_routes_through_factory_fallback_untouched() {
     let recorder = Arc::new(ChunkedLlm {
         calls: Mutex::new(Vec::new()),
     });
-    let factory = Arc::new(move |provider: &str, key: &str, model: &str| {
-        seen2
-            .lock()
-            .unwrap()
-            .push((provider.to_owned(), key.to_owned(), model.to_owned()));
+    let factory = Arc::new(move |provider: &str, key: Option<&str>, model: &str| {
+        seen2.lock().unwrap().push((
+            provider.to_owned(),
+            key.unwrap_or_default().to_owned(),
+            model.to_owned(),
+        ));
         Ok(Arc::clone(&recorder) as Arc<dyn LanguageModel>)
     });
     let svc = AimuxLlm::with_factory(fallback, "deepseek", "env-model", factory);
@@ -190,7 +191,7 @@ async fn dto_maps_to_call_options_field_by_field() {
         calls: Mutex::new(Vec::new()),
     });
     let rec2 = Arc::clone(&recorder);
-    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| {
+    let factory = Arc::new(move |_p: &str, _k: Option<&str>, _m: &str| {
         Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>)
     });
     let svc = AimuxLlm::with_factory(
@@ -256,7 +257,7 @@ async fn tool_calls_and_results_reach_the_provider_as_structured_parts() {
         calls: Mutex::new(Vec::new()),
     });
     let rec2 = Arc::clone(&recorder);
-    let factory = Arc::new(move |_p: &str, _k: &str, _m: &str| {
+    let factory = Arc::new(move |_p: &str, _k: Option<&str>, _m: &str| {
         Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>)
     });
     let svc = AimuxLlm::with_factory(
@@ -310,4 +311,41 @@ async fn tool_calls_and_results_reach_the_provider_as_structured_parts() {
     assert_eq!(prompt[2].content, vec![result("c1", "RESULT:m2", false)]);
     assert_eq!(prompt[3].role, Role::Tool);
     assert_eq!(prompt[3].content, vec![result("c2", "bad input", true)]);
+}
+
+/// 无 key 但指定了非兜底的模型:用兜底 provider 与环境凭据构造该模型,
+/// 让界面里选的模型真正生效。
+#[tokio::test]
+async fn keyless_request_for_another_model_builds_it_on_the_fallback_provider() {
+    let recorder = Arc::new(ChunkedLlm {
+        calls: Mutex::new(Vec::new()),
+    });
+    let built = Arc::new(Mutex::new(Vec::new()));
+    let (rec2, built2) = (Arc::clone(&recorder), Arc::clone(&built));
+    let factory = Arc::new(move |p: &str, k: Option<&str>, m: &str| {
+        built2
+            .lock()
+            .unwrap()
+            .push((p.to_owned(), k.map(str::to_owned), m.to_owned()));
+        Ok(Arc::clone(&rec2) as Arc<dyn LanguageModel>)
+    });
+    let touched = Arc::new(Mutex::new(false));
+    let svc = AimuxLlm::with_factory(
+        Arc::new(FailLlm {
+            touched: Arc::clone(&touched),
+        }),
+        "deepseek",
+        "env-model",
+        factory,
+    );
+    let _ = svc
+        .stream(req(json!({ "provider": "aimux", "model": "deepseek-reasoner", "options": { "messages": [{ "text": "hi" }] } })))
+        .await
+        .expect("stream");
+    assert_eq!(
+        built.lock().unwrap().as_slice(),
+        [("deepseek".to_owned(), None, "deepseek-reasoner".to_owned())]
+    );
+    assert!(!*touched.lock().unwrap(), "fallback model untouched");
+    assert_eq!(recorder.calls.lock().unwrap().len(), 1);
 }

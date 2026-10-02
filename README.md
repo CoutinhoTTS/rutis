@@ -161,7 +161,7 @@ view.update(cfg_v2).await?;   // dry-run 不过则现状不动;通过则卸载�
 **动态事件名** —— 运行时才知道名字的事件(宿主事件、脚本注册),类型化事件 + 动态限定名,四分发与生命周期清理免费继承:
 
 ```rust
-let key = rutis::EventKey::<HostEvent>::dynamic(name);
+let key = rutis::EventKey::<RoomEvent>::dynamic(name);
 ctx.events().on(&ctx, &key, listener)?;
 ctx.events().emit(&ctx, &key, Arc::new(event))?;
 ```
@@ -187,7 +187,7 @@ ctx.events().emit(&ctx, &key, Arc::new(event))?;
 | 项目 | 说明 |
 |---|---|
 | [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | 最小 coding agent 样例:aimux `LanguageModel` 服务 + 工具插件 + 流式 driver 插件 + ratatui TUI;`cargo install rutis-cli` |
-| [rutis-dsh](crates/rutis-dsh) + [host/](host) | 给 dsh 宿主进程供 LLM 服务的桥:Rust 组合根 ↔ loopback TCP ↔ TS 桥插件;宿主事件经 `evt/emit` → `HostEvent` 进内核总线 |
+| [rutis-dsh](crates/rutis-dsh) | 在 rutis 宿主里运行 dsh：`rutis-dsh up` 经 [rutis-interop](crates/rutis-interop) 启动 dsh 的完整 web 界面，模型调用由同进程的 aimux 提供；也可从 Rust 驱动不带界面的 dsh agent |
 | [aimux-llm](crates/aimux-llm) | 独立 LLM 服务插件:apply → 注册 `llm` 服务,329 provider |
 
 仓库内运行样例:
@@ -196,6 +196,7 @@ ctx.events().emit(&ctx, &key, Arc::new(event))?;
 cargo run -p rutis-cli -- --scripted          # 无 key 离线 agent 演示
 cargo run -p rutis-agent --example tui_scripted   # 离线脚本后端 TUI
 cargo test                                    # 全量测试
+npm --prefix crates/rutis-dsh/dsh ci && cargo run -p rutis-dsh -- up   # dsh web 界面（需 Node 与模型 key）
 ```
 
 > agent / cli 经 crates.io 消费 [aimux](https://crates.io/crates/aimux-core)(LLM 统一访问层),无需并列检出;hack 本地 aimux 用工作区根的 `[patch]`。
@@ -206,7 +207,7 @@ cargo test                                    # 全量测试
 
 **内核与范式** — [内核设计(D1-D31 决策表)](docs/design-rust-port.md) · [96 spec 对拍判定](docs/cordis-spec-parity-2026-08-18.md) · [热更新+动态事件(设计/三轮评审/复盘/审计)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md) · [shutdown 与卸载等待截止时间](docs/core-shutdown-and-disposal-deadline.md)
 
-**桥与宿主** — [协议插件设计](docs/design-protocol-plugins-2026-09-25.md) · [双核架构与锈化路线](docs/design-dual-core-2026-08-20.md) · [dsh 桥 v1 设计](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm 插件裁决](docs/decision-aimux-llm-plugin-2026-08-23.md)
+**挂载 Cordis / dsh** — [rutis-interop 接入](crates/rutis-interop/README.md) · [需求](docs/requirements-protocol-plugins.md) · [设计](docs/design-protocol-plugin-mount.md) · [路线图](docs/roadmap-native-plugin-mount.md) · [rutis-dsh](crates/rutis-dsh/README.md) · 历史：[dsh 桥 v1 设计](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm 插件裁决](docs/decision-aimux-llm-plugin-2026-08-23.md)
 
 **Agent** — [agent 框架](docs/design-min-agent-2026-08-18.md) · [验证与 TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 

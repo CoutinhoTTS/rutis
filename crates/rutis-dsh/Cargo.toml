@@ -1,26 +1,62 @@
 [package]
 name = "rutis-dsh"
-description = "entry point + composition root: rutis runtime, aimux-llm plugin, business-agnostic bridge to the dsh host process"
+description = "Run dsh (its web UI, or its agent loop) in a rutis host, with model calls served by aimux-llm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
-aimux-llm = { path = "../aimux-llm" }
-rutis = { path = "../rutis" }
-rutis-cordis = { path = "../rutis-cordis" }
 aimux-core = "0.3.0"
-async-trait = "0.1.92"
+aimux-llm = { path = "../aimux-llm" }
 futures = "0.3"
+rutis = { path = "../rutis" }
+rutis-interop = { path = "../rutis-interop" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+tokio-util.workspace = true
 
 [dev-dependencies]
-async-stream = "0.3.6"
+async-stream = "0.3"
+async-trait = "0.1.92"
+tempfile = "3"
+
+[build-dependencies]
+rutis-interop = { path = "../rutis-interop" }
 
 [[bin]]
 name = "rutis-dsh"
 path = "src/bin/rutis_dsh.rs"
+
+# The npm project with dsh, the launcher and the aimux bundle;
+# `npm --prefix crates/rutis-dsh/dsh ci` installs it.
+[package.metadata.rutis-interop]
+npm = "dsh"
+
+# The dsh web UI: the launcher starts a dsh profile in the mounted Context.
+[package.metadata.rutis-interop.mounts.web]
+path = "dsh/launcher.ts"
+provide = ["aimux"]
+events = ["rutis-dsh/ready", "rutis-dsh/startup-failed", "rutis-dsh/exit"]
+
+# The dsh agent loop without a UI: the smallest composition that runs an agent
+# turn with tools. The probes are test drivers.
+[package.metadata.rutis-interop.mounts.agent]
+group = [
+    { name = "invariants", plugin = "@deepseek-ai/dsh-invariants" },
+    { name = "typert", plugin = "@deepseek-ai/dsh-typert-registry" },
+    { name = "llm", plugin = "@deepseek-ai/dsh-llm" },
+    { name = "session", plugin = "@deepseek-ai/dsh-session" },
+    { name = "projection", plugin = "@deepseek-ai/dsh-session-projection" },
+    { name = "system_prompt", plugin = "@deepseek-ai/dsh-system-prompt" },
+    { name = "tools", plugin = "@deepseek-ai/dsh-tools" },
+    { name = "agents", plugin = "@deepseek-ai/dsh-agent" },
+    { name = "agent_loop", plugin = "@deepseek-ai/dsh-agent-loop" },
+    { name = "adapter", path = "dsh/aimux/src/adapter.ts" },
+    { name = "llm_probe", path = "dsh/probes/llm-probe.ts" },
+    { name = "agent_probe", path = "dsh/probes/agent-probe.ts" },
+]
+provide = ["aimux"]
