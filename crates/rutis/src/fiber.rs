@@ -300,6 +300,29 @@ impl FiberInner {
         self.token.lock().unwrap().cancel();
     }
 
+    /// Cancel the current token of every live descendant, so callbacks that
+    /// cooperate with their owner's cancellation can end before the drain.
+    pub(crate) fn cancel_descendants(&self) {
+        let mut pending: Vec<_> = self
+            .children
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        while let Some(fiber) = pending.pop() {
+            fiber.cancel_current();
+            pending.extend(
+                fiber
+                    .children
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Weak::upgrade),
+            );
+        }
+    }
+
     pub(crate) fn begin_event(&self) {
         let mut count = self.event_flights.lock().unwrap();
         *count += 1;

@@ -415,7 +415,10 @@ impl Ctx {
                 *slot = Some(task.clone());
                 self.0.shared.closing.store(true, Ordering::SeqCst);
                 if let Some(root) = self.root_view() {
+                    // Like subtree shutdown: descendants are cancelled before
+                    // the root waits for its instance events to drain.
                     root.inner.cancel_current();
+                    root.inner.cancel_descendants();
                     root.inner.post(Intent::Shutdown(task.clone()));
                 } else {
                     task.complete(Some(Arc::new(CordisError::Closed)));
