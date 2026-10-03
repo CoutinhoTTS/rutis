@@ -1,6 +1,6 @@
 //! Release-only integration fixture. tools/test-dylib.sh packages and runs it.
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix {
     use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, Snapshot, TypeKey};
     use rutis_dylib::{DylibConfig, Loader};
     use std::sync::{Arc, Mutex};
@@ -140,10 +140,10 @@ mod linux {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    linux::main()
+    unix::main()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {}

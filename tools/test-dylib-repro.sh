@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-base="$(mktemp -d /tmp/rutis-dylib-repro.XXXXXX)"
+# Physical paths: rustc sees symlinks resolved (macOS /tmp is /private/tmp),
+# and --remap-path-prefix only matches the path rustc sees.
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+. "$repo_dir/tools/lib/dylib-common.sh"
+base="$(cd "$(mktemp -d /tmp/rutis-dylib-repro.XXXXXX)" && pwd -P)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+cargo_home="$(cd "$cargo_home" 2> /dev/null && pwd -P || printf '%s' "$cargo_home")"
 for slot in a b; do
   source_dir="$base/$slot/source"
   target_dir="$base/$slot/target"
@@ -17,13 +21,17 @@ for slot in a b; do
   # produce a different artifact from the one the host links.
   export RUTIS_SDK_ARTIFACT_SHA256="$(printf '0%.0s' {1..64})"
   cargo build --release --locked --offline -p rutis-cli --features dylib-plugins --manifest-path "$source_dir/Cargo.toml"
-  sdk_file="$target_dir/release/librutis_sdk.so"
-  if ! readelf -d "$sdk_file" | grep -Eq 'NEEDED.*\[libstd-[^]]*\.so\]'; then
-    readelf -d "$sdk_file" >&2
+  sdk_file="$target_dir/release/$(lib_name rutis-sdk)"
+  if ! needed_libs "$sdk_file" | grep -Eq "(^|/)libstd-[^/]*\.$dylib_ext\$"; then
+    needed_libs "$sdk_file" >&2
     echo "SDK does not depend on the dynamic libstd" >&2
     exit 1
   fi
-  sha256sum "$sdk_file" | cut -d ' ' -f 1 > "$base/$slot.sha"
+  if test "$dylib_os" = macos && dsymutil -s "$sdk_file" | grep -q 'N_OSO'; then
+    echo "SDK records object file paths (N_OSO debug map); it cannot be reproducible" >&2
+    exit 1
+  fi
+  sha256_of "$sdk_file" > "$base/$slot.sha"
 done
 cmp "$base/a.sha" "$base/b.sha"
 echo "two independent source and target paths produced the same SDK artifact: $(cat "$base/a.sha")"

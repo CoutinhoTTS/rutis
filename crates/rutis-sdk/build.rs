@@ -9,8 +9,16 @@ fn main() {
     // Link arguments belong to this artifact rather than to RUSTFLAGS: a
     // plugin build must reproduce the SDK byte for byte, and RUSTFLAGS would
     // also reach the plugin itself, which must not carry a run path.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux") => println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN"),
+        Ok("macos") => {
+            // rustc would record the absolute build path as the install name,
+            // and every library linked against it would load the SDK from
+            // there, possibly a second copy (design §3.3).
+            println!("cargo:rustc-link-arg=-Wl,-install_name,@rpath/librutis_sdk.dylib");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+        }
+        _ => {}
     }
     // Cargo does not expose the invoking workspace lockfile to a dependency's
     // build script. Release tooling passes the actual resolver lock explicitly;

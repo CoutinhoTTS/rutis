@@ -42,8 +42,9 @@ OPTIONS:
 
 #[cfg(feature = "dylib-plugins")]
 fn main() {
-    // The launcher clears LD_* while starting this host. Restore the caller's
-    // values before starting runtime threads so child commands inherit them.
+    // The launcher clears LD_* (DYLD_* on macOS) while starting this host.
+    // Restore the caller's values before starting runtime threads so child
+    // commands inherit them. The dynamic loader has read its variables by now.
     restore_bundle_environment();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -64,12 +65,18 @@ fn restore_bundle_environment() {
         return;
     }
     std::env::remove_var("RUTIS_DYLIB_LAUNCHER");
+    #[cfg(target_os = "macos")]
+    const LOADER_PREFIX: &str = "DYLD_";
+    #[cfg(not(target_os = "macos"))]
+    const LOADER_PREFIX: &str = "LD_";
+    #[cfg(not(target_os = "macos"))]
     std::env::remove_var("LD_LIBRARY_PATH");
     let originals = std::env::vars_os()
         .filter_map(|(name, value)| {
             name.to_str()
-                .and_then(|name| name.strip_prefix("RUTIS_ORIG_LD_"))
-                .map(|suffix| (name.clone(), format!("LD_{suffix}"), value))
+                .and_then(|name| name.strip_prefix("RUTIS_ORIG_"))
+                .filter(|original| original.starts_with(LOADER_PREFIX))
+                .map(|original| (name.clone(), original.to_owned(), value))
         })
         .collect::<Vec<_>>();
     for (saved_name, original_name, value) in originals {
@@ -92,24 +99,29 @@ mod bundle_env_tests {
     }
 
     #[test]
-    fn child_environment_recovers_callers_ld_values() {
+    fn child_environment_recovers_callers_loader_values() {
+        let p = if cfg!(target_os = "macos") { "DYLD_" } else { "LD_" };
+        let library_path = format!("{p}LIBRARY_PATH");
+        let other = format!("{p}PRELOAD");
+        let saved_library_path = format!("RUTIS_ORIG_{library_path}");
+        let saved_other = format!("RUTIS_ORIG_{other}");
         let names = [
-            "RUTIS_DYLIB_LAUNCHER",
-            "RUTIS_ORIG_LD_LIBRARY_PATH",
-            "RUTIS_ORIG_LD_PRELOAD",
-            "LD_LIBRARY_PATH",
-            "LD_PRELOAD",
+            "RUTIS_DYLIB_LAUNCHER".to_owned(),
+            saved_library_path.clone(),
+            saved_other.clone(),
+            library_path.clone(),
+            other.clone(),
         ];
-        let saved = names.map(|name| std::env::var_os(name));
+        let saved = names.clone().map(|name| std::env::var_os(name));
         std::env::set_var("RUTIS_DYLIB_LAUNCHER", "1");
-        std::env::set_var("RUTIS_ORIG_LD_LIBRARY_PATH", "/caller/libs");
-        std::env::set_var("RUTIS_ORIG_LD_PRELOAD", "/caller/preload.so");
-        std::env::set_var("LD_LIBRARY_PATH", "/verified/bundle");
+        std::env::set_var(&saved_library_path, "/caller/libs");
+        std::env::set_var(&saved_other, "/caller/preload");
+        std::env::set_var(&library_path, "/verified/bundle");
         restore_bundle_environment();
-        assert_eq!(std::env::var("LD_LIBRARY_PATH").unwrap(), "/caller/libs");
-        assert_eq!(std::env::var("LD_PRELOAD").unwrap(), "/caller/preload.so");
-        assert!(std::env::var_os("RUTIS_ORIG_LD_LIBRARY_PATH").is_none());
-        for (name, value) in names.into_iter().zip(saved) {
+        assert_eq!(std::env::var(&library_path).unwrap(), "/caller/libs");
+        assert_eq!(std::env::var(&other).unwrap(), "/caller/preload");
+        assert!(std::env::var_os(&saved_library_path).is_none());
+        for (name, value) in names.iter().zip(saved) {
             put(name, value);
         }
     }

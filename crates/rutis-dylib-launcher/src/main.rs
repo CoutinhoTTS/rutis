@@ -1,12 +1,21 @@
 //! Standalone launcher. It must not depend on rutis-sdk or dynamic libstd.
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix {
     use sha2::{Digest, Sha256};
     use std::env;
     use std::fs;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
+
+    /// Variables that make the platform loader pick libraries from elsewhere.
+    /// They are saved as RUTIS_ORIG_* and removed; the host restores them.
+    /// Code injected into this launcher itself (DYLD_INSERT_LIBRARIES) runs
+    /// before main and is outside the launcher's protection (SDK design §5.4).
+    #[cfg(target_os = "linux")]
+    const LOADER_PREFIX: &str = "LD_";
+    #[cfg(target_os = "macos")]
+    const LOADER_PREFIX: &str = "DYLD_";
 
     pub(super) fn main() {
         if let Err(error) = run() {
@@ -42,21 +51,23 @@ mod linux {
         // The installation must remain immutable until the host exits.
         let mut command = Command::new(&host);
         command.args(env::args_os().skip(1));
+        let saved_prefix = format!("RUTIS_ORIG_{LOADER_PREFIX}");
         let original_environment = env::vars_os().collect::<Vec<_>>();
         for (name, _) in &original_environment {
-            let name_text = name.to_string_lossy();
-            if name_text.starts_with("RUTIS_ORIG_LD_") {
+            if name.to_string_lossy().starts_with(&saved_prefix) {
                 command.env_remove(name);
             }
         }
         for (name, value) in original_environment {
             let name_text = name.to_string_lossy();
-            if name_text.starts_with("LD_") {
+            if name_text.starts_with(LOADER_PREFIX) {
                 command.env(format!("RUTIS_ORIG_{name_text}"), value);
                 command.env_remove(name);
             }
         }
         command.env("RUTIS_DYLIB_LAUNCHER", "1");
+        // macOS resolves the bundle through the host's @loader_path run path.
+        #[cfg(target_os = "linux")]
         command.env("LD_LIBRARY_PATH", &dir);
         Err(command.exec().to_string())
     }
@@ -93,13 +104,13 @@ mod linux {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
-    linux::main();
+    unix::main();
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("rutis dylib launcher is available only on Linux");
+    eprintln!("rutis dylib launcher is available only on Linux and macOS");
     std::process::exit(1);
 }

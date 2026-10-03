@@ -1,6 +1,6 @@
-# 一方插件 dylib SDK：Linux 使用说明
+# 一方插件 dylib SDK：Linux 与 macOS 使用说明
 
-本能力对应 [设计稿](design-dylib-sdk-2026-09-24.md)。默认 `rutis-cli` 仍静态链接；只有启用 `dylib-plugins` 的发布包会加载一方可信插件。初版只支持 Linux ELF64 小端目标。插件代码与宿主处于同一进程，崩溃会带走宿主。
+本能力对应 [设计稿](design-dylib-sdk-2026-09-24.md)。默认 `rutis-cli` 仍静态链接；只有启用 `dylib-plugins` 的发布包会加载一方可信插件。支持 Linux（ELF64 小端）和 macOS（arm64，Mach-O）；macOS 部分的设计见 [design-dylib-macos-windows](design-dylib-macos-windows-2026-10-03.md)。插件代码与宿主处于同一进程，崩溃会带走宿主。
 
 ## 构建宿主发布包
 
@@ -10,7 +10,7 @@
 bash tools/build-dylib-bundle.sh
 ```
 
-脚本以 `RUTIS_SDK_LOCKFILE` 指定本次解析实际使用的 `Cargo.lock`，再按宿主的完整 Cargo feature 图构建 SDK，计算 `librutis_sdk.so` 的 SHA-256，再把该哈希编入宿主。最后把宿主、SDK、动态 libstd 的文件名与哈希编入独立启动器。脚本输出一个新的 `target/dylib-bundles/<hash>/` 目录，包含公开入口 `rutis-cli`、内部宿主 `rutis-cli-host`、SDK、libstd 和 `sdk.toml`。它拒绝覆盖既有目录。正式部署应将整个目录安装到可信、不可原地修改的版本路径；更新时创建新目录。
+脚本以 `RUTIS_SDK_LOCKFILE` 指定本次解析实际使用的 `Cargo.lock`，再按宿主的完整 Cargo feature 图构建 SDK，计算 `librutis_sdk.so`（macOS 为 `librutis_sdk.dylib`）的 SHA-256，再把该哈希编入宿主。最后把宿主、SDK、动态 libstd 的文件名与哈希编入独立启动器。脚本输出一个新的 `target/dylib-bundles/<hash>/` 目录，包含公开入口 `rutis-cli`、内部宿主 `rutis-cli-host`、SDK、libstd 和 `sdk.toml`。它拒绝覆盖既有目录。正式部署应将整个目录安装到可信、不可原地修改的版本路径；更新时创建新目录。
 
 只能从目录里的 `rutis-cli` 启动。启动器不链接 SDK 或动态 libstd，先对三个运行文件校验哈希，再以固定目录作为动态库搜索路径执行内部宿主。内部宿主启动后再次核对实际加载的 SDK，并在启动运行时线程前恢复调用者原有的 `LD_*` 环境变量，使子进程沿用调用者的库路径。
 
@@ -54,4 +54,14 @@ cargo test --workspace
 
 测试覆盖插件内 `tokio::spawn`、跨库 `Snapshot` 类型和 `String` 服务读取与 downcast、v1→v2 换代后的消费者重载与旧插件析构、错误 L1/L2 在 `dlopen` 前拒绝且 ELF 初始化函数未运行、模块身份变更经 `swap` 与直接 `update` 均被拒绝、版本保留上限、损坏缓存的原子修复与失败入口的同版本重试、宿主/SDK/libstd 文件改动时启动器拒绝、环境库路径覆盖下从自身目录启动、不同源码与 target 路径的 SDK 字节一致，以及旧代迟到注册在两种 tokio 运行时及 Failed 状态下被拒绝。CI 另在两个独立 runner 上构建 SDK 并比较产物哈希。
 
-macOS 与 Windows 的动态加载路径尚未验证；这些平台保持静态构建。直接执行内部宿主没有启动前校验，不能作为 dylib 发布入口。发布目录与插件缓存必须由可信部署控制，运行期间不得原地改写文件。
+Windows 的动态加载尚在验证中，保持静态构建。直接执行内部宿主没有启动前校验，不能作为 dylib 发布入口。发布目录与插件缓存必须由可信部署控制，运行期间不得原地改写文件。
+
+## macOS 的差别
+
+- **库搜索路径**：SDK 的 install name 是 `@rpath/librutis_sdk.dylib`，宿主和 SDK 的 run path 是 `@loader_path`，都由各自的 `build.rs` 在链接时设定，构建后不做任何修改。插件不带 run path。
+- **启动器**：它不设置任何 `DYLD_*`，而是把调用者的 `DYLD_*` 改名为 `RUTIS_ORIG_DYLD_*`，再启动宿主；宿主启动后恢复原值，宿主启动的子进程看到的环境与调用者一致。有人用 `DYLD_INSERT_LIBRARIES` 把代码注入启动器本身时，启动器无法阻止，这不在它的防护范围内；需要防这一点的发布方可以给启动器加 hardened runtime 签名。
+- **quarantine**：插件源文件或缓存中的文件带 `com.apple.quarantine` 属性时，加载器在 `dlopen` 前拒绝，错误信息里给出 `xattr -d com.apple.quarantine <文件>`。加载器不自动清除这个属性。
+- **签名**：宿主是否开 hardened runtime 由发布方决定。开了以后，SDK、libstd 和插件必须与宿主用同一个 Team ID 签名，或者宿主带 `com.apple.security.cs.disable-library-validation`。宿主可以调用 `Loader::require_team_ids` 只接受指定 Team ID 签名的插件，这时只有 ad-hoc 签名的插件会被拒绝。
+- **插件的原生库依赖**必须写成绝对路径（例如 `/usr/lib/libSystem.B.dylib`），不能用 `@rpath`、`@loader_path`、`@executable_path` 或相对路径。插件还必须使用两级命名空间，不能用 `-undefined dynamic_lookup`，导出符号里也不能有 Rust 符号的 weak 定义。
+- **分配器**：SDK 的分配器只能是 `System`。macOS 上 libstd 内部的分配不经过 SDK 的分配器。
+- **构建**：脚本把 `MACOSX_DEPLOYMENT_TARGET` 固定为 13.0。Xcode 版本不同时 SDK 字节也不同，发布流水线应固定 Xcode。

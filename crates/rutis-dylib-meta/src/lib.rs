@@ -80,6 +80,7 @@ pub fn check_plugin_dependencies(
     let file = open(bytes, target)?;
     match file.format() {
         BinaryFormat::Elf => check_elf_dependencies(bytes, shared),
+        BinaryFormat::MachO => check_macho_dependencies(bytes, shared),
         format => Err(format!(
             "dependency check is not implemented for {format:?}"
         )),
@@ -94,6 +95,11 @@ pub fn needed_libraries(bytes: &[u8], target: &str) -> Result<Vec<String>, Strin
             .into_iter()
             .filter(|(tag, _)| *tag == DT_NEEDED)
             .map(|(_, value)| value)
+            .collect()),
+        BinaryFormat::MachO => Ok(macho_info(bytes)?
+            .dylibs
+            .into_iter()
+            .map(|(_, name)| name)
             .collect()),
         format => Err(format!(
             "dependency listing is not implemented for {format:?}"
@@ -131,6 +137,136 @@ fn elf_dynamic(bytes: &[u8]) -> Result<Vec<(DynamicTag, String)>, String> {
         }
     }
     Ok(entries)
+}
+
+/// What dyld will do with a Mach-O image before any of its code runs.
+struct MachOInfo {
+    flags: u32,
+    /// (load command, install name) of every dependency.
+    dylibs: Vec<(u32, String)>,
+    rpaths: Vec<String>,
+    dyld_environment: bool,
+    /// Load commands dyld must understand that this check does not know.
+    unknown_required: Vec<u32>,
+    /// Undefined symbols looked up in every loaded image (flat lookup).
+    flat_lookups: Vec<String>,
+    platform: Option<u32>,
+}
+
+fn macho_info(bytes: &[u8]) -> Result<MachOInfo, String> {
+    use object::macho;
+    use object::read::macho::{LoadCommandVariant, MachHeader, MachOFile64, Nlist};
+    let file = MachOFile64::<object::LittleEndian>::parse(bytes).map_err(|e| e.to_string())?;
+    let endian = file.endian();
+    let text = |raw: &[u8]| String::from_utf8_lossy(raw).into_owned();
+    let mut info = MachOInfo {
+        flags: file.macho_header().flags(endian).0,
+        dylibs: Vec::new(),
+        rpaths: Vec::new(),
+        dyld_environment: false,
+        unknown_required: Vec::new(),
+        flat_lookups: Vec::new(),
+        platform: None,
+    };
+    let mut commands = file.macho_load_commands().map_err(|e| e.to_string())?;
+    while let Some(command) = commands.next().map_err(|e| e.to_string())? {
+        let cmd = command.cmd().0;
+        match command.variant().map_err(|e| e.to_string())? {
+            LoadCommandVariant::Dylib(dylib) => {
+                let name = command
+                    .string(endian, dylib.dylib.name)
+                    .map_err(|e| e.to_string())?;
+                info.dylibs.push((cmd, text(name)));
+            }
+            LoadCommandVariant::Rpath(rpath) => {
+                let path = command
+                    .string(endian, rpath.path)
+                    .map_err(|e| e.to_string())?;
+                info.rpaths.push(text(path));
+            }
+            LoadCommandVariant::DyldEnvironment(_) => info.dyld_environment = true,
+            LoadCommandVariant::BuildVersion(build, _) => {
+                info.platform = Some(build.platform.get(endian).0)
+            }
+            LoadCommandVariant::Other if cmd & macho::LC_REQ_DYLD != 0 => {
+                info.unknown_required.push(cmd)
+            }
+            _ => {}
+        }
+    }
+    let symbols = file.macho_symbol_table();
+    for nlist in symbols.iter() {
+        let n_type = nlist.n_type().0;
+        let undefined_external = n_type & macho::N_STAB == 0
+            && n_type & macho::N_TYPE == macho::N_UNDF.0
+            && n_type & macho::N_EXT.0 != 0;
+        // GET_LIBRARY_ORDINAL(n_desc)
+        let ordinal = (nlist.n_desc(endian).0 >> 8) & 0xff;
+        if undefined_external && ordinal == macho::DYNAMIC_LOOKUP_ORDINAL.0 as u16 {
+            let name = nlist
+                .name(endian, symbols.strings())
+                .map_err(|e| e.to_string())?;
+            info.flat_lookups.push(text(name));
+        }
+    }
+    Ok(info)
+}
+
+fn check_macho_dependencies(
+    bytes: &[u8],
+    shared: &SharedLibraries<'_>,
+) -> Result<Vec<String>, String> {
+    use object::macho;
+    let info = macho_info(bytes)?;
+    if info.flags & macho::MH_TWOLEVEL.0 == 0 || info.flags & macho::MH_FORCE_FLAT.0 != 0 {
+        return Err("plugin does not use the two-level namespace; its symbols could bind to another plugin".into());
+    }
+    if let Some(symbol) = info.flat_lookups.first() {
+        return Err(format!(
+            "plugin looks up {symbol} in every loaded image (-undefined dynamic_lookup); it could bind to another plugin"
+        ));
+    }
+    if let Some(rpath) = info.rpaths.first() {
+        return Err(format!("plugin carries a run path ({rpath}); plugins must not"));
+    }
+    if info.dyld_environment {
+        return Err("plugin sets dyld environment variables (LC_DYLD_ENVIRONMENT)".into());
+    }
+    if let Some(cmd) = info.unknown_required.first() {
+        return Err(format!("plugin has a load command dyld requires that this check does not know: {cmd:#x}"));
+    }
+    let (mut sdk, mut std) = (false, false);
+    let mut native = Vec::new();
+    for (_, name) in info.dylibs {
+        let file = name.rsplit('/').next().unwrap_or(&name);
+        if name == shared.sdk {
+            sdk = true;
+        } else if name == shared.std {
+            std = true;
+        } else if file.starts_with("libstd-") || file.starts_with("librutis_sdk") {
+            return Err(format!(
+                "plugin depends on {name}, not the host's {} and {}; rebuild it against this SDK",
+                shared.sdk, shared.std
+            ));
+        } else if name.starts_with('@') {
+            // @rpath would resolve in the host's bundle; @loader_path and
+            // @executable_path in the plugin cache or next to the host.
+            return Err(format!("dependency {name} is relative to a search path; native libraries need an absolute path"));
+        } else if !name.starts_with('/') || name.split('/').any(|part| part == "..") {
+            return Err(format!("dependency {name} is not a plain absolute path"));
+        } else {
+            native.push(name);
+        }
+    }
+    if !sdk || !std {
+        return Err(format!(
+            "plugin must link {} and {} dynamically; it would otherwise carry its own copy",
+            shared.sdk, shared.std
+        ));
+    }
+    native.sort();
+    native.dedup();
+    Ok(native)
 }
 
 fn check_elf_dependencies(
@@ -172,6 +308,48 @@ fn check_elf_dependencies(
     native.sort();
     native.dedup();
     Ok(native)
+}
+
+/// How a plugin built for `target` refers to the SDK in its dependencies.
+pub fn sdk_reference(target: &str) -> Result<String, String> {
+    let file = library_file_name("rutis_sdk", target)?;
+    Ok(match Target::parse(target)?.format {
+        // The SDK's install name (set by its build script).
+        BinaryFormat::MachO => format!("@rpath/{file}"),
+        _ => file,
+    })
+}
+
+/// How plugins must refer to the dynamic libstd that the SDK in `sdk_bytes`
+/// links: the same reference the SDK itself uses.
+pub fn std_reference(sdk_bytes: &[u8], target: &str) -> Result<String, String> {
+    needed_libraries(sdk_bytes, target)?
+        .into_iter()
+        .find(|name| {
+            let file = name.rsplit('/').next().unwrap_or(name);
+            file.starts_with("libstd-") || file.starts_with("std-")
+        })
+        .ok_or("the SDK does not link a dynamic libstd".into())
+}
+
+/// Exported weak definitions with Rust symbol names. dyld coalesces weak
+/// definitions across images, so one plugin version could bind to another's.
+pub fn weak_rust_exports(bytes: &[u8], target: &str) -> Result<Vec<String>, String> {
+    let file = open(bytes, target)?;
+    if file.format() != BinaryFormat::MachO {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for export in file.exports().map_err(|e| e.to_string())? {
+        let export = export.map_err(|e| e.to_string())?;
+        if let object::NameOrOrdinal::Name(name) = export.name() {
+            // Mach-O adds a leading underscore: _ZN… becomes __ZN….
+            if export.is_weak() && (name.starts_with(b"__ZN") || name.starts_with(b"__R")) {
+                names.push(String::from_utf8_lossy(name).into_owned());
+            }
+        }
+    }
+    Ok(names)
 }
 
 /// File name of a shared library called `name` on `target`.
@@ -241,6 +419,14 @@ fn open<'a>(bytes: &'a [u8], target: &str) -> Result<object::File<'a>, String> {
         ));
     }
     check_kind(&file)?;
+    if file.format() == BinaryFormat::MachO {
+        // iOS-simulator arm64 code has the same CPU type as macOS arm64.
+        if let Some(platform) = macho_info(bytes)?.platform {
+            if platform != object::macho::PLATFORM_MACOS.0 {
+                return Err(format!("built for Mach-O platform {platform}, not macOS"));
+            }
+        }
+    }
     Ok(file)
 }
 

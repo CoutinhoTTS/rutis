@@ -54,7 +54,8 @@ rutis_sdk::export_plugin! { id: "greeter", factory: Factory }
 
 #[cfg(feature = "export")]
 #[used]
-#[link_section = ".init_array"]
+#[cfg_attr(target_os = "linux", link_section = ".init_array")]
+#[cfg_attr(target_vendor = "apple", link_section = "__DATA,__mod_init_func")]
 static INIT_MARKER: extern "C" fn() = mark_load;
 
 #[cfg(feature = "export")]

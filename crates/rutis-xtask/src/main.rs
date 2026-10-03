@@ -84,10 +84,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     if sha256_bytes(&sdk_bytes) != sdk_hash {
         return Err("SDK file differs from SDK release manifest".into());
     }
-    let std_library = rutis_dylib_meta::needed_libraries(&sdk_bytes, sdk_target)?
-        .into_iter()
-        .find(|name| name.starts_with("libstd-"))
-        .ok_or("the SDK does not link a dynamic libstd")?;
+    let std_library = rutis_dylib_meta::std_reference(&sdk_bytes, sdk_target)?;
     let cargo_toml = read_toml(&manifest)?;
     let package = table(&cargo_toml, "package")?;
     check_shared_duplicates(&manifest)?;
@@ -151,7 +148,14 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     let bytes = fs::read(&library).map_err(|e| format!("{}: {e}", library.display()))?;
     check_allocator(&bytes, sdk_target)?;
     let boot = rutis_dylib_meta::read_boot(&bytes, sdk_target)?;
-    let sdk_library = rutis_dylib_meta::library_file_name("rutis_sdk", sdk_target)?;
+    let sdk_library = rutis_dylib_meta::sdk_reference(sdk_target)?;
+    let weak = rutis_dylib_meta::weak_rust_exports(&bytes, sdk_target)?;
+    if !weak.is_empty() {
+        return Err(format!(
+            "plugin exports weak Rust definitions, which dyld may bind across plugin versions: {}",
+            weak.join(", ")
+        ));
+    }
     let native_deps = rutis_dylib_meta::check_plugin_dependencies(
         &bytes,
         sdk_target,
