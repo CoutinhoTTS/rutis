@@ -1,6 +1,5 @@
 use super::*;
 use serde_json::json;
-use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct NoExports;
@@ -200,7 +199,7 @@ async fn handshake_and_release_count_fail_closed() {
     send(&mut remote, Frame::Hello { version: VERSION });
     peer.ready().await.unwrap();
     let reference = peer
-        .encode_granting(&Value::callback(|_| Ok(Value::Undefined)), &mut Vec::new())
+        .encode(&Value::callback(|_| Ok(Value::Undefined)))
         .unwrap();
     let WireValue::Reference { id, .. } = reference else {
         unreachable!()
@@ -225,9 +224,9 @@ async fn explicit_close_interrupts_a_writer_whose_peer_stopped_reading() {
     let (entered, blocked) = mpsc::channel();
     let writing = peer.clone();
     let writer = std::thread::spawn(move || {
-        let mut sender = writing.0.writer.lock().unwrap();
+        let mut stream = writing.0.writer.lock().unwrap();
         entered.send(()).unwrap();
-        sender.send(vec![0; 8 * 1024 * 1024])
+        stream.write_all(&vec![0; 8 * 1024 * 1024])
     });
     blocked.recv().unwrap();
     peer.close(Error::Transport("explicit close".into()));
