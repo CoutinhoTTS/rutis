@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::Ctx;
+use rutis::{Ctx, FiberState, FiberView};
 use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{Host, HostDispatch};
+use rutis_interop::{host_key, CordisRuntimePlugin, HostDispatch};
 use rutis_loader::{
-    Chain, EntryStatus, InteropResolver, Layer, LoaderError, LoaderOptions, LoaderPlugin, Patch,
+    Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin,
+    Patch,
 };
 use serde_json::{json, Value};
 
@@ -98,16 +99,7 @@ async fn javascript_rows() {
     let flag = write("flag.mjs", FLAG);
 
     let probe = Probe::default();
-    let resolver = InteropResolver::new(node_package(), node_package().join("package.json"))
-        .with_hosts(vec![Host {
-            name: "probe".into(),
-            methods: json!({ "record": "sync" }),
-            dispatch: Arc::new(probe.clone()),
-        }]);
-    let root = Ctx::root().unwrap();
-    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
+    let (root, loader, _runtime) = interop_loader(&probe).await;
 
     let layer = |rows: Vec<Value>| -> Vec<Layer> {
         let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
@@ -233,16 +225,7 @@ async fn volatile_changes_reach_cordis_in_place() {
     .unwrap();
 
     let probe = Probe::default();
-    let resolver = InteropResolver::new(node_package(), node_package().join("package.json"))
-        .with_hosts(vec![Host {
-            name: "probe".into(),
-            methods: json!({ "record": "sync" }),
-            dispatch: Arc::new(probe.clone()),
-        }]);
-    let root = Ctx::root().unwrap();
-    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
+    let (root, loader, _runtime) = interop_loader(&probe).await;
     let layer = |level: u32| -> Vec<Layer> {
         let rows = vec![
             row(
@@ -318,18 +301,20 @@ export function apply(ctx, config) {
 }
 "#;
 
-async fn interop_loader(probe: &Probe) -> (Ctx, rutis_loader::Loader) {
-    let resolver = InteropResolver::new(node_package(), node_package().join("package.json"))
-        .with_hosts(vec![Host {
-            name: "probe".into(),
-            methods: json!({ "record": "sync" }),
-            dispatch: Arc::new(probe.clone()),
-        }]);
+/// The probe host, the Cordis runtime, then the loader with its rows.
+async fn interop_loader(probe: &Probe) -> (Ctx, Loader, FiberView) {
     let root = Ctx::root().unwrap();
+    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+        .unwrap();
+    let runtime = CordisRuntimePlugin::new(node_package(), node_package().join("package.json"))
+        .host("probe", json!({ "record": "sync" }));
+    let resolver = InteropResolver::new(runtime.handle());
+    let runtime = root.plugin(runtime);
+    (&runtime).await.unwrap();
     let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
     let loader = plugin.handle();
     root.plugin(plugin).await.unwrap();
-    (root, loader)
+    (root, loader, runtime)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -355,7 +340,7 @@ async fn volatile_changes_are_never_dropped() {
     let flag = write("flag.mjs", FLAG.to_owned());
 
     let probe = Probe::default();
-    let (root, loader) = interop_loader(&probe).await;
+    let (root, loader, _runtime) = interop_loader(&probe).await;
     let layer = |level: u32, late: bool| -> Vec<Layer> {
         let mut rows = vec![
             row(
@@ -391,6 +376,206 @@ async fn volatile_changes_are_never_dropped() {
     probe.wait_for("w: start 5").await;
     let lines = probe.take();
     assert!(!lines.contains(&"w: start 1".to_owned()), "{lines:?}");
+
+    root.shutdown().await.unwrap();
+}
+
+// ── The runtime is a plugin ─────────────────────────────────────
+
+const EXIT: &str = r#"
+export const name = 'exit'
+export function apply() { setTimeout(() => process.exit(17), 200) }
+"#;
+
+fn rows(rows: Vec<Value>) -> Vec<Layer> {
+    let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+    vec![Layer::new("rows", patches)]
+}
+
+fn row_state(loader: &Loader, id: &str) -> Option<FiberState> {
+    match loader.get(id)?.status {
+        EntryStatus::Running(snapshot) => Some(snapshot.state),
+        _ => None,
+    }
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+fn write_plugins(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let write = |name: &str, text: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    (
+        write("provider.mjs", PROVIDER),
+        write("consumer.mjs", CONSUMER),
+        write("exit.mjs", EXIT),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rows_unload_before_the_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let (provider, consumer, _) = write_plugins(dir.path());
+    let probe = Probe::default();
+    let (root, loader, runtime) = interop_loader(&probe).await;
+    let base = vec![
+        row("p", &provider, json!({ "who": "rust" }), json!(null)),
+        row("c", &consumer, json!({ "tag": "c" }), json!(null)),
+    ];
+    loader.reconcile(rows(base), None).await.unwrap();
+    probe.wait_for("c: hello rust").await;
+
+    // The row's own cleanup still reaches Cordis: the process outlives it.
+    runtime.dispose().await.unwrap();
+    probe.wait_for("c: bye").await;
+    until("rows waiting for the runtime", || {
+        row_state(&loader, "c") == Some(FiberState::Pending)
+            && row_state(&loader, "p") == Some(FiberState::Pending)
+    })
+    .await;
+
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_process_stops_the_rows_until_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (provider, consumer, exit) = write_plugins(dir.path());
+    let probe = Probe::default();
+    let (root, loader, runtime) = interop_loader(&probe).await;
+    let base = vec![
+        row("p", &provider, json!({ "who": "rust" }), json!(null)),
+        row("c", &consumer, json!({ "tag": "c" }), json!(null)),
+    ];
+    loader.reconcile(rows(base.clone()), None).await.unwrap();
+    probe.wait_for("c: hello rust").await;
+    probe.take();
+
+    let mut dying = base.clone();
+    dying.push(row("x", &exit, json!({}), json!(null)));
+    loader.reconcile(rows(dying), None).await.unwrap();
+    // The runtime withdraws its service; rows wait instead of holding a
+    // dead process, and the runtime itself stays up for a restart.
+    until("rows waiting after the crash", || {
+        ["p", "c", "x"]
+            .iter()
+            .all(|id| row_state(&loader, id) == Some(FiberState::Pending))
+    })
+    .await;
+    assert_eq!(runtime.state().state, FiberState::Active);
+    let runtime_key = rutis::TypeKey::of::<rutis_interop::CordisRuntime>();
+    let waiting = root
+        .diagnostics()
+        .plugins
+        .into_iter()
+        .find(|plugin| plugin.name.ends_with("consumer.mjs"))
+        .unwrap();
+    assert_eq!(waiting.state, FiberState::Pending);
+    assert!(
+        waiting.injects.iter().any(|dep| dep.key == runtime_key),
+        "the row shows it waits for the runtime: {:?}",
+        waiting.injects
+    );
+
+    loader.reconcile(rows(base), None).await.unwrap();
+    runtime.restart().await.unwrap();
+    probe.wait_for("c: hello rust").await;
+    until("rows running again", || {
+        row_state(&loader, "c") == Some(FiberState::Active)
+    })
+    .await;
+
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_runtime_waits_for_its_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (provider, consumer, _) = write_plugins(dir.path());
+    let probe = Probe::default();
+    let root = Ctx::root().unwrap();
+    let runtime = CordisRuntimePlugin::new(node_package(), node_package().join("package.json"))
+        .host("probe", json!({ "record": "sync" }));
+    let resolver = InteropResolver::new(runtime.handle());
+    let runtime = root.plugin(runtime);
+    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+    assert_eq!(runtime.state().state, FiberState::Pending);
+
+    let base = vec![
+        row("p", &provider, json!({ "who": "rust" }), json!(null)),
+        row("c", &consumer, json!({ "tag": "c" }), json!(null)),
+    ];
+    let report = loader.reconcile(rows(base), None).await.unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    // Resolved without Node: no schema yet, and the row says why.
+    let entry = loader.get("p").unwrap();
+    assert!(entry.schema.is_none());
+    assert!(
+        entry.meta["schema"]
+            .as_str()
+            .unwrap()
+            .contains("not running"),
+        "{}",
+        entry.meta
+    );
+    assert_eq!(row_state(&loader, "c"), Some(FiberState::Pending));
+
+    let host = root
+        .provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+        .unwrap();
+    probe.wait_for("c: hello rust").await;
+
+    // The host goes: the runtime and its rows stop with it.
+    host.dispose().await.unwrap();
+    until("everything waiting for the host", || {
+        runtime.state().state == FiberState::Pending
+            && row_state(&loader, "c") == Some(FiberState::Pending)
+    })
+    .await;
+
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_that_cannot_start_does_not_block_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let (provider, _, _) = write_plugins(dir.path());
+    let root = Ctx::root().unwrap();
+    // No Node runtime here: the mount fails.
+    let runtime = CordisRuntimePlugin::new(dir.path(), node_package().join("package.json"));
+    let resolver = InteropResolver::new(runtime.handle());
+    let runtime = root.plugin(runtime);
+    let _ = (&runtime).await;
+    assert_eq!(runtime.state().state, FiberState::Failed);
+    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        loader.reconcile(
+            rows(vec![row("p", &provider, json!({}), json!(null))]),
+            None,
+        ),
+    )
+    .await
+    .expect("resolution does not wait for a failed runtime")
+    .unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    assert_eq!(row_state(&loader, "p"), Some(FiberState::Pending));
+    assert!(loader.get("p").unwrap().meta["schema"].is_string());
 
     root.shutdown().await.unwrap();
 }

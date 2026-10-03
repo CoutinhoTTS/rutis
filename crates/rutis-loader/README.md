@@ -40,4 +40,4 @@ loader.update("my-row", serde_json::json!({ "level": 2 })).await?;
 | --- | --- | --- |
 | `Builtins` | 注册时给的任意名字 | 编译进宿主的插件 |
 | `rutis_dylib::DylibResolver` | `dylib:<目录>` | Linux 上的 dylib 插件（rutis-dylib 的 `loader` feature） |
-| `InteropResolver` | npm 包名、包的子路径、文件路径 | JavaScript（Cordis）插件，共用一个 Node 进程与 Cordis Context（本 crate 的 `interop` feature，Unix） |
+| `InteropResolver` | npm 包名、包的子路径、文件路径 | JavaScript（Cordis）插件，装进 rutis-interop 的 `CordisRuntimePlugin`（一个 Node 进程与 Cordis Context）；各行 inject 运行时服务，运行时没就绪或进程退出时等待（本 crate 的 `interop` feature，Unix） |

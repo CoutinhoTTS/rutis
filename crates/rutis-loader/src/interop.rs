@@ -1,86 +1,55 @@
 //! JavaScript (Cordis) plugins as loader rows, through rutis-interop.
 //!
-//! All rows share one Node process and one Cordis Context, so they resolve
-//! each other's services natively, as in dsh. A row names an npm package
-//! (resolved from the anchor `package.json`, `exports` honored), a subpath
-//! of one, or a file (`file://`, absolute). Each row is loaded and disposed
-//! on its own; its `isolate` and `inject` name Cordis services, so the
-//! resolver handles them itself (`Resolved::foreign_scope`) and forwards
-//! them. Its schemastery `Config` becomes the row's JSON Schema
-//! (`meta.volatile` → `x-volatile`), and a volatile-only change is handed
-//! to Cordis, which commits it in place and emits `loader/volatile-update`
-//! to the plugin, as dsh's loader does.
+//! All rows load into one [`CordisRuntimePlugin`]: one Node process and one
+//! Cordis Context, so they resolve each other's services natively, as in
+//! dsh. The runtime is a rutis plugin the application mounts first; every
+//! row injects its [`CordisRuntime`] service, so rows wait for it and stop
+//! when its process goes away. A row names an npm package (resolved from
+//! the runtime's anchor `package.json`, `exports` honored), a subpath of
+//! one, or a file (`file://`, absolute). Each row is loaded and disposed on
+//! its own; its `isolate` and `inject` name Cordis services, so the resolver
+//! handles them itself (`Resolved::foreign_scope`) and forwards them. Its
+//! schemastery `Config` becomes the row's JSON Schema (`meta.volatile` →
+//! `x-volatile`), and a volatile-only change is handed to Cordis, which
+//! commits it in place and emits `loader/volatile-update` to the plugin, as
+//! dsh's loader does.
 //!
 //! Services do not cross between the JavaScript rows and Rust plugins here;
-//! a Rust service the rows need is given as a host ([`with_hosts`]).
-//!
-//! [`with_hosts`]: InteropResolver::with_hosts
+//! a Rust service the rows need is a host of the runtime
+//! ([`CordisRuntimePlugin::host`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, PluginFactory};
-use rutis_interop::{Host, Mount, Process};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, PluginFactory, TypeKey};
+use rutis_interop::{CordisRuntime, Process, RuntimeHandle};
 use serde_json::{json, Value};
 
 use crate::{volatile_key, Loader, LoaderError, Resolved, Resolver, VolatileUpdate};
 
+#[cfg(doc)]
+use rutis_interop::CordisRuntimePlugin;
+
 pub struct InteropResolver {
-    node_package: PathBuf,
-    anchor: PathBuf,
-    hosts: Mutex<Option<Vec<Host>>>,
-    process: tokio::sync::OnceCell<Arc<Process>>,
+    runtime: RuntimeHandle,
     resolved: Mutex<HashMap<String, Arc<Resolved>>>,
 }
 
 impl InteropResolver {
-    /// `node_package`: the rutis-interop npm runtime (`interop/node`, or a
-    /// deployed `@arcships/rutis-interop`). `anchor`: the `package.json`
-    /// plugins and Cordis resolve from.
-    pub fn new(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
+    /// Rows of the runtime behind `runtime` ([`CordisRuntimePlugin::handle`]).
+    pub fn new(runtime: RuntimeHandle) -> Self {
         Self {
-            node_package: node_package.into(),
-            anchor: anchor.into(),
-            hosts: Mutex::new(Some(Vec::new())),
-            process: tokio::sync::OnceCell::new(),
+            runtime,
             resolved: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Rust services the rows may inject, registered before any row loads.
-    pub fn with_hosts(self, hosts: Vec<Host>) -> Self {
-        *self.hosts.lock().unwrap() = Some(hosts);
-        self
-    }
-
-    async fn process(&self) -> Result<Arc<Process>, LoaderError> {
-        self.process
-            .get_or_try_init(|| async {
-                let hosts = self.hosts.lock().unwrap().take().unwrap_or_default();
-                Process::mount(
-                    &self.node_package,
-                    Mount {
-                        hosts,
-                        anchor: Some(&self.anchor),
-                        ..Mount::default()
-                    },
-                )
-                .await
-                .map_err(|e| LoaderError::Resolve {
-                    name: "<cordis runtime>".into(),
-                    message: e.to_string(),
-                })
-            })
-            .await
-            .cloned()
     }
 }
 
 impl Resolver for InteropResolver {
     fn resolve<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Arc<Resolved>, LoaderError>> {
         Box::pin(async move {
-            let Some(entry) = resolve_entry(&self.anchor, name) else {
+            let Some(entry) = resolve_entry(self.runtime.anchor(), name) else {
                 return Err(LoaderError::NotFound {
                     name: name.to_owned(),
                 });
@@ -88,18 +57,36 @@ impl Resolver for InteropResolver {
             if let Some(found) = self.resolved.lock().unwrap().get(name) {
                 return Ok(found.clone());
             }
-            let process = self.process().await?;
-            let failed = |e: rutis_interop::Error| LoaderError::Resolve {
+            let factory = Arc::new(JsFactory {
                 name: name.to_owned(),
-                message: e.to_string(),
+                entry: entry.clone(),
+                injects: vec![TypeKey::of::<CordisRuntime>()],
+            });
+            // The schema needs Node. Without a running runtime the row still
+            // resolves (it waits for the runtime like any dependency), and
+            // says why it has no schema; it is not cached, so a later
+            // resolution (`Loader::reload`) fetches it.
+            let Some(process) = self.runtime.ready().await else {
+                return Ok(Arc::new(Resolved {
+                    factory,
+                    schema: None,
+                    meta: json!({
+                        "source": "interop",
+                        "entry": entry,
+                        "schema": "unavailable: the Cordis runtime is not running",
+                    }),
+                    foreign_scope: true,
+                }));
             };
-            let schema = process.row_schema(&entry).await.map_err(failed)?;
-            let resolved = Arc::new(Resolved {
-                factory: Arc::new(JsFactory {
+            let schema = process
+                .row_schema(&entry)
+                .await
+                .map_err(|e| LoaderError::Resolve {
                     name: name.to_owned(),
-                    entry: entry.clone(),
-                    process,
-                }),
+                    message: e.to_string(),
+                })?;
+            let resolved = Arc::new(Resolved {
+                factory,
                 schema,
                 meta: json!({ "source": "interop", "entry": entry }),
                 foreign_scope: true,
@@ -116,7 +103,7 @@ impl Resolver for InteropResolver {
 struct JsFactory {
     name: String,
     entry: PathBuf,
-    process: Arc<Process>,
+    injects: Vec<TypeKey>,
 }
 
 impl PluginFactory<Value> for JsFactory {
@@ -124,12 +111,16 @@ impl PluginFactory<Value> for JsFactory {
         &self.name
     }
 
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+
     fn build(&self, config: &Value) -> Result<Box<dyn Plugin>, CordisError> {
         Ok(Box::new(JsRow {
             name: self.name.clone(),
             entry: self.entry.clone(),
             config: config.clone(),
-            process: self.process.clone(),
+            injects: self.injects.clone(),
         }))
     }
 }
@@ -139,7 +130,7 @@ struct JsRow {
     name: String,
     entry: PathBuf,
     config: Value,
-    process: Arc<Process>,
+    injects: Vec<TypeKey>,
 }
 
 impl Plugin for JsRow {
@@ -147,8 +138,13 @@ impl Plugin for JsRow {
         &self.name
     }
 
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            let process = ctx.require::<CordisRuntime>()?.process().clone();
             // The fiber identity keys the row on the Cordis side: unique, and
             // new for every generation.
             let key = ctx.instance().to_string();
@@ -156,7 +152,7 @@ impl Plugin for JsRow {
                 .get::<Loader>()
                 .and_then(|loader| loader.row(ctx.instance()));
             let (isolate, inject) = row.map(|row| (row.isolate, row.inject)).unwrap_or_default();
-            self.process
+            process
                 .load_row(&key, &self.entry, self.config.clone(), &isolate, &inject)
                 .await
                 .map_err(|e| CordisError::PluginFailed(e.to_string().into()))?;
@@ -166,16 +162,16 @@ impl Plugin for JsRow {
                 &volatile_key(ctx),
                 Forward {
                     key: key.clone(),
-                    process: self.process.clone(),
+                    process: process.clone(),
                 },
             )?;
-            let process = self.process.clone();
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 Box::pin(async move {
-                    process
-                        .unload_row(&key)
-                        .await
-                        .map_err(|e| CordisError::PluginFailed(e.to_string().into()))
+                    match process.unload_row(&key).await {
+                        // The process is gone, and the row with it.
+                        Ok(()) | Err(rutis_interop::Error::Transport(_)) => Ok(()),
+                        Err(e) => Err(CordisError::PluginFailed(e.to_string().into())),
+                    }
                 })
             })))
         })

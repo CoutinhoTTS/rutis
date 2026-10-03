@@ -47,6 +47,8 @@ mod protocol;
 #[cfg(unix)]
 pub mod rpc;
 #[cfg(unix)]
+mod runtime;
+#[cfg(unix)]
 pub mod server;
 
 #[cfg(unix)]
@@ -57,6 +59,8 @@ pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 pub use process::{Host, HostDispatch, Mount, Process, ServiceEvents};
 #[cfg(unix)]
 pub use projection::Projection;
+#[cfg(unix)]
+pub use runtime::{host_key, CordisRuntime, CordisRuntimePlugin, RuntimeHandle, RuntimeState};
 pub use serde;
 pub use serde_json;
 

@@ -138,3 +138,16 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 ## 逐个装载（rows）
 
 `Mount { anchor: Some(package_json), .. }` 不带插件时启动一个空的 Cordis Context，之后用 `Process::load_row` / `unload_row` 逐个装载、卸载插件，`row_schema` 读取插件 schemastery `Config` 转成的 JSON Schema。rutis-loader 的 `InteropResolver` 就是这样把 JavaScript 插件作为行来管理的。
+
+要按 rutis 的生命周期管理这个 Context，挂载 `CordisRuntimePlugin`。它是一个普通插件：apply 时启动 Node 进程，提供 `CordisRuntime` 服务；清理时先撤销服务，再关闭进程。
+
+- 逐个装载的插件 inject `CordisRuntime`，所以会按依赖等待运行时，并先于进程卸载。
+- 宿主服务用 `.host(名字, 方法)` 声明。应用以 `host_key(名字)` 提供 `dyn HostDispatch`，运行时会等它就绪，宿主服务撤销时运行时随之停止。
+- Node 进程意外结束时，运行时撤销服务、保持 Active；依赖它的插件回到等待。之后由应用调用该 fiber 的 `restart` 重新启动。
+
+```rust
+root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe))?;
+let runtime = CordisRuntimePlugin::new(node_package, anchor).host("probe", json!({ "record": "sync" }));
+let handle = runtime.handle();   // 给 rutis-loader 的 InteropResolver
+let view = root.plugin(runtime);
+```
