@@ -15,7 +15,7 @@ rutis 应用可以直接挂载已发布的 Cordis（Node）插件：插件在真
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-credentials-local": "0.2.0-rc.1",
-    "@arcships/rutis-interop": "0.1.0"
+    "@arcships/rutis-interop": "0.2.0"
   }
 }
 ```
@@ -32,11 +32,11 @@ npm --prefix cordis ci
 [dependencies]
 rutis = "…"
 # 与 npm 运行时 @arcships/rutis-interop 同版本发布。
-rutis-interop = "0.1"
+rutis-interop = "0.2"
 tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
-rutis-interop = "0.1"
+rutis-interop = "0.2"
 
 [package.metadata.rutis-interop]
 npm = "cordis"                   # 第 1 步的 npm 项目，相对 Cargo.toml

@@ -10,7 +10,7 @@ pub mod build;
 
 /// Wire protocol version. The Node runtime package declares the version it
 /// speaks as `rutisProtocol` in its package.json; builds check they match.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// Environment variable naming the npm project the mounts load from, for a
 /// binary running against a deployed copy of it.
