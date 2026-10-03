@@ -85,7 +85,7 @@
 若宿主用 mimalloc 而插件用 System,插件分配、宿主释放就是未定义行为。
 
 规则:**`#[global_allocator]` 只能在 SDK 中定义**;宿主和插件都禁止定义。原型实测放进 SDK 后,插件的分配经过它。
-默认用 System;若要换 mimalloc/jemalloc,属于 SDK 变更。`export_plugin!` 可加一个编译期检查辅助,CI 另用
+只能用 System:动态链接 std 时,libstd 内部的分配不经过 SDK 的分配器(macOS 两级命名空间、Windows),Linux 上配 jemalloc 自 rustc 1.71 起也会崩溃(上游 rust-lang/rust#100781、#114518,未修复)。上游修复前不允许换 mimalloc/jemalloc,详见 [design-dylib-macos-windows](design-dylib-macos-windows-2026-10-03.md) §3.5、§八 R1。`export_plugin!` 可加一个编译期检查辅助,CI 另用
 `nm` 检查插件 .so 不导出 `__rust_alloc` 的自有实现。
 
 ### 4.4 panic 策略
