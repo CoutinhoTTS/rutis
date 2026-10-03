@@ -1,5 +1,5 @@
 //! Windows: `LoadLibraryExW` by full path and `GetProcAddress`; the loaded
-//! SDK is found from the address of one of its functions.
+//! SDK is found by its module name.
 //!
 //! Verified on windows-2025 (SDK design §十一, Windows feasibility record):
 //! a plugin loaded with `LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
@@ -17,8 +17,8 @@ use windows_sys::Win32::Foundation::{GetLastError, HMODULE};
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GetProcAddress, LoadLibraryExW,
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-    LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+    LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 
 /// An `HMODULE`. Never freed.
@@ -51,22 +51,42 @@ fn module_path(module: HMODULE) -> Result<PathBuf, String> {
     }
 }
 
+/// The file of the SDK module the host runs with.
+///
+/// The address of `rutis_sdk::rutis_sdk_boot_id` as seen from the host is a
+/// jump stub the linker placed in the host executable, not the function in
+/// the DLL, so it cannot identify the module. The host imports the SDK by
+/// its file name, and Windows binds imports to the module of that base name
+/// loaded first (the host's, at startup). Look that module up by name, then
+/// call its own `rutis_sdk_boot_id` (found with `GetProcAddress`) to confirm
+/// that it is the SDK this host was built with.
 pub(crate) fn loaded_sdk_path() -> Result<PathBuf, String> {
+    let name = rutis_dylib_meta::sdk_reference(rutis_sdk::SDK_TARGET)?;
+    let wide: Vec<u16> = std::ffi::OsStr::new(&name)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
     let mut module: HMODULE = std::ptr::null_mut();
     let ok = unsafe {
         GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            rutis_sdk::rutis_sdk_boot_id as *const u16,
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            wide.as_ptr(),
             &mut module,
         )
     };
-    if ok == 0 || module.is_null() {
+    let Some(module) = NonNull::new(module).filter(|_| ok != 0) else {
+        return Err(format!("{name} is not loaded: {}", last_error()));
+    };
+    let boot_id: unsafe extern "C" fn(*mut u8, usize) -> usize =
+        unsafe { std::mem::transmute(find_symbol(module, b"rutis_sdk_boot_id\0")?) };
+    let mut buf = [0u8; 128];
+    let len = unsafe { boot_id(buf.as_mut_ptr(), buf.len()) };
+    if len > buf.len() || &buf[..len] != rutis_sdk::SDK_ID.as_bytes() {
         return Err(format!(
-            "GetModuleHandleExW failed for the SDK boot function: {}",
-            last_error()
+            "the loaded {name} reports a different SDK identity"
         ));
     }
-    module_path(module)
+    module_path(module.as_ptr())
 }
 
 /// Opens a cached library so that, while the handle is open, nobody can
