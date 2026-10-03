@@ -1,0 +1,9 @@
+# Minimal model of the rutis dylib design for W2, W3, W5, W6, W7, W8:
+# sdk (dylib, re-exports tokio), greeter/w5plugin/w5bad (plugin dylibs that link
+# the SDK dynamically) and host (bin that links the SDK and loads plugins).
+[workspace]
+resolver = "2"
+members = ["sdk", "greeter", "w5plugin", "w5bad", "host"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
