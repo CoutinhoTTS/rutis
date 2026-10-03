@@ -127,8 +127,16 @@ jobs:
           mkdir -p "$CARGO_HOME"
           export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/target -C link-arg=-Wl,-rpath,\$ORIGIN"
           export RUTIS_SDK_LOCKFILE="$PWD/Cargo.lock"
-          cargo build --release --locked -p rutis-sdk
-          sha256sum "$CARGO_TARGET_DIR/release/librutis_sdk.so" | cut -d ' ' -f 1 > "$RUNNER_TEMP/sdk.sha"
+          # Build the SDK through the host anchor, as tools/build-dylib-bundle.sh does.
+          export RUTIS_SDK_ARTIFACT_SHA256="$(printf '0%.0s' {1..64})"
+          cargo build --release --locked -p rutis-cli --features dylib-plugins
+          sdk_file="$CARGO_TARGET_DIR/release/librutis_sdk.so"
+          if ! readelf -d "$sdk_file" | grep -Eq 'NEEDED.*\[libstd-[^]]*\.so\]'; then
+            readelf -d "$sdk_file"
+            echo "SDK does not depend on the dynamic libstd" >&2
+            exit 1
+          fi
+          sha256sum "$sdk_file" | cut -d ' ' -f 1 > "$RUNNER_TEMP/sdk.sha"
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-hash-${{ matrix.slot }}
