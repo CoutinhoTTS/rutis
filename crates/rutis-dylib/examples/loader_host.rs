@@ -2,8 +2,8 @@
 //! tools/test-dylib.sh after greeter_host: dylib bundles as rutis-loader
 //! rows, swapped in place on reload and respawned when their identity
 //! changes.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod unix {
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+mod imp {
     use std::path::Path;
     use std::sync::Arc;
 
@@ -106,10 +106,10 @@ mod unix {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    unix::main()
+    imp::main()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn main() {}

@@ -1,6 +1,6 @@
-# 一方插件 dylib SDK：Linux 与 macOS 使用说明
+# 一方插件 dylib SDK：Linux、macOS 与 Windows 使用说明
 
-本能力对应 [设计稿](design-dylib-sdk-2026-09-24.md)。默认 `rutis-cli` 仍静态链接；只有启用 `dylib-plugins` 的发布包会加载一方可信插件。支持 Linux（ELF64 小端）和 macOS（arm64，Mach-O）；macOS 部分的设计见 [design-dylib-macos-windows](design-dylib-macos-windows-2026-10-03.md)。插件代码与宿主处于同一进程，崩溃会带走宿主。
+本能力对应 [设计稿](design-dylib-sdk-2026-09-24.md)。默认 `rutis-cli` 仍静态链接；只有启用 `dylib-plugins` 的发布包会加载一方可信插件。支持 Linux（ELF64 小端）、macOS（arm64，Mach-O）和 Windows（x64，`x86_64-pc-windows-msvc`，PE）；macOS 和 Windows 部分的设计见 [design-dylib-macos-windows](design-dylib-macos-windows-2026-10-03.md)，Windows 的可行性验证记录在设计稿 §十一。插件代码与宿主处于同一进程，崩溃会带走宿主。
 
 ## 构建宿主发布包
 
@@ -54,7 +54,7 @@ cargo test --workspace
 
 测试覆盖插件内 `tokio::spawn`、跨库 `Snapshot` 类型和 `String` 服务读取与 downcast、v1→v2 换代后的消费者重载与旧插件析构、错误 L1/L2 在 `dlopen` 前拒绝且 ELF 初始化函数未运行、模块身份变更经 `swap` 与直接 `update` 均被拒绝、版本保留上限、损坏缓存的原子修复与失败入口的同版本重试、宿主/SDK/libstd 文件改动时启动器拒绝、环境库路径覆盖下从自身目录启动、不同源码与 target 路径的 SDK 字节一致，以及旧代迟到注册在两种 tokio 运行时及 Failed 状态下被拒绝。CI 另在两个独立 runner 上构建 SDK 并比较产物哈希。
 
-Windows 的动态加载尚在验证中，保持静态构建。直接执行内部宿主没有启动前校验，不能作为 dylib 发布入口。发布目录与插件缓存必须由可信部署控制，运行期间不得原地改写文件。
+直接执行内部宿主没有启动前校验，不能作为 dylib 发布入口。发布目录与插件缓存必须由可信部署控制，运行期间不得原地改写文件。
 
 ## macOS 的差别
 
@@ -65,3 +65,16 @@ Windows 的动态加载尚在验证中，保持静态构建。直接执行内部
 - **插件的原生库依赖**必须写成绝对路径（例如 `/usr/lib/libSystem.B.dylib`），不能用 `@rpath`、`@loader_path`、`@executable_path` 或相对路径。插件还必须使用两级命名空间，不能用 `-undefined dynamic_lookup`，导出符号里也不能有 Rust 符号的 weak 定义。
 - **分配器**：SDK 的分配器只能是 `System`。macOS 上 libstd 内部的分配不经过 SDK 的分配器。
 - **构建**：脚本把 `MACOSX_DEPLOYMENT_TARGET` 固定为 13.0。Xcode 版本不同时 SDK 字节也不同，发布流水线应固定 Xcode。
+
+## Windows 的差别
+
+- **文件名**：没有 `lib` 前缀。发布目录里是 `rutis-cli.exe`（启动器）、`rutis-cli-host.exe`、`rutis_sdk.dll` 和 `std-<hash>.dll`（取自工具链的 `bin\`）；插件是 `<id>.dll`。导入库 `rutis_sdk.dll.lib` 不进发布目录。
+- **VC++ 运行库**：SDK、宿主和插件依赖 `VCRUNTIME140.dll` 和 UCRT（`api-ms-win-crt-*`，Windows 10 起是系统组件）。VC++ 运行库由用户自行安装，rutis 不随包分发，启动器也不检查。std DLL 本身不依赖它。
+- **启动器**：Windows 没有 `exec`，启动器先校验三个运行文件的存在和哈希，再把宿主作为子进程启动并等待，转发它的退出码。校验时以只允许读取的共享模式打开这三个文件，并一直持有到宿主退出，期间它们不能被写入、删除或改名。启动器把自己放进一个设置了 `KILL_ON_JOB_CLOSE` 的 Job Object，启动器退出（包括被强制结束）时宿主和它启动的进程一起结束；需要留下进程的宿主可以用 `CREATE_BREAKAWAY_FROM_JOB` 启动它。启动器忽略 Ctrl+C，由同一控制台上的宿主自己处理。宿主的进程 ID 与启动器不同。
+- **库搜索路径**：宿主对 SDK 和 std 的导入先在宿主所在目录查找，启动器已确认两者都在那里，所以工作目录和 `PATH` 中的同名文件不会被用到；启动器不修改任何环境变量。不要从缺文件的目录启动内部宿主：缺文件时 Windows 会继续按 `PATH` 查找。
+- **插件加载**：加载器以完整路径调用 `LoadLibraryExW`，标志为 `LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`，插件复用宿主已加载的 SDK 和 std，缓存目录不在搜索范围内。从核对缓存文件哈希到 `LoadLibraryExW` 返回，加载器以只读共享模式持有该文件。已加载的 DLL 可以被改名，但不会被覆盖。加载器从不 `FreeLibrary`。
+- **插件的原生库依赖**只能写 DLL 文件名，不能带路径；导入表和延迟加载导入表都会检查。DLL 名不区分大小写，`plugin.toml` 的 `native_deps` 中记为小写。
+- **静态初始化**：插件中的静态初始化（`.CRT$XCU`，例如 `ctor` crate）在 `LoadLibraryExW` 返回前、持有加载锁时运行。其中不得等待其他线程（`join`、阻塞地等 channel 或锁）：新线程要等加载锁释放后才能运行，等待会卡住。分配内存、加锁、访问 `thread_local!` 不受影响。`rutis_plugin_entry` 在 `LoadLibraryExW` 返回后才调用，不受此限。
+- **导出数**：一个 DLL 最多导出 65535 个符号。release 构建的 `rutis_sdk.dll` 约 1600 个，`build-dylib-bundle.sh` 在超过 30000 时失败。dev 构建（opt-level 0）会导出泛型实例，当前约 14500 个，依赖大量增加时可能接近上限；需要时给 SDK 的全部依赖设 opt-level ≥ 2，例如 `[profile.dev.package."*"] opt-level = 2` 加上对 `rutis` 等工作区成员的单独设置。只给 `rutis-sdk` 一个包设置没有效果。
+- **构建**：SDK 和宿主由各自的 `build.rs` 加链接参数 `/Brepro`，去掉链接器写入的时间戳；连同路径重映射，SDK 在不同目录构建时字节相同。
+- **测试**：上面三个脚本在 Git Bash 中运行。Windows 上另外测试：缓存目录、工作目录和 `PATH` 中放同名 DLL 不被使用；宿主运行期间发布目录的三个文件不能修改、删除或改名；强制结束启动器后宿主随之结束；缺少任一运行文件时启动器拒绝。

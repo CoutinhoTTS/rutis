@@ -1,0 +1,607 @@
+//! Optional in-process loader for trusted, first-party Rust dylib plugins.
+//! A verified, immutable bundle launcher must run the host before this API is
+//! used: a mismatched SDK can execute during Rust startup, before `Loader::new`.
+//!
+//! Everything here is platform-independent; opening libraries, finding
+//! symbols and locating the loaded SDK live in `crate::platform`.
+
+#[cfg(panic = "abort")]
+compile_error!("rutis-dylib requires panic = unwind");
+
+use crate::platform::{self, Handle};
+use rutis::{CordisError, Ctx, FiberView, Plugin, PluginFactory, TypeKey};
+use rutis_sdk::{ConfigValue, PluginMeta, BOOT_MAGIC, BOOT_SIZE, SDK_ID};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+#[derive(Debug, thiserror::Error)]
+#[error("plugin {plugin} {version}: {step}: {reason}")]
+pub struct LoadError {
+    pub plugin: String,
+    pub version: String,
+    pub step: &'static str,
+    pub reason: String,
+}
+
+fn error(plugin: &str, version: &str, step: &'static str, reason: impl Into<String>) -> LoadError {
+    LoadError {
+        plugin: plugin.into(),
+        version: version.into(),
+        step,
+        reason: reason.into(),
+    }
+}
+
+#[derive(Deserialize)]
+struct Manifest {
+    plugin: PluginManifest,
+    sdk: SdkManifest,
+    #[serde(default)]
+    interfaces: HashMap<String, String>,
+    build: BuildManifest,
+}
+
+#[derive(Deserialize)]
+struct PluginManifest {
+    id: String,
+    version: String,
+    library: String,
+    library_sha256: String,
+    /// Native libraries the plugin links, as its dynamic section records them.
+    native_deps: Vec<String>,
+}
+#[derive(Deserialize)]
+struct SdkManifest {
+    version: String,
+    id: String,
+    artifact_sha256: String,
+}
+#[derive(Deserialize)]
+struct BuildManifest {
+    target: String,
+    rustc: String,
+    lock_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleDiagnostic {
+    pub id: String,
+    pub version: String,
+    pub library_sha256: String,
+    pub mapped_bytes: u64,
+    pub loaded_at: SystemTime,
+    /// Includes the loader's own reference, plus caller and fiber references.
+    pub strong_references: usize,
+    pub usable: bool,
+}
+
+struct Retained {
+    id: String,
+    version: String,
+    hash: String,
+    bytes: u64,
+    loaded_at: SystemTime,
+    module: Option<Arc<Module>>,
+    _handle: Handle,
+}
+
+// Library handles are process-global, remain mapped forever, and may be used
+// on any thread. We never call dlclose or FreeLibrary, including when a
+// rejected load is dropped.
+unsafe impl Send for Retained {}
+
+/// Host-side loader. Construct it after the independent bundle launcher has
+/// verified the host, SDK and dynamic libstd files, and before creating root.
+pub struct Loader {
+    sdk_artifact_sha256: String,
+    /// File names plugins must use for the SDK and the host's libstd.
+    sdk_library: String,
+    std_library: String,
+    #[cfg(target_os = "macos")]
+    allowed_team_ids: Option<Vec<String>>,
+    cache: PathBuf,
+    interfaces: HashMap<String, semver::Version>,
+    max_versions: usize,
+    retained: Mutex<Vec<Retained>>,
+}
+
+impl Loader {
+    pub fn new(
+        sdk_artifact_sha256: impl Into<String>,
+        cache: impl Into<PathBuf>,
+        interfaces: HashMap<String, semver::Version>,
+        max_versions: usize,
+    ) -> Result<Self, LoadError> {
+        let sdk_artifact_sha256 = sdk_artifact_sha256.into();
+        if !rutis_sdk::is_sha256(&sdk_artifact_sha256) {
+            return Err(error(
+                "<host>",
+                "",
+                "startup",
+                "invalid embedded SDK artifact SHA-256",
+            ));
+        }
+        let mut buf = [0_u8; 128];
+        let len = unsafe { rutis_sdk::rutis_sdk_boot_id(buf.as_mut_ptr(), buf.len()) };
+        if len != SDK_ID.len() || &buf[..len] != SDK_ID.as_bytes() {
+            return Err(error(
+                "<host>",
+                "",
+                "startup",
+                "loaded SDK identity differs from host",
+            ));
+        }
+        let actual = platform::loaded_sdk_path().map_err(|e| error("<host>", "", "startup", e))?;
+        let sdk_bytes = fs::read(&actual).map_err(|e| {
+            error(
+                "<host>",
+                "",
+                "startup",
+                format!("{}: {e}", actual.display()),
+            )
+        })?;
+        let actual_hash = sha_bytes(&sdk_bytes);
+        if actual_hash != sdk_artifact_sha256 {
+            return Err(error("<host>", "", "startup", format!("loaded SDK artifact mismatch at {}: expected {sdk_artifact_sha256}, got {actual_hash}", actual.display())));
+        }
+        let startup = |e: String| error("<host>", "", "startup", e);
+        let sdk_library =
+            rutis_dylib_meta::sdk_reference(rutis_sdk::SDK_TARGET).map_err(startup)?;
+        let std_library =
+            rutis_dylib_meta::std_reference(&sdk_bytes, rutis_sdk::SDK_TARGET).map_err(startup)?;
+        Ok(Self {
+            sdk_artifact_sha256,
+            sdk_library,
+            std_library,
+            #[cfg(target_os = "macos")]
+            allowed_team_ids: None,
+            cache: cache.into(),
+            interfaces,
+            max_versions,
+            retained: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Only load plugins with a valid signature from an Apple-issued
+    /// certificate of one of these Team IDs. Ad-hoc signed plugins are then
+    /// rejected. Without this call, the signer is not checked.
+    #[cfg(target_os = "macos")]
+    pub fn require_team_ids(mut self, team_ids: Vec<String>) -> Self {
+        self.allowed_team_ids = Some(team_ids);
+        self
+    }
+
+    /// Loads trusted code. The caller is responsible for accepting that library
+    /// initializers run inside the host as soon as `dlopen` is called.
+    pub unsafe fn load(&self, dir: impl AsRef<Path>) -> Result<Arc<Module>, LoadError> {
+        let manifest_path = dir.as_ref().join("plugin.toml");
+        let source = fs::read_to_string(&manifest_path)
+            .map_err(|e| error("<unknown>", "", "manifest", e.to_string()))?;
+        let manifest: Manifest = toml::from_str(&source)
+            .map_err(|e| error("<unknown>", "", "manifest", e.to_string()))?;
+        let id = &manifest.plugin.id;
+        let version = &manifest.plugin.version;
+        let fail = |step, reason| error(id, version, step, reason);
+        if id.is_empty() || version.is_empty() {
+            return Err(fail(
+                "manifest",
+                "plugin id and version must be nonempty".into(),
+            ));
+        }
+        if manifest.build.target != rutis_sdk::SDK_TARGET {
+            return Err(fail(
+                "manifest",
+                format!("target mismatch: {}", manifest.build.target),
+            ));
+        }
+        if manifest.build.rustc != rutis_sdk::SDK_RUSTC_VERSION {
+            return Err(fail(
+                "manifest",
+                format!("rustc mismatch: {}", manifest.build.rustc),
+            ));
+        }
+        if manifest.sdk.id != SDK_ID || manifest.sdk.artifact_sha256 != self.sdk_artifact_sha256 {
+            return Err(fail(
+                "manifest",
+                format!(
+                    "SDK mismatch: manifest id={} artifact={}, host id={} artifact={}",
+                    manifest.sdk.id, manifest.sdk.artifact_sha256, SDK_ID, self.sdk_artifact_sha256
+                ),
+            ));
+        }
+        if manifest.sdk.version != rutis_sdk::SDK_VERSION {
+            return Err(fail(
+                "manifest",
+                format!("SDK version mismatch: {}", manifest.sdk.version),
+            ));
+        }
+        if !rutis_sdk::is_sha256(&manifest.plugin.library_sha256)
+            || !rutis_sdk::is_sha256(&manifest.build.lock_sha256)
+        {
+            return Err(fail("manifest", "invalid SHA-256 field".into()));
+        }
+        for (name, requirement) in &manifest.interfaces {
+            let req = semver::VersionReq::parse(requirement)
+                .map_err(|e| fail("interfaces", e.to_string()))?;
+            let actual = self
+                .interfaces
+                .get(name)
+                .ok_or_else(|| fail("interfaces", format!("missing interface {name}")))?;
+            if !req.matches(actual) {
+                return Err(fail(
+                    "interfaces",
+                    format!("{name} {actual} does not meet {req}"),
+                ));
+            }
+        }
+        let library = Path::new(&manifest.plugin.library);
+        if library.components().count() != 1 || library.file_name().is_none() {
+            return Err(fail("manifest", "library must be a filename".into()));
+        }
+        let source_library = dir.as_ref().join(library);
+        // Checked before the bytes are read: the cache copy drops extended
+        // attributes, and copying it there is no consent to load it.
+        #[cfg(target_os = "macos")]
+        reject_quarantined(&source_library).map_err(|e| fail("quarantine", e))?;
+        let bytes = fs::read(&source_library).map_err(|e| fail("binary", e.to_string()))?;
+        let actual_hash = sha_bytes(&bytes);
+        if actual_hash != manifest.plugin.library_sha256 {
+            return Err(fail(
+                "binary",
+                format!("library SHA-256 mismatch: {actual_hash}"),
+            ));
+        }
+        let boot = rutis_dylib_meta::read_boot(&bytes, rutis_sdk::SDK_TARGET)
+            .map_err(|e| fail("boot metadata", e))?;
+        if boot.sdk_id != SDK_ID
+            || boot.sdk_artifact != self.sdk_artifact_sha256
+            || boot.sdk_id != manifest.sdk.id
+            || boot.sdk_artifact != manifest.sdk.artifact_sha256
+            || boot.id != *id
+            || boot.version != *version
+        {
+            return Err(fail(
+                "boot metadata",
+                "binary identity differs from manifest or host".into(),
+            ));
+        }
+        // dlopen would resolve these before any check of ours could run again.
+        let native = rutis_dylib_meta::check_plugin_dependencies(
+            &bytes,
+            rutis_sdk::SDK_TARGET,
+            &rutis_dylib_meta::SharedLibraries {
+                sdk: &self.sdk_library,
+                std: &self.std_library,
+            },
+        )
+        .map_err(|e| fail("dependencies", e))?;
+        let mut declared = manifest.plugin.native_deps.clone();
+        declared.sort();
+        declared.dedup();
+        if native != declared {
+            return Err(fail(
+                "dependencies",
+                format!("binary links native libraries {native:?}, manifest declares {declared:?}"),
+            ));
+        }
+        let mut retained = self.retained.lock().unwrap();
+        let existing_slot = retained
+            .iter()
+            .position(|entry| entry.id == *id && entry.hash == actual_hash);
+        let (handle, slot) = if let Some(slot) = existing_slot {
+            if let Some(module) = &retained[slot].module {
+                return Ok(module.clone());
+            }
+            // A previous entry/metadata attempt failed after dlopen. Retry on
+            // the retained mapping without consuming another version slot.
+            (retained[slot]._handle, slot)
+        } else {
+            if retained.iter().filter(|entry| entry.id == *id).count() >= self.max_versions {
+                return Err(fail(
+                    "retention",
+                    format!(
+                        "version limit {} reached; restart the host to reclaim code",
+                        self.max_versions
+                    ),
+                ));
+            }
+            let cached = self.cache.join(&actual_hash).join(library);
+            // Held from the hash check until the library is mapped. On
+            // Windows the share mode refuses writes, deletes and renames
+            // meanwhile; elsewhere the cache must be trusted (SDK design §5).
+            let _pinned =
+                ensure_cached(&cached, &bytes, &actual_hash).map_err(|e| fail("cache", e))?;
+            // A reused cache entry may have been placed by hand.
+            #[cfg(target_os = "macos")]
+            {
+                reject_quarantined(&cached).map_err(|e| fail("quarantine", e))?;
+                if let Some(team_ids) = &self.allowed_team_ids {
+                    crate::macos::check_team_id(&cached, team_ids)
+                        .map_err(|e| fail("code signature", e))?;
+                }
+            }
+            let handle =
+                platform::open_library(&cached).map_err(|e| fail(platform::OPEN_STEP, e))?;
+            // Every successfully opened library remains mapped, even if entry fails.
+            retained.push(Retained {
+                id: id.clone(),
+                version: version.clone(),
+                hash: actual_hash.clone(),
+                bytes: bytes.len() as u64,
+                loaded_at: SystemTime::now(),
+                module: None,
+                _handle: handle,
+            });
+            (handle, retained.len() - 1)
+        };
+        let meta_fn: unsafe fn() -> PluginMeta =
+            symbol(handle, b"rutis_plugin_meta\0").map_err(|e| fail("metadata", e))?;
+        let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| meta_fn()))
+            .map_err(|_| fail("metadata", "metadata function panicked".into()))?;
+        if meta.sdk_id != SDK_ID
+            || meta.sdk_artifact_sha256 != self.sdk_artifact_sha256
+            || meta.sdk_id != boot.sdk_id
+            || meta.sdk_artifact_sha256 != boot.sdk_artifact
+            || meta.id != id
+            || meta.version != version
+        {
+            return Err(fail(
+                "metadata",
+                "runtime identity differs from boot metadata or manifest".into(),
+            ));
+        }
+        let entry: unsafe fn() -> Result<Box<dyn PluginFactory<ConfigValue>>, CordisError> =
+            symbol(handle, b"rutis_plugin_entry\0").map_err(|e| fail("entry", e))?;
+        let factory = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry()))
+            .map_err(|_| fail("entry", "factory entry panicked".into()))?
+            .map_err(|e| fail("entry", e.to_string()))?;
+        let (name, injects) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (factory.name().to_string(), factory.injects().to_vec())
+        }))
+        .map_err(|_| fail("entry", "factory metadata panicked".into()))?;
+        // Optional: plugins built before the symbol existed have no schema.
+        let schema = match optional_symbol::<unsafe fn() -> Option<String>>(
+            handle,
+            b"rutis_plugin_config_schema\0",
+        ) {
+            None => None,
+            Some(schema_fn) => {
+                let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schema_fn()))
+                    .map_err(|_| fail("schema", "schema function panicked".into()))?;
+                match text {
+                    None => None,
+                    Some(text) => Some(
+                        rutis_sdk::serde_json::from_str(&text)
+                            .map_err(|e| fail("schema", format!("invalid JSON: {e}")))?,
+                    ),
+                }
+            }
+        };
+        let module = Arc::new(Module {
+            id: id.clone(),
+            version: version.clone(),
+            library_sha256: actual_hash,
+            name,
+            injects,
+            schema,
+            factory,
+            _handle: handle,
+        });
+        retained[slot].module = Some(module.clone());
+        Ok(module)
+    }
+
+    pub fn diagnostics(&self) -> Vec<ModuleDiagnostic> {
+        self.retained
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| ModuleDiagnostic {
+                id: entry.id.clone(),
+                version: entry.version.clone(),
+                library_sha256: entry.hash.clone(),
+                mapped_bytes: entry.bytes,
+                loaded_at: entry.loaded_at,
+                strong_references: entry.module.as_ref().map(Arc::strong_count).unwrap_or(0),
+                usable: entry.module.is_some(),
+            })
+            .collect()
+    }
+
+    pub fn spawn(
+        &self,
+        ctx: &Ctx,
+        module: &Arc<Module>,
+        value: ConfigValue,
+    ) -> Result<FiberView, CordisError> {
+        let factory = DylibFactory {
+            id: module.id.clone(),
+            name: module.name.clone(),
+            injects: module.injects.clone(),
+        };
+        factory.validate_config(&DylibConfig::new(module.clone(), value.clone()))?;
+        Ok(ctx.plugin_with(factory, DylibConfig::new(module.clone(), value)))
+    }
+
+    pub async fn swap(
+        &self,
+        view: &FiberView,
+        module: &Arc<Module>,
+        value: ConfigValue,
+    ) -> Result<(), Arc<CordisError>> {
+        let current = view.current_config::<DylibConfig>().ok_or_else(|| {
+            Arc::new(CordisError::Validation {
+                issues: vec!["fiber is not a dylib plugin".into()],
+            })
+        })?;
+        let expected = DylibFactory {
+            id: current.module.id.clone(),
+            name: current.module.name.clone(),
+            injects: current.module.injects.clone(),
+        };
+        expected.check_module(module).map_err(Arc::new)?;
+        view.update(DylibConfig::new(module.clone(), value)).await
+    }
+}
+
+pub struct Module {
+    id: String,
+    version: String,
+    library_sha256: String,
+    name: String,
+    injects: Vec<TypeKey>,
+    schema: Option<rutis_sdk::serde_json::Value>,
+    factory: Box<dyn PluginFactory<ConfigValue>>,
+    _handle: Handle,
+}
+unsafe impl Send for Module {}
+unsafe impl Sync for Module {}
+
+impl Module {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+    pub fn library_sha256(&self) -> &str {
+        &self.library_sha256
+    }
+    /// The factory's display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+    /// The config's JSON Schema, when the plugin exported one.
+    pub fn schema(&self) -> Option<&rutis_sdk::serde_json::Value> {
+        self.schema.as_ref()
+    }
+    /// The plugin's factory over JSON config.
+    pub fn factory(&self) -> &dyn PluginFactory<ConfigValue> {
+        self.factory.as_ref()
+    }
+}
+
+#[derive(Clone)]
+pub struct DylibConfig {
+    module: Arc<Module>,
+    value: ConfigValue,
+}
+impl DylibConfig {
+    pub fn new(module: Arc<Module>, value: ConfigValue) -> Self {
+        Self { module, value }
+    }
+    pub fn module(&self) -> &Arc<Module> {
+        &self.module
+    }
+}
+
+struct DylibFactory {
+    id: String,
+    name: String,
+    injects: Vec<TypeKey>,
+}
+impl DylibFactory {
+    fn check_module(&self, module: &Module) -> Result<(), CordisError> {
+        if self.id != module.id || self.name != module.name || self.injects != module.injects {
+            return Err(CordisError::Validation { issues: vec!["plugin identity or dependency declaration changed; dispose and spawn a new fiber".into()] });
+        }
+        Ok(())
+    }
+}
+impl PluginFactory<DylibConfig> for DylibFactory {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+    fn validate_config(&self, config: &DylibConfig) -> Result<(), CordisError> {
+        self.check_module(&config.module)?;
+        config.module.factory.validate_config(&config.value)
+    }
+    fn build(&self, config: &DylibConfig) -> Result<Box<dyn Plugin>, CordisError> {
+        self.check_module(&config.module)?;
+        config.module.factory.build(&config.value)
+    }
+}
+
+// The SDK cannot depend on rutis-dylib-meta (that would change its identity),
+// so the boot format is written down twice. Keep the two in step.
+const _: () = {
+    assert!(BOOT_SIZE == rutis_dylib_meta::BOOT_SIZE);
+    assert!(BOOT_MAGIC.len() == rutis_dylib_meta::BOOT_MAGIC.len());
+    let mut i = 0;
+    while i < BOOT_MAGIC.len() {
+        assert!(BOOT_MAGIC[i] == rutis_dylib_meta::BOOT_MAGIC[i]);
+        i += 1;
+    }
+};
+
+fn sha_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn reject_quarantined(path: &Path) -> Result<(), String> {
+    if crate::macos::quarantined(path)? {
+        return Err(format!(
+            "{} has the com.apple.quarantine attribute; loading it would wait for Gatekeeper. \
+             If you trust it, run: xattr -d com.apple.quarantine {}",
+            path.display(),
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Places `bytes` at `path` unless a correct copy is already there, and
+/// returns the file opened by `platform::open_pinned` after its hash was
+/// checked through that handle.
+fn ensure_cached(path: &Path, bytes: &[u8], hash: &str) -> Result<fs::File, String> {
+    if let Ok(file) = open_matching(path, hash) {
+        return Ok(file);
+    }
+    let dir = path.parent().ok_or("cache path has no parent")?;
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut staged = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+    staged.write_all(bytes).map_err(|e| e.to_string())?;
+    staged.as_file().sync_all().map_err(|e| e.to_string())?;
+    staged.persist(path).map_err(|e| e.to_string())?;
+    open_matching(path, hash)
+        .map_err(|e| format!("cached library SHA-256 mismatch after atomic replacement: {e}"))
+}
+
+fn open_matching(path: &Path, hash: &str) -> Result<fs::File, String> {
+    let mut file = platform::open_pinned(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let actual = sha_bytes(&bytes);
+    if actual != hash {
+        return Err(format!("{}: SHA-256 is {actual}", path.display()));
+    }
+    Ok(file)
+}
+
+unsafe fn optional_symbol<T>(handle: Handle, name: &[u8]) -> Option<T> {
+    platform::find_symbol(handle, name)
+        .ok()
+        .map(|ptr| std::mem::transmute_copy(&ptr))
+}
+
+unsafe fn symbol<T>(handle: Handle, name: &[u8]) -> Result<T, String> {
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        std::mem::size_of::<*mut std::ffi::c_void>()
+    );
+    platform::find_symbol(handle, name).map(|ptr| std::mem::transmute_copy(&ptr))
+}

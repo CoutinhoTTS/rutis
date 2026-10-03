@@ -18,6 +18,13 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,-install_name,@rpath/librutis_sdk.dylib");
             println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
         }
+        // link.exe writes a timestamp into every image; /Brepro replaces it
+        // with a hash of the contents, so the SDK is the same byte for byte
+        // from any build directory. Windows needs no search path here: the
+        // host's imports resolve from its own directory first.
+        Ok("windows") if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") => {
+            println!("cargo:rustc-link-arg=/Brepro");
+        }
         _ => {}
     }
     // Cargo does not expose the invoking workspace lockfile to a dependency's

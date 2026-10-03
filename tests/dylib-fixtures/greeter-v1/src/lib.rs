@@ -56,6 +56,8 @@ rutis_sdk::export_plugin! { id: "greeter", factory: Factory }
 #[used]
 #[cfg_attr(target_os = "linux", link_section = ".init_array")]
 #[cfg_attr(target_vendor = "apple", link_section = "__DATA,__mod_init_func")]
+// Run by the CRT from DllMain, before LoadLibraryExW returns.
+#[cfg_attr(windows, link_section = ".CRT$XCU")]
 static INIT_MARKER: extern "C" fn() = mark_load;
 
 #[cfg(feature = "export")]

@@ -81,15 +81,17 @@ pub fn check_plugin_dependencies(
     match file.format() {
         BinaryFormat::Elf => check_elf_dependencies(bytes, shared),
         BinaryFormat::MachO => check_macho_dependencies(bytes, shared),
+        BinaryFormat::Pe => check_pe_imports(&pe_imports(bytes)?, shared),
         format => Err(format!(
             "dependency check is not implemented for {format:?}"
         )),
     }
 }
 
-/// File names of the libraries `bytes` depends on, as recorded in the file.
+/// File names of the libraries `bytes` (a library or an executable) depends
+/// on, as recorded in the file.
 pub fn needed_libraries(bytes: &[u8], target: &str) -> Result<Vec<String>, String> {
-    let file = open(bytes, target)?;
+    let file = open_image(bytes, target)?;
     match file.format() {
         BinaryFormat::Elf => Ok(elf_dynamic(bytes)?
             .into_iter()
@@ -101,6 +103,7 @@ pub fn needed_libraries(bytes: &[u8], target: &str) -> Result<Vec<String>, Strin
             .into_iter()
             .map(|(_, name)| name)
             .collect()),
+        BinaryFormat::Pe => pe_imports(bytes),
         format => Err(format!(
             "dependency listing is not implemented for {format:?}"
         )),
@@ -219,7 +222,10 @@ fn check_macho_dependencies(
     use object::macho;
     let info = macho_info(bytes)?;
     if info.flags & macho::MH_TWOLEVEL.0 == 0 || info.flags & macho::MH_FORCE_FLAT.0 != 0 {
-        return Err("plugin does not use the two-level namespace; its symbols could bind to another plugin".into());
+        return Err(
+            "plugin does not use the two-level namespace; its symbols could bind to another plugin"
+                .into(),
+        );
     }
     if let Some(symbol) = info.flat_lookups.first() {
         return Err(format!(
@@ -227,13 +233,17 @@ fn check_macho_dependencies(
         ));
     }
     if let Some(rpath) = info.rpaths.first() {
-        return Err(format!("plugin carries a run path ({rpath}); plugins must not"));
+        return Err(format!(
+            "plugin carries a run path ({rpath}); plugins must not"
+        ));
     }
     if info.dyld_environment {
         return Err("plugin sets dyld environment variables (LC_DYLD_ENVIRONMENT)".into());
     }
     if let Some(cmd) = info.unknown_required.first() {
-        return Err(format!("plugin has a load command dyld requires that this check does not know: {cmd:#x}"));
+        return Err(format!(
+            "plugin has a load command dyld requires that this check does not know: {cmd:#x}"
+        ));
     }
     let (mut sdk, mut std) = (false, false);
     let mut native = Vec::new();
@@ -297,6 +307,75 @@ fn check_elf_dependencies(
                 ))
             }
             _ => native.push(value),
+        }
+    }
+    if !sdk || !std {
+        return Err(format!(
+            "plugin must link {} and {} dynamically; it would otherwise carry its own copy",
+            shared.sdk, shared.std
+        ));
+    }
+    native.sort();
+    native.dedup();
+    Ok(native)
+}
+
+/// DLL names from the import table and the delay-load import table, in file
+/// order. Both are resolved by name: a delay-loaded DLL is loaded on first
+/// call, through the same search as a static import.
+fn pe_imports(bytes: &[u8]) -> Result<Vec<String>, String> {
+    use object::read::pe::PeFile64;
+    use object::LittleEndian as LE;
+    let file = PeFile64::parse(bytes).map_err(|e| e.to_string())?;
+    let text = |raw: &[u8]| String::from_utf8_lossy(raw).into_owned();
+    let mut names = Vec::new();
+    if let Some(table) = file.import_table().map_err(|e| e.to_string())? {
+        let mut descriptors = table.descriptors().map_err(|e| e.to_string())?;
+        while let Some(descriptor) = descriptors.next().map_err(|e| e.to_string())? {
+            let name = table
+                .name(descriptor.name.get(LE))
+                .map_err(|e| e.to_string())?;
+            names.push(text(name));
+        }
+    }
+    if let Some(table) = file.delay_load_import_table().map_err(|e| e.to_string())? {
+        let mut descriptors = table.descriptors().map_err(|e| e.to_string())?;
+        while let Some(descriptor) = descriptors.next().map_err(|e| e.to_string())? {
+            let name = table
+                .name(descriptor.dll_name_rva.get(LE))
+                .map_err(|e| e.to_string())?;
+            names.push(text(name));
+        }
+    }
+    Ok(names)
+}
+
+/// Classifies a PE plugin's imported DLL names. Windows compares DLL names
+/// without regard to case, so the comparison and the returned native names
+/// are lowercase (a file may import both `KERNEL32.dll` and `kernel32.dll`).
+fn check_pe_imports(names: &[String], shared: &SharedLibraries<'_>) -> Result<Vec<String>, String> {
+    let sdk_name = shared.sdk.to_ascii_lowercase();
+    let std_name = shared.std.to_ascii_lowercase();
+    let (mut sdk, mut std) = (false, false);
+    let mut native = Vec::new();
+    for name in names {
+        let lower = name.to_ascii_lowercase();
+        if name.contains(['/', '\\', ':']) || name == "." || name == ".." || name.is_empty() {
+            // A path would bypass the search order the loader relies on.
+            return Err(format!(
+                "dependency {name} is a path; only file names are allowed"
+            ));
+        } else if lower == sdk_name {
+            sdk = true;
+        } else if lower == std_name {
+            std = true;
+        } else if lower.starts_with("std-") || lower.starts_with("rutis_sdk") {
+            return Err(format!(
+                "plugin depends on {name}, not the host's {} and {}; rebuild it against this SDK",
+                shared.sdk, shared.std
+            ));
+        } else {
+            native.push(lower);
         }
     }
     if !sdk || !std {
@@ -390,7 +469,15 @@ impl Target {
     }
 }
 
+/// Opens a shared library built for `target`.
 fn open<'a>(bytes: &'a [u8], target: &str) -> Result<object::File<'a>, String> {
+    let file = open_image(bytes, target)?;
+    check_kind(&file)?;
+    Ok(file)
+}
+
+/// Opens a library or executable built for `target`.
+fn open_image<'a>(bytes: &'a [u8], target: &str) -> Result<object::File<'a>, String> {
     let expected = Target::parse(target)?;
     match FileKind::parse(bytes).map_err(|e| format!("not an object file: {e}"))? {
         FileKind::MachOFat32 | FileKind::MachOFat64 => {
@@ -418,7 +505,6 @@ fn open<'a>(bytes: &'a [u8], target: &str) -> Result<object::File<'a>, String> {
             file.architecture()
         ));
     }
-    check_kind(&file)?;
     if file.format() == BinaryFormat::MachO {
         // iOS-simulator arm64 code has the same CPU type as macOS arm64.
         if let Some(platform) = macho_info(bytes)?.platform {
@@ -471,7 +557,10 @@ fn boot_section<'a>(file: &object::File<'a>) -> Result<&'a [u8], String> {
     match found.as_slice() {
         [boot] => Ok(boot),
         [] => Err("plugin boot section not found".into()),
-        _ => Err(format!("{} plugin boot sections; expected one", found.len())),
+        _ => Err(format!(
+            "{} plugin boot sections; expected one",
+            found.len()
+        )),
     }
 }
 
@@ -533,7 +622,12 @@ mod tests {
         obj.write().unwrap()
     }
 
-    const FIELDS: [&str; 4] = ["sdk", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "greeter", "1.2.3"];
+    const FIELDS: [&str; 4] = [
+        "sdk",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "greeter",
+        "1.2.3",
+    ];
 
     fn expected() -> BootMeta {
         BootMeta {
@@ -564,7 +658,10 @@ mod tests {
             Architecture::Aarch64,
             &[(MACHO_BOOT_SEGMENT, MACHO_BOOT_SECTION, &blob(&FIELDS))],
         );
-        assert_eq!(read_boot(&good, "aarch64-apple-darwin").unwrap(), expected());
+        assert_eq!(
+            read_boot(&good, "aarch64-apple-darwin").unwrap(),
+            expected()
+        );
         let wrong_segment = object_with(
             BinaryFormat::MachO,
             Architecture::Aarch64,
@@ -586,7 +683,9 @@ mod tests {
             Architecture::X86_64,
             &[("", ELF_BOOT_SECTION, &boot), ("", ELF_BOOT_SECTION, &boot)],
         );
-        assert!(read_boot(&two, target).unwrap_err().contains("2 plugin boot"));
+        assert!(read_boot(&two, target)
+            .unwrap_err()
+            .contains("2 plugin boot"));
         let short = object_with(
             BinaryFormat::Elf,
             Architecture::X86_64,
@@ -698,7 +797,12 @@ mod tests {
         );
         assert_eq!(
             needed_libraries(&bytes, LINUX).unwrap(),
-            ["libz.so.1", "librutis_sdk.so", "libstd-0123.so", "libc.so.6"]
+            [
+                "libz.so.1",
+                "librutis_sdk.so",
+                "libstd-0123.so",
+                "libc.so.6"
+            ]
         );
     }
 
@@ -720,11 +824,144 @@ mod tests {
         reject((DT_AUDIT, "libaudit.so"), "audit");
         reject((DT_NEEDED, "/opt/lib/libz.so.1"), "is a path");
         reject((DT_NEEDED, "libstd-9999.so"), "rebuild it against this SDK");
-        reject((DT_NEEDED, "librutis_sdk-old.so"), "rebuild it against this SDK");
+        reject(
+            (DT_NEEDED, "librutis_sdk-old.so"),
+            "rebuild it against this SDK",
+        );
         let no_std = elf_with_dynamic(&[(DT_NEEDED, "librutis_sdk.so")]);
         assert!(check_plugin_dependencies(&no_std, LINUX, &SHARED)
             .unwrap_err()
             .contains("dynamically"));
+    }
+
+    /// A minimal PE32+ DLL whose `.idata` section holds import descriptors
+    /// for `imports` and delay-load descriptors for `delayed` (names only).
+    fn pe_with_imports(imports: &[&str], delayed: &[&str]) -> Vec<u8> {
+        use object::pe;
+        let delay_offset = (imports.len() + 1) * 20;
+        let names_offset = delay_offset + (delayed.len() + 1) * 32;
+        let mut names = Vec::new();
+        let mut name_offsets = Vec::new();
+        for name in imports.iter().chain(delayed) {
+            name_offsets.push(names_offset + names.len());
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let size = (names_offset + names.len()) as u32;
+        let mut bytes = Vec::new();
+        let mut w = write::pe::Writer::new(true, 0x1000, 0x200, &mut bytes);
+        w.reserve_dos_header_and_stub();
+        w.reserve_nt_headers(pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES);
+        w.reserve_section_headers(1);
+        let range = w.reserve_idata_section(size);
+        let rva = range.virtual_address;
+        w.set_data_directory(
+            pe::IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT,
+            rva + delay_offset as u32,
+            ((delayed.len() + 1) * 32) as u32,
+        );
+        let mut data = vec![0u8; size as usize];
+        for (i, offset) in name_offsets.iter().enumerate() {
+            let field = if i < imports.len() {
+                i * 20 + 12
+            } else {
+                delay_offset + (i - imports.len()) * 32 + 4
+            };
+            data[field..field + 4].copy_from_slice(&(rva + *offset as u32).to_le_bytes());
+        }
+        data[names_offset..].copy_from_slice(&names);
+        w.write_dos_header_and_stub().unwrap();
+        w.write_nt_headers(write::pe::NtHeaders {
+            machine: pe::IMAGE_FILE_MACHINE_AMD64,
+            time_date_stamp: 0,
+            characteristics: pe::IMAGE_FILE_EXECUTABLE_IMAGE | pe::IMAGE_FILE_DLL,
+            major_linker_version: 14,
+            minor_linker_version: 0,
+            address_of_entry_point: 0,
+            image_base: 0x1_8000_0000,
+            major_operating_system_version: 6,
+            minor_operating_system_version: 0,
+            major_image_version: 0,
+            minor_image_version: 0,
+            major_subsystem_version: 6,
+            minor_subsystem_version: 0,
+            subsystem: pe::IMAGE_SUBSYSTEM_WINDOWS_CUI,
+            dll_characteristics: pe::DllFlags(0),
+            size_of_stack_reserve: 0x10_0000,
+            size_of_stack_commit: 0x1000,
+            size_of_heap_reserve: 0x10_0000,
+            size_of_heap_commit: 0x1000,
+        });
+        w.write_section_headers();
+        w.write_section(range.file_offset, &data);
+        bytes
+    }
+
+    const PE_SHARED: SharedLibraries<'static> = SharedLibraries {
+        sdk: "rutis_sdk.dll",
+        std: "std-0123.dll",
+    };
+    const WINDOWS: &str = "x86_64-pc-windows-msvc";
+
+    #[test]
+    fn pe_dependencies_include_delay_loads_and_ignore_case() {
+        let bytes = pe_with_imports(
+            &[
+                "rutis_sdk.dll",
+                "KERNEL32.dll",
+                "std-0123.dll",
+                "kernel32.dll",
+            ],
+            &["Zlib1.dll"],
+        );
+        assert_eq!(
+            needed_libraries(&bytes, WINDOWS).unwrap(),
+            [
+                "rutis_sdk.dll",
+                "KERNEL32.dll",
+                "std-0123.dll",
+                "kernel32.dll",
+                "Zlib1.dll"
+            ]
+        );
+        assert_eq!(
+            check_plugin_dependencies(&bytes, WINDOWS, &PE_SHARED).unwrap(),
+            ["kernel32.dll", "zlib1.dll"]
+        );
+        let upper = pe_with_imports(&["RUTIS_SDK.DLL", "STD-0123.DLL"], &[]);
+        assert!(check_plugin_dependencies(&upper, WINDOWS, &PE_SHARED)
+            .unwrap()
+            .is_empty());
+        let sdk = pe_with_imports(&["std-0123.dll", "KERNEL32.dll"], &[]);
+        assert_eq!(std_reference(&sdk, WINDOWS).unwrap(), "std-0123.dll");
+    }
+
+    #[test]
+    fn pe_dependencies_reject_what_could_load_another_copy() {
+        let reject = |imports: &[&str], delayed: &[&str], expected: &str| {
+            let error =
+                check_plugin_dependencies(&pe_with_imports(imports, delayed), WINDOWS, &PE_SHARED)
+                    .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        };
+        let base = ["rutis_sdk.dll", "std-0123.dll"];
+        let with = |extra: &'static str| {
+            let mut all = base.to_vec();
+            all.push(extra);
+            all
+        };
+        reject(&with("std-9999.dll"), &[], "rebuild it against this SDK");
+        reject(
+            &with("rutis_sdk_old.dll"),
+            &[],
+            "rebuild it against this SDK",
+        );
+        reject(&base, &["STD-9999.DLL"], "rebuild it against this SDK");
+        reject(&with("C:\\libs\\zlib1.dll"), &[], "is a path");
+        reject(&with("..\\zlib1.dll"), &[], "is a path");
+        reject(&base, &["sub/zlib1.dll"], "is a path");
+        reject(&["rutis_sdk.dll"], &[], "dynamically");
+        reject(&["std-0123.dll"], &[], "dynamically");
     }
 
     #[test]

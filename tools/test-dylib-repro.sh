@@ -13,16 +13,16 @@ for slot in a b; do
   target_dir="$base/$slot/target"
   mkdir -p "$source_dir"
   tar -C "$repo_dir" --exclude=./target --exclude=./.git -cf - . | tar -C "$source_dir" -xf -
-  export CARGO_TARGET_DIR="$target_dir"
-  export RUTIS_SDK_LOCKFILE="$source_dir/Cargo.lock"
-  export RUSTFLAGS="--remap-path-prefix=$source_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo"
+  export CARGO_TARGET_DIR="$(native_path "$target_dir")"
+  export RUTIS_SDK_LOCKFILE="$(native_path "$source_dir/Cargo.lock")"
+  export RUSTFLAGS="--remap-path-prefix=$(remap_path "$source_dir")=/src --remap-path-prefix=$(remap_path "$target_dir")=/target --remap-path-prefix=$(remap_path "$cargo_home")=/cargo"
   # Build the SDK through the host anchor, as tools/build-dylib-bundle.sh does.
   # Built as the primary package, rutis-sdk would statically link std and
   # produce a different artifact from the one the host links.
   export RUTIS_SDK_ARTIFACT_SHA256="$(printf '0%.0s' {1..64})"
   cargo build --release --locked --offline -p rutis-cli --features dylib-plugins --manifest-path "$source_dir/Cargo.toml"
   sdk_file="$target_dir/release/$(lib_name rutis-sdk)"
-  if ! needed_libs "$sdk_file" | grep -Eq "(^|/)libstd-[^/]*\.$dylib_ext\$"; then
+  if ! needed_libs "$sdk_file" | grep -Eiq "(^|/)(lib)?std-[^/]*\.$dylib_ext\$"; then
     needed_libs "$sdk_file" >&2
     echo "SDK does not depend on the dynamic libstd" >&2
     exit 1
