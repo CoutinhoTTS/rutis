@@ -10,6 +10,8 @@
 | `rutis-interop`（crate）与 `@arcships/rutis-interop`（npm） | 0.1.0 → 0.2.0，协议版本 1 → 2 | 两者必须一起升级；手写的 `Mount { .. }` 要补一个字段 |
 | `rutis-loader` | 新发布 0.1.0 | 想用控制面时才需要接入 |
 
+dylib 宿主与插件另看下文“接入 rutis-loader”末尾：二进制兼容由 SDK 身份决定，不随 Rust API 兼容。
+
 ## 只用 rutis 内核
 
 把依赖升到 `rutis = "0.6.1"` 即可，代码不用改。新增的接口都是可选的：
@@ -67,7 +69,8 @@ rutis-loader = "0.1"
 ```
 
 ```rust
-use rutis_loader::{Builtins, Layer, LoaderOptions, LoaderPlugin};
+use rutis_loader::{Builtins, Editable, Layer, LoaderOptions, LoaderPlugin, Patch, Version};
+use serde_json::json;
 
 // 原来：root.plugin_with(MyFactory, MyConfig { level: 1 }).await?;
 let mut builtins = Builtins::new();
@@ -77,20 +80,35 @@ let plugin = LoaderPlugin::new(builtins, LoaderOptions::default());
 let loader = plugin.handle();
 root.plugin(plugin).await?;
 
-let rows: Vec<rutis_loader::Patch> = serde_json::from_value(serde_json::json!([
+// 应用自带的配置一层，运行时修改落在另一层（可编辑层）。
+let app: Vec<Patch> = serde_json::from_value(json!([
     { "insert": [{ "id": "main", "name": "my-plugin", "config": { "level": 1 } }] }
 ]))?;
-loader.reconcile(vec![Layer::new("app", rows)], None).await?;
+loader
+    .reconcile(
+        vec![Layer::new("app", app), Layer::new("user", Vec::new())],
+        Some(Editable::new("user", Version::default())),
+    )
+    .await?;
 
-// 运行时修改：改配置、停用、删除……
-loader.update("main", serde_json::json!({ "level": 2 })).await?;
+// 运行时修改：改配置、停用、删除……都写进 "user" 层。
+loader.update("main", json!({ "level": 2 })).await?;
+loader.set_disabled("main", true).await?;
 ```
+
+`reconcile` 的第二个参数指定哪一层可编辑。传 `None` 表示只读：loader 照常按各层装载插件，但 `update`、`set_disabled` 等修改会返回 `LoaderError::NoEditableLayer`。
+
+修改默认只在内存里（`LoaderOptions::default()` 的持久化是 `NoPersist`）。要在重启后保留，实现 `Persist`：loader 每次修改后把可编辑层交给它保存，`Version` 用于检测文件被别人改过（冲突时 loader 在最新内容上重放修改）。读写文件的完整实现可参考 rutis-dsh 的 `UserLayerStore`。这个示例由 `crates/rutis-loader/tests/migration_example.rs` 编译运行。
 
 插件本身不用改：工厂（`PluginFactory`）照常构造实例。要让 loader 拿到配置 schema，注册时给出 schema（`Builtins::register` 对实现了 `JsonSchema` 的配置自动生成）。插件可以选择支持：
 
 - **volatile 字段**：schema 中带 `"x-volatile": true` 的字段只改了它们时不重启，插件在 apply 里 `ctx.events().on(ctx, &volatile_key(ctx), ...)` 接收 `VolatileUpdate`。
 - **卸载自己**：`ctx.dispose_self()`，loader 会把该行设为停用并写进可编辑层。
 
-插件来源除了编译进宿主的 `Builtins`，还有 Linux 上的 dylib 插件（`rutis-dylib` 的 `loader` feature，`dylib:<目录>`）和 JavaScript（Cordis）插件（本 crate 的 `interop` feature）。旧版 `rutis-dylib` 编译的 dylib 插件不用重新编译；要让 loader 拿到配置 schema，用 `export_plugin!(..., schema: ...)` 重新编译。
+插件来源除了编译进宿主的 `Builtins`，还有 Linux 上的 dylib 插件（`rutis-dylib` 的 `loader` feature，`dylib:<目录>`）和 JavaScript（Cordis）插件（本 crate 的 `interop` feature）。dylib 插件与宿主共用一份 SDK 产物，能否加载取决于 SDK 身份（`SDK_ID`，计入 SDK 依赖树的包名与版本，见 [dylib SDK 设计](design-dylib-sdk-2026-09-24.md) §5.2），与 Rust API 是否兼容无关：
+
+- 继续使用原来那份 SDK 产物（不重建 SDK、身份不变）时，已编译的插件照常加载，loader 视其为没有配置 schema。
+- 用本次的锁文件重建 SDK 和动态宿主时，SDK 依赖树中的 `rutis` 变为 0.6.1，SDK 身份随之改变，插件须用新 SDK 重新编译，否则加载时被拒绝。
+- 要让 loader 拿到配置 schema，用 `export_plugin!(..., schema: ...)` 重新编译插件。
 
 配置分层、可编辑层与持久化、include、表达式等见 [rutis-loader README](../crates/rutis-loader/README.md)。
