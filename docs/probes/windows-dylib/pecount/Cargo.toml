@@ -1,0 +1,10 @@
+[package]
+name = "pecount"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+object = { version = "0.37", default-features = false, features = ["read_core", "pe", "std"] }

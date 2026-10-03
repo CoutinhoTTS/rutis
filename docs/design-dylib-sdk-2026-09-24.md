@@ -442,7 +442,7 @@ CI 进一步使用两个独立 runner 对比 SDK 哈希;其结果以对应 PR �
   必须使用 §5.2 的真实 `SDK_ID` 生成逻辑;不成立则采用 §5.3 的退路。
 - V2 macOS:`install_name` / `@rpath`、`RTLD_LOCAL` 下同名 crate 多版本共存、两级命名空间的影响。
 - V3 Windows:Rust `dylib` 的导出符号数量上限(DLL 导出表 65535 项,大型 dylib 可能超限)、加载锁、`std` DLL 的分发。
-  若不可行,Windows 只提供静态变体。
+  若不可行,Windows 只提供静态变体。**2026-10-03 已验证可行**,见下文“Windows 可行性验证”;实现见 #118。
 - V4 release 配置(LTO、`codegen-units`、`opt-level`)下的同样验证;SDK 不得启用跨 crate 的 LTO。
 - V5 跨库 trait object 的长期运行:旧版本插件留下的任务在新版本运行期间继续执行、析构发生在旧库代码中。
 - V6 线程局部变量与 `tracing` 等带全局分发器的 crate(若进入 SDK)在跨库下的行为。
@@ -451,6 +451,57 @@ CI 进一步使用两个独立 runner 对比 SDK 哈希;其结果以对应 PR �
 - V8 独立启动器(本轮新增,未验证):不依赖 SDK/动态 libstd;误配 SDK 或 libstd 时不执行宿主,
   不触发其启动期分配器/初始化代码;加载路径固定到已验证的产物,覆盖不同工作目录、环境覆盖及多个安装版本。
   各平台未满足此约束前只提供静态变体。
+
+### Windows 可行性验证(2026-10-03)
+
+对应 [#103](https://github.com/arcships/rutis/issues/103),验证方案和不可行的判定见
+[design-dylib-macos-windows](design-dylib-macos-windows-2026-10-03.md) §四(W1–W8)。
+
+**环境**:GitHub Actions `windows-2025` runner(Windows Server 2025),rustc 1.98.1(48a229cea 2026-09-01,LLVM 22.1.8),
+目标 `x86_64-pc-windows-msvc`,Visual Studio 18 Enterprise(MSVC 14.51.36231,`link.exe`),Windows SDK 10.0.26100.0。
+实验代码在 `docs/probes/windows-dylib/`(重跑方法和 workflow 见其中 README),由 `probe/windows-dylib` 分支上的临时 workflow 运行,
+共两轮:[run 37124981363](https://github.com/arcships/rutis/actions/runs/37124981363)、
+[run 37125920008](https://github.com/arcships/rutis/actions/runs/37125920008)(第二轮加了 opt-level 变体、真实 SDK 的 W8、
+持有句柄和可复现检查;两轮相同项的数字一致)。
+
+**实验对象**:W1 用真实的 `crates/rutis-sdk`。`rutis-cli --features dylib-plugins` 在 Windows 上编译失败
+(`rutis_dylib::Loader` 只在 Linux 上存在),但 Cargo 在失败前已经按它的依赖图链接出 `rutis_sdk.dll`;
+另用 `w1-anchor`(同一依赖图去掉 `rutis-dylib`)构建一次,两者导出数相同。W2、W3、W5–W8 用一个最小模型
+(`runtime/`:`sdk` 是 dylib 并重导出 tokio,插件和宿主都动态链接它,宿主用 `LoadLibraryExW` 按完整路径加载插件);
+W8 另用真实 SDK + greeter 夹具副本跑了一遍(`w8-real/`)。
+
+| # | 方法 | 实测结果 | 结论 |
+| --- | --- | --- | --- |
+| W1 | `rutis_sdk.dll` 按宿主方式构建,用 `object` 读导出目录,`dumpbin /exports` 复核;另用 SDK 依赖集合的副本加常见依赖重测 | 真实 SDK:release **1597** 项(占上限 2.4%),dev **14545** 项(22.2%);无 LNK1189 或其他链接错误。dev 下导出以泛型单态化为主(core 4945、tokio 3467、alloc 1593、std 1110)。增长(release / dev):副本基线 1568 / 14259;加 serde derive 1585 / 14350;加 regex、tracing、tracing-subscriber、chrono、uuid 2949 / 26773;加 reqwest(rustls)4188 / 34882;全部加上 5425 / **46683**(71.2%)。dev 下只给 `rutis-sdk` 包设 opt-level 2 没有效果(14543);给所有依赖设 opt-level 2(`[profile.dev.package."*"]`)降到 2609,全部依赖的副本降到 6457 | **可行**。发布用的 release 构建余量约 6.4 万项。dev 构建在依赖大幅增加时会接近上限,需要时让 SDK 的全部依赖以 opt-level ≥ 2 构建(只设 SDK 包本身不够,与 macOS 设计稿 §八 R7 的建议不同) |
+| W2 | 同一插件 crate 用 `GREETER_VERSION=1/2` 在两个 target 目录构建,复制到 `<cache>/<hashA>/greeter.dll`、`<cache>/<hashB>/greeter.dll`,`LoadLibraryExW` 按完整路径先后加载 | 两个不同的模块句柄,各自返回 v1、v2,插件私有类型的 vtable 互不串线;同一路径再次加载返回同一句柄。v2 链接的是另一 target 目录的 `sdk.dll.lib`,运行时用的是宿主已加载的 `sdk.dll`,照常工作 | **可行**。同名不冲突;反过来说明加载器只按 DLL 名和符号名匹配 SDK,SDK 身份只能靠 L1/L2 校验 |
+| W3 | 发布目录放宿主、`sdk.dll`、`std-*.dll`;插件以 `LOAD_LIBRARY_SEARCH_APPLICATION_DIR \| LOAD_LIBRARY_SEARCH_SYSTEM32` 加载。分别在工作目录、`PATH` 中的目录、`host.exe.local` 目录(以及 `host.exe.local` 空文件 + 工作目录)、插件所在的缓存目录放一份同名的“恶意” SDK(同符号、`mark()` 返回 evil)和一个无效的同名 std 文件 | 五种放置方式下,宿主静态导入和插件依赖都解析到发布目录的 SDK/std,插件复用已加载的 `sdk.dll`。对照组:发布目录**缺少** `sdk.dll` 时,不放恶意文件则启动失败(`STATUS_DLL_NOT_FOUND`),在 `PATH` 中放了就加载恶意 SDK 并正常运行 | **可行**。发布目录中的文件齐全时,没有找到能绕过它的路径;但文件缺失时会继续按 `PATH` 搜索,所以启动器必须在启动宿主前确认 SDK、std 存在且哈希正确,并持有它们直到宿主退出(W7) |
+| W4 | `dumpbin /dependents` 和 `object` 读导入表 | rustup 的 `std-44a584f44bc3dd65.dll` 只依赖 `KERNEL32`、`ntdll`、`USERENV`、`WS2_32`、`bcryptprimitives`、`api-ms-win-core-synch-l1-2-0`,**不依赖** VC 运行时。`rutis_sdk.dll`、插件和宿主依赖 `VCRUNTIME140.dll` 和 UCRT(`api-ms-win-crt-*`)。std DLL 在工具链中有两份相同文件(`bin\` 和 `lib\rustlib\x86_64-pc-windows-msvc\lib\`) | 不影响可行性。VC++ 运行库按已决定的做法由用户安装;依赖来自 rustc 默认动态链接 CRT 的宿主、SDK 和插件,不是来自 std(macOS 设计稿 §八 R10 的说法需更正)。UCRT 是 Windows 10 起的系统组件 |
+| W5 | 插件带 `ctor` 静态初始化(`.CRT$XCU`,在 DllMain 中执行,持有加载锁:分配内存、加锁、访问 SDK 和插件的 `thread_local!`、读环境变量)和带析构的 `thread_local!`;在有 4 个工作线程、blocking 线程不断创建和退出的 tokio 运行时中加载;另有一个初始化中启动线程并等待的反例 | 加载 0.8–1.1 ms 完成,初始化执行,无死锁;64 个任务和 16 个短线程访问后,线程退出时析构全部执行(运行时关闭后 inits=dtors=29/30)。反例:初始化里等待新线程 5 秒超时(新线程要等 DllMain 返回才能运行;若用 `join` 会永久卡住) | **可行**。只需在插件作者指南中加一条:静态初始化中不得等待其他线程(`join`、阻塞地等待 channel 或锁);`rutis_plugin_entry` 在 `LoadLibrary` 返回后调用,不受此限 |
+| W6 | release 插件中 `#[used] #[link_section = ".rutism"] static [u8; 512]`(不被任何代码引用),`object` 按节名查找 | `.rutism` 恰好一个,512 字节,内容正确。现有 `export_plugin!` 用的 `.note.rutis.meta` 在 PE 中被截断为 `.note.ru`(真实 greeter 夹具同样如此)。同样的 512 字节在文件中出现两次:另一份在 `.rustc` 元数据节中 | **可行**。PE 上节名用 `.rutism`;必须按节名定位,不能按 magic 字节搜索整个文件(对应 V7) |
+| W7 | 加载缓存中的 DLL 后尝试覆盖、复制覆盖、删除、改名、删除目录;再复制到新路径加载;另以只允许读取的共享模式(`FILE_SHARE_READ`)先打开文件再加载 | 覆盖、复制覆盖被拒(错误 32),删除和删除目录被拒(错误 5);**改名成功**,模块路径随之变化。新路径正常加载为另一个模块。先以 `FILE_SHARE_READ` 打开再加载:加载成功,改名和删除都被拒(错误 32) | **可行**。内容寻址缓存只新建、不覆盖的设计成立。已加载的 DLL 可以被改名,所以加载器校验哈希时应持有只读共享的句柄直到 `LoadLibrary` 返回;启动器对发布目录文件同样这样做 |
+| W8 | 最小模型:TypeId、双向 downcast、插件内 `Handle::try_current` 和 `tokio::spawn`、SDK 中 `thread_local!`(const 与惰性初始化两种)在宿主和插件中是否同一份、SDK 静态变量、`catch_unwind`、Drop 次数;v1、v2 各跑一次。真实 SDK:`rutis_plugin_meta`、`rutis_plugin_entry`,在 `Ctx::root()` 上运行夹具插件 | 全部通过。TypeId 相同;downcast 双向成功;运行时外调用 `try_current` 返回失败,运行时内成功,4 个任务都在宿主的 `host-worker` 线程上执行;两个线程上宿主、插件(内联访问)、SDK 函数看到的 TLS 地址和值一致;静态变量共享;panic 被捕获,payload 完整,插件之后仍可调用;Drop 执行 1 次。真实 SDK:`sdk_id` 与宿主 `SDK_ID` 一致,插件 `provide` 的 `String` 和 `Snapshot` 在根 Ctx 上可读,dispose 后 Drop 标记为一次 | **可行** |
+
+**附带发现**
+
+- **SDK 字节可复现**:不加参数时,两个 target 目录构建的 `sdk.dll` 哈希不同;只加 `--remap-path-prefix` 仍不同;
+  再加 `-C link-arg=/Brepro`(去掉链接器写入的时间戳)后相同(release 默认无调试信息,`/PDBALTPATH` 不影响结果)。
+  只验证了同机不同目录,跨机器(V1)仍待验证。
+- **`rutis_sdk.dll` 大小**:release 1.9 MB(导入库 0.95 MB),dev 7.5 MB(导入库 15 MB)。导入库不进发布目录。
+
+**结论:可行。** W1–W8 都没有触发不可行的判定。实现见 [#118](https://github.com/arcships/rutis/issues/118),
+范围除照搬 Linux/macOS 的部分外,必须包括:
+
+1. **启动器不能 `exec`**:创建子进程并等待,转发退出码,自身忽略 Ctrl+C,用 Job Object 保证启动器退出时子进程一起结束;
+   依赖宿主 PID 的工具要知道 PID 与 Linux/macOS 不同。
+2. **启动器持有发布目录文件**:校验宿主、SDK、std 的存在和哈希后,以只允许读取的共享模式持有句柄直到子进程退出(W3 对照组、W7)。
+3. **加载器**:`LoadLibraryExW` 按完整路径加载,标志用 `LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`;
+   校验哈希时持有只读共享句柄直到加载完成;插件目录中不得有 SDK 或 std 副本。
+4. **引导 blob**:`export_plugin!` 在 PE 上用 `.rutism` 节;读取按节名定位。
+5. **可复现构建**:构建脚本加 `-C link-arg=/Brepro` 和路径重映射,CI 比对 SDK 哈希。
+6. **文件名与布局**:库文件名没有 `lib` 前缀(`rutis_sdk.dll`、`std-<hash>.dll`、`<plugin>.dll`),`.dll.lib` 不进发布目录。
+7. **dev 构建的导出余量**:在文档中说明;需要时给 SDK 的全部依赖设 opt-level ≥ 2,并在 CI 中统计 release 构建的导出数,
+   超过一个阈值(例如 30000)时报警。
+8. **文档**:VC++ 运行库由用户安装;插件静态初始化中不得等待其他线程。
 
 ## 十二、实施步骤
 

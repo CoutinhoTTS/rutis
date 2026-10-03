@@ -1,0 +1,12 @@
+[package]
+name = "w8-real-greeter"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "greeter"
+crate-type = ["dylib"]
+
+[dependencies]
+rutis-sdk = { path = "../../../../../crates/rutis-sdk" }
