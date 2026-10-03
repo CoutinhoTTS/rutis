@@ -2102,6 +2102,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "object"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "memchr",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2884,6 +2896,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "rutis",
+ "rutis-dylib-meta",
  "rutis-loader",
  "rutis-sdk",
  "semver",
@@ -2900,6 +2913,13 @@ name = "rutis-dylib-launcher"
 version = "0.1.0"
 dependencies = [
  "sha2",
+]
+
+[[package]]
+name = "rutis-dylib-meta"
+version = "0.1.0"
+dependencies = [
+ "object",
 ]
 
 [[package]]
@@ -2962,6 +2982,11 @@ dependencies = [
 [[package]]
 name = "rutis-xtask"
 version = "0.1.0"
+dependencies = [
+ "rutis-dylib-meta",
+ "sha2",
+ "toml",
+]
 
 [[package]]
 name = "rutui-core"
