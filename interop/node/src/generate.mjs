@@ -906,7 +906,9 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
   // Configuration.
   // ---------------------------------------------------------------------
   function configFor(configType, structName, accessor) {
-    const empty = { code: `#[derive(Debug, Clone, Default, ::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct ${structName} {}`, defaultable: true, checks: [] }
+    // Configs also deserialize, so a host can build them from JSON (a loader
+    // row's config, say).
+    const empty = { code: `#[derive(Debug, Clone, Default, ::rutis_interop::serde::Serialize, ::rutis_interop::serde::Deserialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct ${structName} {}`, defaultable: true, checks: [] }
     if (!configType) return empty
     const stripped = stripNullish(configType).members
     const configObject = stripped.length === 1 ? stripped[0] : undefined
@@ -930,13 +932,13 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
       const shape = outbound(fieldType, absence(checker.getTypeOfSymbolAtLocation(property, declaration), optional))
       fieldType = shape.rustType
       if (!fieldType.startsWith('Option<')) defaultable = false
-      const attributes = [`rename = ${literal(property.getName())}`, ...absentField(shape, false).filter(attribute => attribute !== 'default')]
+      const attributes = [`rename = ${literal(property.getName())}`, ...absentField(shape, true)]
       fields.push(`#[serde(${attributes.join(', ')})] pub ${field}: ${fieldType},`)
       const check = finite(`${accessor}.${field}`, fieldType)
       if (check) checks.push(check.replace('::rutis_interop::Error::Value("non-finite number".into())', '::rutis_interop::Error::Value("non-finite number".into()).into()'))
     }
     return {
-      code: `#[derive(Debug, Clone, ${defaultable ? 'Default, ' : ''}::rutis_interop::serde::Serialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct ${structName} { ${fields.join('\n')} }`,
+      code: `#[derive(Debug, Clone, ${defaultable ? 'Default, ' : ''}::rutis_interop::serde::Serialize, ::rutis_interop::serde::Deserialize)]\n#[serde(crate = "rutis_interop::serde")]\npub struct ${structName} { ${fields.join('\n')} }`,
       defaultable, checks,
     }
   }
@@ -959,8 +961,9 @@ export function generate(plugins, nodePackage, { provide = [], events = [], emit
     const defaultable = parts.every(part => part.defaultable)
     configCode = `${parts.map(part => part.code).join('\n')}
   /// Configuration for each plugin of the group, in load order.
-  #[derive(Debug, Clone${defaultable ? ', Default' : ''})]
-  pub struct Config { ${parts.map(part => `pub ${part.plugin.name}: ${part.structName},`).join(' ')} }`
+  #[derive(Debug, Clone${defaultable ? ', Default' : ''}, ::rutis_interop::serde::Deserialize)]
+  #[serde(crate = "rutis_interop::serde")]
+  pub struct Config { ${parts.map(part => `${part.defaultable ? '#[serde(default)] ' : ''}pub ${part.plugin.name}: ${part.structName},`).join(' ')} }`
     configChecks = parts.flatMap(part => part.checks).join('\n')
     launched = group.map(plugin => toValue(`self.config.${plugin.name}`))
   }

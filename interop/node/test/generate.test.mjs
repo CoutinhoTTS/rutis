@@ -208,7 +208,7 @@ test('null, parameter names and unions of live objects', async () => {
     assert.match(rust, /#\[serde\(rename = "key", default\)\] pub key: Option<String>,/)
     assert.match(rust, /#\[serde\(rename = "note", default, skip_serializing_if = "Option::is_none"\)\] pub note: Option<String>,/)
     assert.match(rust, /#\[serde\(rename = "label", default, skip_serializing_if = "Option::is_none", deserialize_with = "::rutis_interop::nullable"\)\] pub label: Option<Option<String>>,/)
-    assert.match(rust, /pub struct Config \{ #\[serde\(rename = "key"\)\] pub key: Option<String>, \}/)
+    assert.match(rust, /pub struct Config \{ #\[serde\(rename = "key", default\)\] pub key: Option<String>, \}/)
     // A parameter named `args` does not shadow the generated locals.
     assert.match(rust, /let args = ::rutis_interop::rpc::Value::callback\(move \|__rutis_args\|/)
     assert.match(rust, /let args: Vec<String> = ::rutis_interop::decode_value\(__rutis_args\.next\(\)/)
@@ -250,7 +250,9 @@ test('a group gets one Config field per member and rejects a service provided tw
       export function apply(ctx: Context) { ctx.provide('greeter', { greet(name: string): string { return name } }) }
     `)
     const { rust } = generate([{ name: 'clock', path: clock }, { name: 'greeter', path: greeter }], root)
-    assert.match(rust, /pub struct Config \{ pub clock: ClockConfig, pub greeter: GreeterConfig, \}/)
+    assert.match(rust, /pub struct Config \{ pub clock: ClockConfig, #\[serde\(default\)\] pub greeter: GreeterConfig, \}/)
+    // Configs deserialize, so a host can build them from JSON.
+    assert.match(rust, /#\[derive\(Debug, Clone, ::rutis_interop::serde::Deserialize\)\]\s*#\[serde\(crate = "rutis_interop::serde"\)\]\s*pub struct Config/)
     assert.match(rust, /pub struct ClockConfig \{ #\[serde\(rename = "now"\)\] pub now: f64,/)
     assert.match(rust, /Process::mount\(/)
     assert.match(rust, /self\.config\.clock\.now\.is_finite\(\)/)

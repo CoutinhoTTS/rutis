@@ -25,6 +25,17 @@ pub enum Edit {
         id: String,
         disabled: bool,
     },
+    /// Replace the row's `inject` (catalog names); `None` removes it.
+    SetInject {
+        id: String,
+        inject: Option<Vec<String>>,
+    },
+    /// Replace the row's `isolate` (name → `true` or a label); `None`
+    /// removes it.
+    SetIsolate {
+        id: String,
+        isolate: Option<Map<String, Value>>,
+    },
     Rename {
         id: String,
         name: String,
@@ -46,6 +57,8 @@ impl Edit {
             Edit::Create { entry, .. } => entry.get("id").and_then(Value::as_str),
             Edit::Update { id, .. }
             | Edit::SetDisabled { id, .. }
+            | Edit::SetInject { id, .. }
+            | Edit::SetIsolate { id, .. }
             | Edit::Rename { id, .. }
             | Edit::Move { id, .. }
             | Edit::Remove { id } => Some(id),
@@ -102,6 +115,18 @@ pub fn apply_edit(
         Edit::SetDisabled { id, disabled } => {
             let row = ctx.require(id)?;
             ctx.set_field(&mut patches, row, "disabled", Value::Bool(*disabled))?;
+        }
+        Edit::SetInject { id, inject } => {
+            let row = ctx.require(id)?;
+            let value = inject.as_ref().map_or(Value::Null, |names| {
+                Value::Array(names.iter().cloned().map(Value::String).collect())
+            });
+            ctx.set_field(&mut patches, row, "inject", value)?;
+        }
+        Edit::SetIsolate { id, isolate } => {
+            let row = ctx.require(id)?;
+            let value = isolate.clone().map_or(Value::Null, Value::Object);
+            ctx.set_field(&mut patches, row, "isolate", value)?;
         }
         Edit::Rename { id, name } => {
             let row = ctx.require(id)?;
@@ -247,7 +272,12 @@ impl Context<'_> {
         let name = row_name(row);
         if row.owner == Owner::Layer(self.editable) {
             fold_overrides(patches, id, name);
-            owned_object(patches, id)?.insert(field.to_owned(), value);
+            let object = owned_object(patches, id)?;
+            if value.is_null() {
+                object.remove(field);
+            } else {
+                object.insert(field.to_owned(), value);
+            }
         } else {
             upsert_override(patches, id, name, field, value);
         }

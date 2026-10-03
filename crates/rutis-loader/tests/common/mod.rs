@@ -260,13 +260,19 @@ pub fn patches(value: Value) -> Vec<Patch> {
 
 /// Mount a loader on a fresh root.
 pub async fn mount(resolver: Switch, store: MemStore) -> (Ctx, Loader) {
-    let root = Ctx::root().unwrap();
-    let plugin = LoaderPlugin::new(
+    mount_with(
         resolver,
         LoaderOptions {
             persist: Arc::new(store),
+            ..LoaderOptions::default()
         },
-    );
+    )
+    .await
+}
+
+pub async fn mount_with(resolver: Switch, options: LoaderOptions) -> (Ctx, Loader) {
+    let root = Ctx::root().unwrap();
+    let plugin = LoaderPlugin::new(resolver, options);
     let loader = plugin.handle();
     root.plugin(plugin).await.unwrap();
     (root, loader)

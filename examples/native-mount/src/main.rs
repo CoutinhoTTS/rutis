@@ -35,6 +35,17 @@ mod tests {
         view
     }
 
+    #[test]
+    fn generated_config_round_trips_through_json() {
+        let config: bindings::Config = rutis_interop::serde_json::from_value(
+            rutis_interop::serde_json::json!({ "initial": 3.5 }),
+        )
+        .unwrap();
+        assert_eq!(config.initial, 3.5);
+        let back = rutis_interop::serde_json::to_value(&config).unwrap();
+        assert_eq!(back, rutis_interop::serde_json::json!({ "initial": 3.5 }));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn generated_native_methods_keep_sync_and_async_shapes() {
         let ctx = Ctx::root().unwrap();

@@ -313,6 +313,28 @@ impl Ctx {
         current.0.fiber.upgrade().map(FiberView::from_inner)
     }
 
+    /// The live fiber with this id anywhere under this context's root, for
+    /// hosts that track plugins by [`PluginId`] (from diagnostics or events)
+    /// and need to act on one.
+    pub fn view(&self, id: crate::PluginId) -> Option<FiberView> {
+        let root = self.root_view()?;
+        let mut pending = vec![root.inner];
+        while let Some(fiber) = pending.pop() {
+            if fiber.id == id {
+                return Some(FiberView::from_inner(fiber));
+            }
+            pending.extend(
+                fiber
+                    .children
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Weak::upgrade),
+            );
+        }
+        None
+    }
+
     /// Read-only, best-effort snapshot of live fibers and services.
     ///
     /// This scans fibers and bindings under separate locks. Concurrent lifecycle
@@ -876,6 +898,8 @@ impl Ctx {
             });
         }
         let scope = self.scope_for(&key);
+        let event_key = key.clone();
+        let event_scope = scope.clone();
         let shared = self.0.shared.clone();
         let label = format!("service provide: {}", key.describe());
         let inserted = Arc::new(Mutex::new(None));
@@ -930,7 +954,35 @@ impl Ctx {
             .unwrap()
             .take()
             .expect("binding inserted before registration returns");
+        self.emit_service_changed(
+            &event_key,
+            event_scope,
+            &binding,
+            crate::ServiceChange::Provided,
+        );
         Ok((disposer, binding))
+    }
+
+    fn emit_service_changed(
+        &self,
+        key: &TypeKey,
+        scope: Option<crate::key::ScopeId>,
+        binding: &Binding,
+        change: crate::ServiceChange,
+    ) {
+        let event = crate::ServiceChanged {
+            key: key.clone(),
+            scope: scope.as_ref().map(|s| s.to_string()),
+            provider: binding.provider_id,
+            generation: binding.provider_gen,
+            change,
+        };
+        if let Err(error) = self
+            .events()
+            .emit(self, &crate::EventKey::of(), Arc::new(event))
+        {
+            self.error_sink()(Arc::new(error));
+        }
     }
 
     /// 注册清理效应(D23):`f` 立即执行,返回的清理在卸载时 LIFO 执行。
@@ -1249,9 +1301,19 @@ async fn evict_and_finalize(
     }
     // 清理期自访问结束,最终摘除(仅当槽位未被替换)
     if let Some(binding) = old {
-        shared
+        let removed = shared
             .registry
             .finalize_binding_if(key.clone(), scope.clone(), &binding);
+        if removed {
+            if let Some(fiber) = provider.upgrade() {
+                fiber.ctx.emit_service_changed(
+                    &key,
+                    scope.clone(),
+                    &binding,
+                    crate::ServiceChange::Removed,
+                );
+            }
+        }
     }
     // ④摘除 provider 的 provided 记账:仅移除本键本作用域的一条(同键
     // 新 provide 的条目保留;fiber 卸载整表清空后此处自然 no-op)

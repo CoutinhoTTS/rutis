@@ -230,7 +230,7 @@ impl Registry {
         key: TypeKey,
         scope: Option<ScopeId>,
         expected: &Arc<Binding>,
-    ) {
+    ) -> bool {
         let mut bindings = self.bindings.lock().unwrap();
         let still_old = bindings
             .get(&(key.clone(), scope.clone()))
@@ -239,6 +239,7 @@ impl Registry {
             bindings.remove(&(key, scope));
             shrink_if_sparse(&mut bindings);
         }
+        still_old
     }
 
     /// 该依赖四元组的当前消费者(D21 简化:唯一事实源是各 fiber 的

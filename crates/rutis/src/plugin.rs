@@ -61,3 +61,23 @@ pub trait PluginFactory<C: Send + Sync + 'static>: Send + Sync + 'static {
     /// 构造插件实例。失败 = config 无法产出可用实例(装载期走 `fail_load`)。
     fn build(&self, config: &C) -> Result<Box<dyn Plugin>, CordisError>;
 }
+
+/// A boxed plugin is a plugin, so a host can mount plugins chosen at run
+/// time, such as a list built from configuration.
+impl Plugin for Box<dyn Plugin> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn injects(&self) -> &[TypeKey] {
+        (**self).injects()
+    }
+
+    fn validate(&self) -> Result<(), CordisError> {
+        (**self).validate()
+    }
+
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        (**self).apply(ctx)
+    }
+}

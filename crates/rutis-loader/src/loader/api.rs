@@ -1,6 +1,6 @@
 //! The public `Loader` methods.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rutis::{FiberView, PluginId};
 use serde_json::Value;
@@ -9,9 +9,8 @@ use crate::edit::Edit;
 use crate::patch::Layer;
 use crate::LoaderError;
 
-use super::desired::contains_expression;
 use super::{
-    Editable, EntryInfo, Inner, Loader, LoaderChanged, NewEntry, PendingEditDropped,
+    Editable, EntryInfo, Inner, Isolate, Loader, LoaderChanged, NewEntry, PendingEditDropped,
     ReconcileReport,
 };
 
@@ -161,13 +160,12 @@ impl Loader {
                 return Some(Ok(running.config.clone()));
             }
         }
-        Some(if contains_expression(&row.config) {
-            Err(LoaderError::Expression(
-                "no expression evaluator is installed".into(),
-            ))
-        } else {
-            Ok(row.config.clone())
-        })
+        let base = state
+            .groups
+            .get(&row.parent)
+            .or(state.groups.get(&None))
+            .map(|g| row.scope.context(&g.ctx));
+        Some(self.inner.eval().value(&row.config, base.as_ref()))
     }
 
     /// Add a row to the editable layer. Waits until the tree settles; a
@@ -193,6 +191,15 @@ impl Loader {
         }
         if entry.disabled {
             object.insert("disabled".into(), Value::Bool(true));
+        }
+        if !entry.inject.is_empty() {
+            object.insert(
+                "inject".into(),
+                Value::Array(entry.inject.into_iter().map(Value::String).collect()),
+            );
+        }
+        if !entry.isolate.is_empty() {
+            object.insert("isolate".into(), isolate_value(&entry.isolate));
         }
         if !entry.config.is_null() || entry.group {
             let config = if entry.group && entry.config.is_null() {
@@ -234,6 +241,31 @@ impl Loader {
             .edit(Edit::SetDisabled {
                 id: id.to_owned(),
                 disabled,
+            })
+            .await
+    }
+
+    /// Replace the row's `inject`; an empty list removes it.
+    pub async fn set_inject(&self, id: &str, inject: Vec<String>) -> Result<(), LoaderError> {
+        self.inner
+            .edit(Edit::SetInject {
+                id: id.to_owned(),
+                inject: (!inject.is_empty()).then_some(inject),
+            })
+            .await
+    }
+
+    /// Replace the row's `isolate`; an empty map removes it.
+    pub async fn set_isolate(
+        &self,
+        id: &str,
+        isolate: BTreeMap<String, Isolate>,
+    ) -> Result<(), LoaderError> {
+        let value = isolate_value(&isolate);
+        self.inner
+            .edit(Edit::SetIsolate {
+                id: id.to_owned(),
+                isolate: (!isolate.is_empty()).then(|| value.as_object().unwrap().clone()),
             })
             .await
     }
@@ -309,4 +341,13 @@ impl Loader {
     pub async fn settled(&self) {
         self.inner.settle().await
     }
+}
+
+fn isolate_value(isolate: &BTreeMap<String, Isolate>) -> Value {
+    Value::Object(
+        isolate
+            .iter()
+            .map(|(name, iso)| (name.clone(), iso.to_value()))
+            .collect(),
+    )
 }

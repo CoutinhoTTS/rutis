@@ -19,6 +19,7 @@ use rutis::{Ctx, Event, FiberView, PluginId, Snapshot, TypeKey};
 
 use serde_json::Value;
 
+use crate::catalog::{Expressions, ServiceCatalog};
 use crate::edit::Edit;
 use crate::error::Failure;
 use crate::patch::{Layer, Owner, PatchWarning};
@@ -31,12 +32,19 @@ pub use plugins::LoaderPlugin;
 
 pub struct LoaderOptions {
     pub persist: Arc<dyn Persist>,
+    /// Service names usable in `isolate`, `inject` and expressions.
+    pub catalog: ServiceCatalog,
+    /// Evaluates `{ "__jsExpr": .. }` nodes; without it such rows are
+    /// `Unresolved`.
+    pub expressions: Option<Arc<dyn Expressions>>,
 }
 
 impl Default for LoaderOptions {
     fn default() -> Self {
         Self {
             persist: Arc::new(NoPersist),
+            catalog: ServiceCatalog::default(),
+            expressions: None,
         }
     }
 }
@@ -67,6 +75,27 @@ pub struct NewEntry {
     pub config: Value,
     pub group: bool,
     pub disabled: bool,
+    /// Catalog names of extra services the row waits for.
+    pub inject: Vec<String>,
+    /// Catalog name → isolation.
+    pub isolate: BTreeMap<String, Isolate>,
+}
+
+/// One `isolate` entry: a scope private to the row, or one shared by every
+/// row naming the same label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Isolate {
+    Private,
+    Shared(String),
+}
+
+impl Isolate {
+    pub(crate) fn to_value(&self) -> Value {
+        match self {
+            Isolate::Private => Value::Bool(true),
+            Isolate::Shared(label) => Value::String(label.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +189,8 @@ pub struct Loader {
 struct Inner {
     resolver: Arc<dyn Resolver>,
     persist: Arc<dyn Persist>,
+    catalog: ServiceCatalog,
+    expressions: Option<Arc<dyn Expressions>>,
     /// Serializes reconcile and edits.
     op: tokio::sync::Mutex<()>,
     state: Mutex<State>,
@@ -203,5 +234,10 @@ struct Running {
     name: String,
     injects: Vec<TypeKey>,
     resolved: Option<Arc<Resolved>>,
+    /// The evaluated config the kernel holds.
     config: Value,
+    /// `isolate` names and labels and `inject` names it was spawned with.
+    scope: (Vec<(String, String)>, Vec<String>),
+    /// The row's context (parent with isolates), for re-evaluating config.
+    ctx: Ctx,
 }

@@ -26,7 +26,7 @@ pub use bus::{DispatchAttempt, DispatchMode, EventBus, EventSubscription, Listen
 pub use ctx::Ctx;
 pub use diagnostics::{
     BindingDiagnostics, DependencyDiagnostics, DependencyStatus, EventBacklog, PluginDiagnostics,
-    ResolvedDependency, RuntimeDiagnostics, ServiceAccess,
+    ResolvedDependency, RuntimeDiagnostics, ServiceAccess, ServiceChange, ServiceChanged,
 };
 pub use effect::{Disposer, Effect, EffectMeta, EffectPhase};
 pub use error::{

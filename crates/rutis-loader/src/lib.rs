@@ -5,6 +5,7 @@
 //! layer and are handed to a persistence hook. The loader reads and writes no
 //! files. Design: `docs/design-rutis-loader-2026-10-02.md`.
 
+mod catalog;
 mod edit;
 mod error;
 mod loader;
@@ -12,11 +13,12 @@ mod patch;
 mod persist;
 mod resolver;
 
+pub use catalog::{ExprScope, Expressions, ServiceCatalog};
 pub use edit::{apply_edit, Edit};
 pub use error::{Failure, LoaderError, PersistError};
 pub use loader::{
-    Editable, EntryInfo, EntryStatus, Loader, LoaderChanged, LoaderOptions, LoaderPlugin, NewEntry,
-    PendingEditDropped, ReconcileReport,
+    Editable, EntryInfo, EntryStatus, Isolate, Loader, LoaderChanged, LoaderOptions, LoaderPlugin,
+    NewEntry, PendingEditDropped, ReconcileReport,
 };
 pub use patch::{apply_patches, Composed, ComposedRow, Layer, Owner, Patch, PatchWarning};
 pub use persist::{NoPersist, Persist, Version};

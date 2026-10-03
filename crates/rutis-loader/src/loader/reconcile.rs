@@ -4,18 +4,54 @@ use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
-use rutis::{CordisError, Ctx, Event, EventKey, FiberState, FiberView, PluginId};
+use rutis::{CordisError, Ctx, Event, EventKey, FiberState, FiberView, PluginId, TypeKey};
 use serde_json::Value;
 
 use crate::error::Failure;
-use crate::patch::apply_patches;
+use crate::patch::{apply_patches, Layer};
+use crate::resolver::Resolved;
 use crate::LoaderError;
 
-use super::desired::{Desired, Row};
+use super::desired::{Desired, Eval, Row, RowScope};
 use super::plugins::{EntryConfig, EntryFactory, GroupPlugin};
 use super::{EntryInfo, EntryStatus, Group, Inner, ReconcileReport, Running, State};
 
+/// The module's own injects followed by the row's `inject`, deduplicated.
+fn combined_injects(resolved: &Resolved, scope: &RowScope) -> Vec<TypeKey> {
+    let mut keys = resolved.factory.injects().to_vec();
+    for key in scope.inject_keys() {
+        if !keys.contains(key) {
+            keys.push(key.clone());
+        }
+    }
+    keys
+}
+
+fn owned_signature(scope: &RowScope) -> (Vec<(String, String)>, Vec<String>) {
+    let (isolate, inject) = scope.signature();
+    (
+        isolate
+            .into_iter()
+            .map(|(n, l)| (n.to_owned(), l.to_owned()))
+            .collect(),
+        inject.into_iter().map(str::to_owned).collect(),
+    )
+}
+
 impl Inner {
+    pub(super) fn eval(&self) -> Eval<'_> {
+        Eval {
+            expressions: self.expressions.as_deref(),
+            catalog: &self.catalog,
+        }
+    }
+
+    /// Compose `layers` and read the rows, evaluating `disabled` with the
+    /// root context.
+    pub(super) fn build_desired(&self, layers: &[Layer], root: Option<&Ctx>) -> Desired {
+        Desired::from_composed(apply_patches(layers), &self.eval(), root)
+    }
+
     pub(super) fn next_token(&self) -> u64 {
         let mut state = self.state.lock().unwrap();
         state.next_token += 1;
@@ -94,12 +130,16 @@ impl Inner {
             }
             let id = row.id.clone();
             let name = row.name.clone().unwrap_or_default();
+            let row_ctx = row.scope.context(&ctx);
+            let scope = owned_signature(&row.scope);
+            let extra: Vec<TypeKey> = row.scope.inject_keys().cloned().collect();
             state.next_token += 1;
             let token = state.next_token;
             if row.group {
-                let view = ctx.plugin(GroupPlugin {
+                let view = row_ctx.plugin(GroupPlugin {
                     inner: Arc::downgrade(self),
                     id: id.clone(),
+                    injects: extra,
                     token,
                 });
                 state.running.insert(
@@ -114,6 +154,8 @@ impl Inner {
                         injects: Vec::new(),
                         resolved: None,
                         config: Value::Null,
+                        scope,
+                        ctx: row_ctx,
                     },
                 );
                 continue;
@@ -121,7 +163,13 @@ impl Inner {
             let Some(Ok(resolved)) = state.resolved.get(&name).cloned() else {
                 continue;
             };
-            let config = row.config.clone();
+            let config = match self.eval().value(&row.config, Some(&row_ctx)) {
+                Ok(config) => config,
+                Err(error) => {
+                    state.rejected.insert(id, error);
+                    continue;
+                }
+            };
             // The kernel's first load only builds and validates the instance;
             // check the config here as `update` and the dry run do.
             let checked = catch_unwind(AssertUnwindSafe(|| {
@@ -139,8 +187,8 @@ impl Inner {
                 continue;
             }
             state.rejected.remove(&id);
-            let injects = resolved.factory.injects().to_vec();
-            let view = ctx.plugin_with(
+            let injects = combined_injects(&resolved, &row.scope);
+            let view = row_ctx.plugin_with(
                 EntryFactory {
                     name: name.clone(),
                     injects: injects.clone(),
@@ -162,6 +210,8 @@ impl Inner {
                     injects,
                     resolved: Some(resolved),
                     config,
+                    scope,
+                    ctx: row_ctx,
                 },
             );
         }
@@ -253,7 +303,8 @@ impl Inner {
         let (before, names) = {
             let mut state = self.state.lock().unwrap();
             let before = Self::failures(&state);
-            state.desired = Desired::from_composed(apply_patches(&state.layers));
+            let root = state.groups.get(&None).map(|g| g.ctx.clone());
+            state.desired = self.build_desired(&state.layers, root.as_ref());
             let names: Vec<String> = state
                 .desired
                 .rows
@@ -286,6 +337,7 @@ impl Inner {
                 if row.parent != running.parent
                     || row.group != running.group
                     || !state.desired.wanted(row)
+                    || owned_signature(&row.scope) != running.scope
                 {
                     continue;
                 }
@@ -293,7 +345,7 @@ impl Inner {
                     let name = row.name.clone().unwrap_or_default();
                     match state.resolved.get(&name) {
                         Some(Ok(resolved))
-                            if resolved.factory.injects() == running.injects.as_slice() => {}
+                            if combined_injects(resolved, &row.scope) == running.injects => {}
                         _ => continue,
                     }
                 }
@@ -352,6 +404,7 @@ impl Inner {
             let mut state = self.state.lock().unwrap();
             let state = &mut *state;
             let mut settled = Vec::new();
+            let mut unevaluable = Vec::new();
             for (id, running) in state.running.iter() {
                 if running.group {
                     continue;
@@ -361,11 +414,19 @@ impl Inner {
                 let Some(Ok(resolved)) = state.resolved.get(&name) else {
                     continue;
                 };
+                // Expressions are evaluated where the plugin runs.
+                let desired = match self.eval().value(&row.config, Some(&running.ctx)) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        unevaluable.push((id.clone(), error));
+                        continue;
+                    }
+                };
                 let same_module = running
                     .resolved
                     .as_ref()
                     .is_some_and(|r| Arc::ptr_eq(r, resolved));
-                if same_module && running.config == row.config {
+                if same_module && running.config == desired {
                     // Already running what is wanted: an earlier rejection
                     // no longer applies.
                     settled.push(id.clone());
@@ -373,7 +434,7 @@ impl Inner {
                 }
                 let config = EntryConfig {
                     resolved: resolved.clone(),
-                    value: row.config.clone(),
+                    value: desired,
                 };
                 updates.push((
                     id.clone(),
@@ -384,6 +445,10 @@ impl Inner {
             }
             for id in settled {
                 state.rejected.remove(&id);
+            }
+            // The plugin keeps its previous config.
+            for (id, error) in unevaluable {
+                state.rejected.insert(id, error);
             }
             let groups: Vec<Option<String>> = state.groups.keys().cloned().collect();
             for group in groups {
