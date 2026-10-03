@@ -1,6 +1,7 @@
 use crate::events::EventSink;
 use crate::rpc::{Connection, Dispatch, Reply, Value as RpcValue};
 use crate::Error;
+use rutis_channel::Channel;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -229,13 +230,29 @@ fn peek_exit(pid: u32) -> Option<std::process::ExitStatus> {
     Some(std::process::ExitStatus::from_raw(raw))
 }
 
-/// Owns one native Cordis process and its generated service bindings.
-pub struct Process {
+/// A session with a Cordis runtime, whatever channel carries it: exported
+/// service slots, rows, events and the host services it may call.
+pub struct Session {
     peer: Connection,
     imports: Arc<Imports>,
     runtime: tokio::runtime::Handle,
+}
+
+/// Owns one native Cordis process and its generated service bindings: the
+/// child process and a [`Session`] with it, whose methods `Process` offers
+/// as its own.
+pub struct Process {
+    session: Session,
     child: Child,
     _directory: tempfile::TempDir,
+}
+
+impl std::ops::Deref for Process {
+    type Target = Session;
+
+    fn deref(&self) -> &Session {
+        &self.session
+    }
 }
 
 impl Process {
@@ -363,39 +380,74 @@ impl Process {
         let stream = stream
             .into_std()
             .map_err(|error| Error::Transport(error.to_string()))?;
-        stream
-            .set_nonblocking(false)
-            .map_err(|error| Error::Transport(error.to_string()))?;
-        let imports = Arc::new(Imports {
+        let child = Child::watch(child);
+        // The session ends with the way the process ended.
+        let disconnected = child.disconnected();
+        let channel = Channel::unix(stream)
+            .map_err(|error| Error::Transport(error.to_string()))?
+            .with_end_reason(move || disconnected().to_string());
+        let imports = Imports {
             slots: Slots::default(),
             events,
             hosts,
             forwarded,
-        });
-        let child = Child::watch(child);
-        let peer =
-            Connection::connect_with(stream, imports.clone(), Box::new(child.disconnected()))?;
-        peer.ready().await?;
+        };
+        let session = Session::start(channel, imports).await?;
         let process = Arc::new(Self {
-            peer,
-            imports,
-            runtime: tokio::runtime::Handle::current(),
+            session,
             child,
             _directory: directory,
         });
-        let mounted = process
-            .call_async(
-                "",
-                "mount",
-                json!({ "plugins": plugins, "services": services, "provided": provided, "events": forwarded_names, "emits": emits }),
-            )
+        process
+            .mount_plugins(json!({ "plugins": plugins, "services": services, "provided": provided, "events": forwarded_names, "emits": emits }))
             .await?;
+        Ok(process)
+    }
+
+    /// Dispose the plugins and wait for the process to end.
+    pub async fn dispose(&self) -> Result<(), Error> {
+        let result = self.call_async("", "dispose", Value::Null).await;
+        self.peer
+            .close(Error::Transport("plugin has been disposed".into()));
+        let status = self.child.exited().await;
+        result?;
+        if status != "exited normally" {
+            return Err(Error::Transport(format!("Cordis process {status}")));
+        }
+        Ok(())
+    }
+
+    /// How the Node process ended (for example `exited with signal: 9
+    /// (SIGKILL)`), or `None` while it runs.
+    pub fn exit_status(&self) -> Option<String> {
+        self.child.status()
+    }
+}
+
+impl Session {
+    /// Start a session on `channel`, once the runtime has answered the
+    /// handshake. It still has to mount its plugins.
+    async fn start(channel: Channel, imports: Imports) -> Result<Self, Error> {
+        let imports = Arc::new(imports);
+        let peer = Connection::open(channel, imports.clone())?;
+        peer.ready().await?;
+        Ok(Self {
+            peer,
+            imports,
+            runtime: tokio::runtime::Handle::current(),
+        })
+    }
+
+    /// The `mount` control call: load the plugins (or start an empty
+    /// Context) and learn the exported service slots.
+    async fn mount_plugins(&self, request: Value) -> Result<(), Error> {
+        let mounted = self.call_async("", "mount", request).await?;
         let slots: HashMap<String, (Option<String>, u64)> =
             crate::decode(mounted["services"].clone())?;
         for (name, (handle, version)) in slots {
-            process.imports.update(name, handle, version);
+            self.imports.update(name, handle, version);
         }
-        Ok(process)
+        Ok(())
     }
 
     /// Load one plugin into the Context as row `key` (rows mode, see
@@ -524,28 +576,16 @@ impl Process {
             .json()
     }
 
-    pub async fn dispose(&self) -> Result<(), Error> {
-        let result = self.call_async("", "dispose", Value::Null).await;
-        self.peer
-            .close(Error::Transport("plugin has been disposed".into()));
-        let status = self.child.exited().await;
-        result?;
-        if status != "exited normally" {
-            return Err(Error::Transport(format!("Cordis process {status}")));
-        }
-        Ok(())
-    }
-
-    /// How the Node process ended (for example `exited with signal: 9
-    /// (SIGKILL)`), or `None` while it runs.
-    pub fn exit_status(&self) -> Option<String> {
-        self.child.status()
-    }
-
-    /// Resolves once the session with the Node process has ended, whether
-    /// by disposal or because the process went away.
+    /// Resolves once the session has ended, whether by disposal or because
+    /// the runtime went away.
     pub async fn closed(&self) {
         self.peer.closed().await
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.peer.close(Error::Transport("session dropped".into()));
     }
 }
 

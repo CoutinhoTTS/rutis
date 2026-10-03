@@ -56,7 +56,7 @@ pub use events::{EmitToCordis, EventSink, Events};
 #[cfg(unix)]
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
-pub use process::{Host, HostDispatch, Mount, Process, ServiceEvents};
+pub use process::{Host, HostDispatch, Mount, Process, ServiceEvents, Session};
 #[cfg(unix)]
 pub use projection::Projection;
 #[cfg(unix)]
