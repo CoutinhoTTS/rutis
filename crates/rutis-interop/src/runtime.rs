@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, Plugin, TypeKey};
 use serde_json::Value;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::{Host, HostDispatch, Mount, Process};
 
@@ -145,38 +146,52 @@ impl Plugin for CordisRuntimePlugin {
                 })
                 .collect::<Result<Vec<_>, CordisError>>()?;
             self.state.send_replace(RuntimeState::Starting);
-            let mounted = Process::mount(
-                &self.node_package,
-                Mount {
-                    hosts,
-                    anchor: Some(&self.anchor),
-                    ..Mount::default()
-                },
-            )
-            .await;
+            // Node may hang before it connects; dispose, restart or a
+            // withdrawn host cancels this generation, and dropping the mount
+            // kills the half-started process.
+            let mounted = tokio::select! {
+                mounted = Process::mount(
+                    &self.node_package,
+                    Mount {
+                        hosts,
+                        anchor: Some(&self.anchor),
+                        ..Mount::default()
+                    },
+                ) => Some(mounted),
+                _ = ctx.cancelled() => None,
+            };
+            // Cancelled (dispose, restart, a withdrawn host) while starting:
+            // the dropped start, or the process it produced, is killed, and
+            // the generation ends with nothing registered, so the kernel
+            // carries on with the unload (back to Pending on a lost host)
+            // instead of marking a failure.
+            if ctx.cancellation_token().is_cancelled() {
+                self.state.send_replace(RuntimeState::Idle);
+                return Ok(Effect::Done);
+            }
             let process = match mounted {
-                Ok(process) => process,
-                Err(error) => {
+                Some(Ok(process)) => process,
+                Some(Err(error)) => {
                     self.state
                         .send_replace(RuntimeState::Down(error.to_string()));
                     return Err(error.into());
                 }
+                None => unreachable!("only cancellation ends the start early"),
             };
 
             // Registered before the service, so cleanup withdraws the service
             // (dependent plugins unload first) before the process ends.
             let service: Arc<Mutex<Option<Disposer>>> = Arc::default();
-            let watcher = tokio::spawn(watch_exit(
-                process.clone(),
-                self.state.clone(),
-                service.clone(),
-            ));
+            let watcher: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::default();
             let owner = process.clone();
             let state = self.state.clone();
-            ctx.effect(move || {
+            let stop_watching = watcher.clone();
+            let registered = ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
-                        watcher.abort();
+                        if let Some(watcher) = stop_watching.lock().unwrap().take() {
+                            watcher.abort();
+                        }
                         let ended = matches!(*state.borrow(), RuntimeState::Down(_));
                         state.send_replace(RuntimeState::Idle);
                         if ended {
@@ -186,24 +201,29 @@ impl Plugin for CordisRuntimePlugin {
                         owner.dispose().await.map_err(Into::into)
                     })
                 }))
-            })?;
+            });
+            if let Err(error) = registered {
+                // Nothing owns the process: dropping it kills it.
+                self.state.send_replace(RuntimeState::Idle);
+                return match ctx.cancellation_token().is_cancelled() {
+                    true => Ok(Effect::Done),
+                    false => Err(error),
+                };
+            }
             let disposer = ctx.provide(CordisRuntime {
                 process: process.clone(),
             })?;
             *service.lock().unwrap() = Some(disposer);
-            // Ready unless the watcher saw the process end meanwhile; then
-            // the service it could not withdraw yet goes now.
-            let ready = self.state.send_if_modified(|state| {
-                if matches!(state, RuntimeState::Starting) {
-                    *state = RuntimeState::Ready(process.clone());
-                    true
-                } else {
-                    false
-                }
-            });
-            if !ready {
-                withdraw(&service).await;
-            }
+            // The watcher starts last, so every failure above leaves no task
+            // holding the process. A process that already ended is seen at
+            // once: `closed` resolves for a session that has ended.
+            self.state
+                .send_replace(RuntimeState::Ready(process.clone()));
+            *watcher.lock().unwrap() = Some(tokio::spawn(watch_exit(
+                process,
+                self.state.clone(),
+                service,
+            )));
             Ok(Effect::Done)
         })
     }

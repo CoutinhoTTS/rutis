@@ -579,3 +579,97 @@ async fn a_runtime_that_cannot_start_does_not_block_resolution() {
 
     root.shutdown().await.unwrap();
 }
+
+// ── Unloading a runtime that is still starting ──────────────────
+
+/// A runtime package whose runner records its PID and never connects.
+fn hanging_runtime(dir: &Path) -> PathBuf {
+    let package = dir.join("hanging");
+    std::fs::create_dir_all(package.join("src")).unwrap();
+    std::os::unix::fs::symlink(
+        node_package().join("node_modules").canonicalize().unwrap(),
+        package.join("node_modules"),
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("src/runner.mjs"),
+        "import { appendFileSync } from 'node:fs'\n\
+         appendFileSync('pids', `${process.pid}\\n`)\n\
+         setInterval(() => {}, 1000)\n",
+    )
+    .unwrap();
+    package
+}
+
+fn pids(package: &Path) -> Vec<i32> {
+    std::fs::read_to_string(package.join("pids"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.parse().unwrap())
+        .collect()
+}
+
+/// Gone, or a zombie waiting to be reaped: it no longer runs.
+fn stopped(pid: i32) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim().starts_with('Z')
+}
+
+async fn starting(runtime: &FiberView, package: &Path, count: usize) {
+    until("the runner to start", || {
+        pids(package).len() >= count && runtime.state().state == FiberState::Loading
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_starting_runtime_can_be_disposed_restarted_or_lose_its_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = hanging_runtime(dir.path());
+    let root = Ctx::root().unwrap();
+    let host = root
+        .provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(Probe::default()))
+        .unwrap();
+    let runtime = CordisRuntimePlugin::new(&package, node_package().join("package.json"))
+        .host("probe", json!({ "record": "sync" }));
+    let handle = runtime.handle();
+    let runtime = root.plugin(runtime);
+
+    // Restart: the hanging start is abandoned and its process killed.
+    starting(&runtime, &package, 1).await;
+    let restart = tokio::spawn(runtime.restart());
+    starting(&runtime, &package, 2).await;
+    let first = pids(&package)[0];
+    until("the first runner to stop", || stopped(first)).await;
+
+    // The host goes: the runtime returns to waiting.
+    host.dispose().await.unwrap();
+    until("the runtime to wait for its host", || {
+        runtime.state().state == FiberState::Pending
+    })
+    .await;
+    let second = pids(&package)[1];
+    until("the second runner to stop", || stopped(second)).await;
+    assert!(handle.ready().await.is_none());
+    restart.abort();
+
+    // Dispose while starting.
+    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(Probe::default()))
+        .unwrap();
+    starting(&runtime, &package, 3).await;
+    tokio::time::timeout(Duration::from_secs(10), runtime.dispose())
+        .await
+        .expect("dispose does not wait for the hanging start")
+        .unwrap();
+    let third = pids(&package)[2];
+    until("the third runner to stop", || stopped(third)).await;
+    tokio::time::timeout(Duration::from_secs(10), handle.ready())
+        .await
+        .expect("the handle settles");
+
+    root.shutdown().await.unwrap();
+}
