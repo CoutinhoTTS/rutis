@@ -1,6 +1,6 @@
 # 网络栈：协议与通道解耦（设计稿）
 
-状态：设计稿，未实现。日期：2026-10-03。
+状态：D1 已实现（`crates/rutis-channel`，会话改跑在通道上，`Session` 从 `Process` 拆出，Node 侧分帧归通道）；D2、D3 未实现。日期：2026-10-03。
 依据：[兼容层设计](design-protocol-plugin-mount.md)（§3 线协议）、[挂载 Cordis 插件：需求](requirements-protocol-plugins.md)。
 使用方：[远程插件：跨框架节点与对称协议](design-remote-plugins-2026-10-03.md)（下称"节点稿"）。
 基准：`main` `d68471f`。
@@ -134,7 +134,8 @@ pub struct Channel {
 
 pub trait Sender: Send {
     /// 发送一条消息；通道施加背压时阻塞。
-    fn send(&mut self, message: &[u8]) -> Result<(), ChannelError>;
+    /// 按值传入：字节流通道可以就地加换行，不必再复制一次。
+    fn send(&mut self, message: Vec<u8>) -> Result<(), ChannelError>;
 }
 
 pub trait Receiver: Send {
@@ -149,7 +150,7 @@ pub trait Closer: Send + Sync {
 
 pub struct ChannelInfo {
     pub transport: &'static str,    // "unix" | "fd" | "memory" | "websocket" …
-    pub peer: Option<PeerId>,       // 连接器验证过的对端节点 id；本机子节点由父节点指定
+    pub peer: Option<String>,       // 连接器验证过的对端节点 id；本机子节点由父节点指定
     pub label: String,              // 用在错误信息里的名字，例如 "peer mac"
 }
 
@@ -170,7 +171,7 @@ pub enum ChannelError {
 
 **会话侧的变化**：
 
-- 读线程循环调用 `recv()`，解码后交给现有的 `receive`。`Closed { reason }` 映射为 `Error::Transport("<label>: <reason>")`。
+- 读线程循环调用 `recv()`，解码后交给现有的 `receive`。`Closed { reason }` 映射为 `Error::Transport("<label>: <reason>")`；label 为空时不加前缀，所以本机通道的错误文本和以前一样。
 - 发送超限按编码失败处理：请求直接向调用方返回错误；应答改发错误帧，现在的 `respond` 已经有这条路径。
 
 ### 5.4 Node 接口
@@ -211,7 +212,7 @@ pub enum ChannelError {
 - Rust 侧：用 `UnixStream::pair()`，在 `pre_exec` 里 `dup2` 到 fd 3。只让这一个 fd 被子进程继承，其余照常 `CLOEXEC`。
 - 兼容：cordis 桥包在 `package.json` 里声明支持的通道（例如 `"rutisChannels": ["unix", "fd"]`），构建时和 `rutisProtocol` 一起核对；未声明 `fd` 的旧版本走路径方式。
 
-**结束原因**：`spawn` 连接器的 `Receiver` 在 EOF 时最多等 1 秒取得退出状态（也就是现在的 `Child::disconnected`），然后返回 `Closed { reason: "Cordis process exited with signal: 9 (SIGKILL)" }`。会话拿到的错误和现在逐字相同。
+**结束原因**：`spawn` 连接器的 `Receiver` 在 EOF 时最多等 1 秒取得退出状态（也就是现在的 `Child::disconnected`），然后返回 `Closed { reason: "Cordis process exited with signal: 9 (SIGKILL)" }`。会话拿到的错误和现在逐字相同。D1 里由 `Channel::with_end_reason` 实现：`Process::mount` 把它包在 Unix 通道外面。
 
 **在框架里怎么用**：连接器不被业务代码直接调用，而是由传输插件包成 `Transport#<种类>` 服务，链接插件依赖它（节点稿 §4.3）：
 
@@ -280,7 +281,7 @@ pub enum ChannelError {
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| D1 | 新建 `rutis-channel`（契约、Unix 字节流、memory）；`rpc.rs` 改用 `Channel`；从 `Process` 拆出会话部分；会话层内部的 `Peer`（`rpc.rs` 的 struct、`peer.mjs`）改名；Node 侧编码去掉换行，worker 的通道代码模块化（路径方式） | 现有测试全部通过；线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 去掉 `cfg(unix)` 后能编译 |
+| D1（已实现） | 新建 `rutis-channel`（契约、Unix 字节流、memory）；`rpc.rs` 改用 `Channel`；从 `Process` 拆出会话部分；会话层内部的 `Peer`（`rpc.rs` 的 struct、`peer.mjs`）改名；Node 侧编码去掉换行，worker 的通道代码模块化（路径方式） | 现有测试全部通过；线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 去掉 `cfg(unix)` 后能编译 |
 | D2 | 继承 fd 的 `spawn`（Rust 与 Node）；装饰器；通道契约测试；会话矩阵 | 契约测试与会话矩阵在所有本地通道上通过 |
 | D3 | WebSocket 绑定的 Rust 实现（`rutis-channel` 的 `websocket` 特性）与 JS 实现（cordis 桥包）；`dial` / `listen` 连接器（由节点稿的 WebSocket 传输插件对外提供） | WebSocket 跨实现测试通过；会话矩阵在回环 WebSocket 上通过 |
 
