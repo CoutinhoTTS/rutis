@@ -149,7 +149,7 @@ Linux 没有这个问题:rustc 生成的 `DT_NEEDED` 只是文件名,glibc 按�
 
 原生库**不在启动器的校验范围内**:它们由部署插件的人负责,与插件本身一样被视为可信。为了便于排查和审计:
 
-- 打包工具把插件的原生库依赖写进清单 `[native_deps]`;加载器核对二进制中的依赖与清单一致,不一致即拒绝。
+- 打包工具把插件的原生库依赖写进清单 `[plugin] native_deps`;加载器核对二进制中的依赖与清单一致,不一致即拒绝。
 - 原生库缺失时,`dlopen`(`RTLD_NOW`)直接失败,错误信息中带上缺失的库名。
 - Linux 上动态链接器按 SONAME 复用已加载的库:两个插件版本依赖同一 SONAME 的不同实现时,后加载的会用到先加载的那份。不兼容的原生库版本必须有不同的 SONAME(系统库通常如此),写进插件作者指南。
 - 宿主若开了 hardened runtime(§3.4),原生库同样要满足签名要求。
@@ -242,8 +242,8 @@ E5 回答了 SDK 设计稿 V2 的主要问题:`RTLD_LOCAL` + 两级命名空间�
 | 经启动器启动,调用者环境中有 `DYLD_INSERT_LIBRARIES`,插入库的初始化函数记录所在进程 | 插入库可能在启动器中运行(不防),但不在宿主中运行 |
 | 插件依赖写成绝对路径的 SDK(复现 E3) | `dlopen` 前被拒绝,原因为依赖不符 |
 | 插件带 LC_RPATH、flat lookup、`@loader_path` 依赖 | 打包失败;手工打包的在加载前被拒绝 |
-| 插件动态链接一个系统原生库(如 `/usr/lib/libz.1.dylib`) | 正常加载;清单 `[native_deps]` 中有该库 |
-| 二进制的原生库依赖与清单 `[native_deps]` 不一致 | 加载前被拒绝 |
+| 插件动态链接一个系统原生库(如 `/usr/lib/libz.1.dylib`) | 正常加载;清单 `[plugin] native_deps` 中有该库 |
+| 二进制的原生库依赖与清单 `[plugin] native_deps` 不一致 | 加载前被拒绝 |
 | 宿主开 hardened runtime + `disable-library-validation` | 换代测试通过 |
 | 源文件带 quarantine,缓存为空 | 读取和写入缓存之前被拒绝,缓存中不出现该文件 |
 | 源文件带 quarantine,缓存中已有同哈希的干净条目 | 被拒绝(源文件检查不因缓存命中而跳过) |
@@ -330,6 +330,12 @@ W1 不依赖本文其他改动,可以立即开始。
 | C | Windows 验证 W1–W8 与 SDK 设计稿 §十一 记录。W1–W5、W7 不依赖其他 PR,立即开始;W6、W8 用 A2 之后的节名和夹具 | W6/W8 依赖 A2 |
 
 A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖。
+
+实现进度(2026-10-03):0b [#113](https://github.com/arcships/rutis/pull/113)、A1 [#114](https://github.com/arcships/rutis/pull/114)、
+A2 [#115](https://github.com/arcships/rutis/pull/115)、B [#116](https://github.com/arcships/rutis/pull/116) 已开 PR;C 进行中。
+与本文的差别:清单字段实现为 `[plugin]` 下的 `native_deps` 数组;Team ID 检查的接口是 `Loader::require_team_ids`;
+示例宿主在 macOS 上带 run path(指向 target 目录与工具链 libstd),以便测试开了 hardened runtime 的宿主;
+示例插件的初始化标记在 macOS 上放进 `__DATA,__mod_init_func`。
 
 ## 六、已决定事项(2026-10-03)
 
