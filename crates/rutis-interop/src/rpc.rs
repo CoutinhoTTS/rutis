@@ -1,10 +1,10 @@
 //! One ordered, bidirectional connection for invocation, await and owned references.
-//! Socket readers admit frames and pin references; they never execute plugin code.
+//! It runs on any `rutis_channel::Channel`, one frame per message.
+//! Readers admit frames and pin references; they never execute plugin code.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{BufRead, BufReader, Write};
-use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc, Mutex, Weak};
@@ -12,6 +12,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread::ThreadId;
 
 use rutis::BoxFuture;
+use rutis_channel::{Channel, ChannelError, Closer, Sender};
 use serde_json::Value as Json;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::{oneshot, watch, Notify};
@@ -71,6 +72,8 @@ impl Value {
     pub fn future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
         Self::future_inner(future, true)
     }
+    // Used by the Unix-only `server`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn control_future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
         Self::future_inner(future, false)
     }
@@ -400,7 +403,7 @@ fn protected(call: impl FnOnce() -> Reply) -> Reply {
 fn panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
     match panic.downcast::<Error>() {
         Ok(error) => *error,
-        Err(panic) => crate::server::native_error(
+        Err(panic) => crate::native_error(
             panic
                 .downcast_ref::<String>()
                 .cloned()
@@ -430,7 +433,7 @@ impl Drop for PathGuard {
 }
 
 struct Import {
-    peer: Weak<Peer>,
+    peer: Weak<ConnectionState>,
     id: u64,
     kind: Kind,
     grants: Mutex<u64>,
@@ -522,7 +525,7 @@ struct Calls {
 
 /// Cancels an async call whose future is dropped before it completes.
 struct CancelOnDrop {
-    peer: Weak<Peer>,
+    peer: Weak<ConnectionState>,
     id: String,
     done: bool,
 }
@@ -551,9 +554,12 @@ impl Drop for Flight {
 pub trait Dispatch: Send + Sync + 'static {
     fn invoke(&self, peer: &Connection, target: &str, method: &str, args: Value) -> Reply;
 }
-struct Peer {
-    writer: Mutex<UnixStream>,
-    closer: UnixStream,
+/// One connection's state, shared by its handles and its reader.
+struct ConnectionState {
+    writer: Mutex<Box<dyn Sender>>,
+    closer: Arc<dyn Closer>,
+    /// Prefixed to the reason the channel gives for its end; empty for none.
+    label: String,
     calls: Mutex<Calls>,
     exports: Mutex<Exports>,
     imports: Mutex<HashMap<u64, Weak<Import>>>,
@@ -564,36 +570,59 @@ struct Peer {
     ended: watch::Sender<bool>,
     activity: Arc<Activity>,
 }
-impl Drop for Peer {
+impl Drop for ConnectionState {
     fn drop(&mut self) {
-        let _ = self.writer.get_mut().unwrap().shutdown(Shutdown::Both);
+        self.closer.close("connection dropped");
+    }
+}
+
+/// The error that ends a session whose channel ended for `reason`.
+fn channel_ended(label: &str, reason: String) -> Error {
+    if label.is_empty() {
+        Error::Transport(reason)
+    } else {
+        Error::Transport(format!("{label}: {reason}"))
     }
 }
 
 #[derive(Clone)]
-pub struct Connection(Arc<Peer>);
+pub struct Connection(Arc<ConnectionState>);
 impl Connection {
+    /// A session over a Unix stream socket, one frame per line.
+    #[cfg(unix)]
     pub fn connect(stream: UnixStream, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
-        Self::connect_with(
-            stream,
-            dispatch,
-            Box::new(|| Error::Transport("peer disconnected".into())),
-        )
+        Self::open(Channel::unix(stream).map_err(transport)?, dispatch)
     }
 
     /// Like [`Connection::connect`]; `disconnected` builds the error that
     /// ends the session when the peer goes away, for example with the exit
     /// status of its process. It runs on the reader thread and may block.
+    #[cfg(unix)]
     pub fn connect_with(
         stream: UnixStream,
         dispatch: Arc<dyn Dispatch>,
         disconnected: Box<dyn FnOnce() -> Error + Send>,
     ) -> Result<Self, Error> {
-        stream.set_nonblocking(false).map_err(transport)?;
-        let reader = stream.try_clone().map_err(transport)?;
-        let peer = Self(Arc::new(Peer {
-            closer: stream.try_clone().map_err(transport)?,
-            writer: Mutex::new(stream),
+        let channel = Channel::unix(stream)
+            .map_err(transport)?
+            .with_end_reason(move || disconnected().to_string());
+        Self::open(channel, dispatch)
+    }
+
+    /// A session over any channel, one frame per message. It ends when the
+    /// channel does, with the reason the channel gives.
+    pub fn open(channel: Channel, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
+        let Channel {
+            sender,
+            mut receiver,
+            closer,
+            info,
+        } = channel;
+        let label = info.label;
+        let peer = Self(Arc::new(ConnectionState {
+            writer: Mutex::new(sender),
+            closer,
+            label: label.clone(),
             calls: Mutex::new(Calls::default()),
             exports: Mutex::new(Exports::default()),
             imports: Mutex::new(HashMap::new()),
@@ -611,15 +640,19 @@ impl Connection {
         std::thread::Builder::new()
             .name("rutis-interop-reader".into())
             .spawn(move || {
-                let result: Result<(), Error> = (|| {
-                    for line in BufReader::new(reader).lines() {
-                        let Ok(line) = line else { break };
-                        let Some(peer) = weak.upgrade().map(Self) else {
-                            return Ok(());
-                        };
-                        peer.receive(serde_json::from_str(&line).map_err(transport)?)?;
-                    }
-                    Err(disconnected())
+                let result: Result<(), Error> = (|| loop {
+                    let message = match receiver.recv() {
+                        Ok(Some(message)) => message,
+                        Ok(None) => return Err(channel_ended(&label, "peer disconnected".into())),
+                        Err(ChannelError::Closed { reason }) => {
+                            return Err(channel_ended(&label, reason))
+                        }
+                        Err(error) => return Err(transport(error)),
+                    };
+                    let Some(peer) = weak.upgrade().map(Self) else {
+                        return Ok(());
+                    };
+                    peer.receive(serde_json::from_slice(&message).map_err(transport)?)?;
                 })();
                 if let (Err(error), Some(peer)) = (result, weak.upgrade()) {
                     Self(peer).close(error);
@@ -650,7 +683,7 @@ impl Connection {
         // Interrupt a blocked write before taking the writer lock. Serialize
         // table teardown with encoding/sending so no export can be added after
         // teardown and no partial encoding rollback races the cleared table.
-        let _ = self.0.closer.shutdown(Shutdown::Both);
+        self.0.closer.close(&error.to_string());
         let writer = self.0.writer.lock().unwrap();
         let (waiting, incoming, awaiting) = {
             let mut calls = self.0.calls.lock().unwrap();
@@ -725,23 +758,30 @@ impl Connection {
             changed.await;
         }
     }
+    /// Write a frame that keeps both sides in step (a handshake, a release,
+    /// a cancellation): if it cannot be written, even because the channel
+    /// refused it, the session ends.
     fn write(&self, frame: Frame) -> Result<(), Error> {
         let result = {
             let mut writer = self.0.writer.lock().unwrap();
-            self.write_locked(&mut writer, frame)
+            self.write_locked(&mut **writer, frame)
         };
-        if let Err(error) = &result {
+        result.map_err(|unsent| {
+            let error = unsent.into_error();
             self.close(error.clone());
-        }
-        result
+            error
+        })
     }
-    fn write_locked(&self, writer: &mut UnixStream, frame: Frame) -> Result<(), Error> {
+    fn write_locked(&self, writer: &mut dyn Sender, frame: Frame) -> Result<(), Unsent> {
         if let Some(error) = &self.0.calls.lock().unwrap().closed {
-            return Err(error.clone());
+            return Err(Unsent::Ended(error.clone()));
         }
-        let mut bytes = serde_json::to_vec(&frame).map_err(transport)?;
-        bytes.push(b'\n');
-        writer.write_all(&bytes).map_err(transport)
+        let bytes = serde_json::to_vec(&frame).map_err(|error| Unsent::Ended(transport(error)))?;
+        writer.send(bytes).map_err(|error| match error {
+            ChannelError::Closed { reason } => Unsent::Ended(channel_ended(&self.0.label, reason)),
+            ChannelError::TooLarge { .. } => Unsent::Refused(Error::Value(error.to_string())),
+            error => Unsent::Ended(transport(error)),
+        })
     }
     fn send(&self, call: Operation, mut waiting: Waiting) -> Result<String, Error> {
         let mut writer = self.0.writer.lock().unwrap();
@@ -770,20 +810,22 @@ impl Connection {
                 }
             }
         }
+        // References the arguments grant, taken back if the frame is refused.
+        let mut grants = Vec::new();
         let frame = match &call {
             Operation::Invoke(target, method, args) => Frame::Invoke {
                 id: id.clone(),
                 path,
                 target: target.clone(),
                 method: method.clone(),
-                args: self.encode(args)?,
+                args: self.encode_granting(args, &mut grants)?,
             },
             Operation::Call(reference, method, args) => Frame::Call {
                 id: id.clone(),
                 path,
                 reference: *reference,
                 method: method.clone(),
-                args: self.encode(args)?,
+                args: self.encode_granting(args, &mut grants)?,
             },
             Operation::Get(reference, property) => Frame::Get {
                 id: id.clone(),
@@ -827,11 +869,22 @@ impl Connection {
             }
             calls.waiting.insert(id.clone(), waiting);
         }
-        let result = self.write_locked(&mut writer, frame);
+        let result = self.write_locked(&mut **writer, frame);
         drop(writer);
-        if let Err(error) = result {
-            self.close(error.clone());
-            return Err(error);
+        match result {
+            Ok(()) => {}
+            // The channel refused this message and stays usable: undo this
+            // call only. Work claimed for a synchronous waiter goes back to
+            // the queue (see `request_sync`).
+            Err(Unsent::Refused(error)) => {
+                self.0.calls.lock().unwrap().waiting.remove(&id);
+                self.release_grants(grants);
+                return Err(error);
+            }
+            Err(Unsent::Ended(error)) => {
+                self.close(error.clone());
+                return Err(error);
+            }
         }
         for (id, object) in blocked {
             self.finish_await(id, object.ready_on_blocked_executor());
@@ -840,13 +893,22 @@ impl Connection {
     }
     fn request_sync(&self, call: Operation) -> Reply {
         let (sender, receiver) = mpsc::channel();
-        self.send(
+        let sent = self.send(
             call,
             Waiting::Sync {
                 sender,
                 origins: Vec::new(),
             },
-        )?;
+        );
+        if let Err(error) = sent {
+            // Calls claimed for this one before it failed to go out.
+            for message in receiver.try_iter() {
+                if let Message::Invoke(incoming) = message {
+                    self.requeue(incoming);
+                }
+            }
+            return Err(error);
+        }
         loop {
             match receiver.recv().map_err(transport)? {
                 Message::Reply(result) => return result,
@@ -887,25 +949,33 @@ impl Connection {
     pub fn orphans(&self) -> u64 {
         self.0.calls.lock().unwrap().orphans
     }
-    fn encode(&self, value: &Value) -> Result<WireValue, Error> {
-        let mut grants = Vec::new();
-        let result = self.encode_inner(value, &mut grants);
+    /// Encode a value, adding the references it grants to `grants`. On an
+    /// error nothing stays granted.
+    fn encode_granting(&self, value: &Value, grants: &mut Vec<u64>) -> Result<WireValue, Error> {
+        let mut granted = Vec::new();
+        let result = self.encode_inner(value, &mut granted);
         if result.is_err() {
-            let mut exports = self.0.exports.lock().unwrap();
-            for id in grants {
-                let Some(entry) = exports.entries.get_mut(&id) else {
-                    continue;
-                };
-                entry.grants -= 1;
-                if entry.grants == 0 {
-                    let entry = exports.entries.remove(&id).unwrap();
-                    exports
-                        .identities
-                        .remove(&(Arc::as_ptr(&entry.object) as usize));
-                }
-            }
+            self.release_grants(granted);
+        } else {
+            grants.append(&mut granted);
         }
         result
+    }
+    /// Take back grants of a value that never reached the peer.
+    fn release_grants(&self, grants: Vec<u64>) {
+        let mut exports = self.0.exports.lock().unwrap();
+        for id in grants {
+            let Some(entry) = exports.entries.get_mut(&id) else {
+                continue;
+            };
+            entry.grants -= 1;
+            if entry.grants == 0 {
+                let entry = exports.entries.remove(&id).unwrap();
+                exports
+                    .identities
+                    .remove(&(Arc::as_ptr(&entry.object) as usize));
+            }
+        }
     }
     fn encode_inner(&self, value: &Value, grants: &mut Vec<u64>) -> Result<WireValue, Error> {
         Ok(match value {
@@ -1180,10 +1250,7 @@ impl Connection {
             call,
             _flight: flight,
         };
-        let handle = match &incoming.call {
-            Accepted::Call(object, _) | Accepted::Await(object) => object.executor.handle.clone(),
-            _ => self.0.executor.clone(),
-        };
+        let handle = self.executor_for(&incoming);
         let delivery = {
             let mut calls = self.0.calls.lock().unwrap();
             if let Some(error) = &calls.closed {
@@ -1223,19 +1290,46 @@ impl Connection {
             }
         };
         if let Err(id) = delivery {
-            let peer = self.clone();
-            handle.spawn(async move {
-                let incoming = peer.0.calls.lock().unwrap().incoming.remove(&id);
-                if let Some(incoming) = incoming {
-                    peer.execute(incoming, false);
-                }
-            });
+            self.run_queued(handle, id);
         } else if let Ok((waiter, incoming)) = delivery {
             // A dropped receiver may release imported arguments. Do not run
             // their destructors (and protocol writes) under the calls lock.
             waiter.send(Message::Invoke(incoming)).map_err(transport)?;
         }
         Ok(())
+    }
+    /// The executor an admitted call runs on when no synchronous caller
+    /// pumps it.
+    fn executor_for(&self, incoming: &Incoming) -> Handle {
+        match &incoming.call {
+            Accepted::Call(object, _) | Accepted::Await(object) => object.executor.handle.clone(),
+            _ => self.0.executor.clone(),
+        }
+    }
+    /// Run the queued call `id` on `handle`, unless a synchronous caller
+    /// claims it first.
+    fn run_queued(&self, handle: Handle, id: String) {
+        let peer = self.clone();
+        handle.spawn(async move {
+            let incoming = peer.0.calls.lock().unwrap().incoming.remove(&id);
+            if let Some(incoming) = incoming {
+                peer.execute(incoming, false);
+            }
+        });
+    }
+    /// Queue a call again that a synchronous caller had claimed for a call
+    /// the channel then refused.
+    fn requeue(&self, incoming: Incoming) {
+        let handle = self.executor_for(&incoming);
+        let id = incoming.id.clone();
+        {
+            let mut calls = self.0.calls.lock().unwrap();
+            if calls.closed.is_some() {
+                return;
+            }
+            calls.incoming.insert(id.clone(), incoming);
+        }
+        self.run_queued(handle, id);
     }
     fn execute(&self, incoming: Incoming, sync: bool) {
         if self.0.calls.lock().unwrap().closed.is_some() {
@@ -1303,25 +1397,66 @@ impl Connection {
         }
     }
     fn respond(&self, id: String, result: Reply) {
-        let result = {
+        let mut grants = Vec::new();
+        // The writer is held in this block only: taking back grants and
+        // closing the session (`close` takes the writer too) come after it,
+        // on every path.
+        let (delivered, written) = {
             let mut writer = self.0.writer.lock().unwrap();
             let frame = match &result {
-                Ok(value) => match self.encode(value) {
-                    Ok(value) => Frame::Return { id, value },
+                Ok(value) => match self.encode_granting(value, &mut grants) {
+                    Ok(value) => Frame::Return {
+                        id: id.clone(),
+                        value,
+                    },
                     Err(error) => Frame::Throw {
-                        id,
+                        id: id.clone(),
                         error: error.into(),
                     },
                 },
                 Err(error) => Frame::Throw {
-                    id,
+                    id: id.clone(),
                     error: error.clone().into(),
                 },
             };
-            self.write_locked(&mut writer, frame)
+            match self.write_locked(&mut **writer, frame) {
+                Ok(()) => (true, Ok(())),
+                // The channel refused the answer and stays usable: answer
+                // with the refusal instead.
+                Err(Unsent::Refused(error)) => (
+                    false,
+                    self.write_locked(
+                        &mut **writer,
+                        Frame::Throw {
+                            id,
+                            error: error.into(),
+                        },
+                    ),
+                ),
+                Err(unsent) => (false, Err(unsent)),
+            }
         };
-        if let Err(error) = result {
-            self.close(error);
+        if !delivered {
+            // What the undelivered answer granted.
+            self.release_grants(grants);
+        }
+        if let Err(unsent) = written {
+            self.close(unsent.into_error());
+        }
+    }
+}
+
+/// Why a frame was not written.
+enum Unsent {
+    /// The channel refused this message and stays usable.
+    Refused(Error),
+    /// The channel or the session has ended.
+    Ended(Error),
+}
+impl Unsent {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Refused(error) | Self::Ended(error) => error,
         }
     }
 }
@@ -1340,4 +1475,6 @@ fn transport(error: impl std::fmt::Display) -> Error {
 }
 
 #[cfg(test)]
+mod channel_tests;
+#[cfg(all(test, unix))]
 mod tests;

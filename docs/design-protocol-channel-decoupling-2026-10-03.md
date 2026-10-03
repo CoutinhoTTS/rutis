@@ -1,6 +1,6 @@
 # 网络栈：协议与通道解耦（设计稿）
 
-状态：设计稿，未实现。日期：2026-10-03。
+状态：D1 已实现（`crates/rutis-channel`，会话改跑在通道上，`Session` 从 `Process` 拆出，Node 侧分帧归通道）；D2、D3 未实现。日期：2026-10-03。
 依据：[兼容层设计](design-protocol-plugin-mount.md)（§3 线协议）、[挂载 Cordis 插件：需求](requirements-protocol-plugins.md)。
 使用方：[远程插件：跨框架节点与对称协议](design-remote-plugins-2026-10-03.md)（下称"节点稿"）。
 基准：`main` `d68471f`。
@@ -134,7 +134,8 @@ pub struct Channel {
 
 pub trait Sender: Send {
     /// 发送一条消息；通道施加背压时阻塞。
-    fn send(&mut self, message: &[u8]) -> Result<(), ChannelError>;
+    /// 按值传入：字节流通道可以就地加换行，不必再复制一次。
+    fn send(&mut self, message: Vec<u8>) -> Result<(), ChannelError>;
 }
 
 pub trait Receiver: Send {
@@ -149,7 +150,7 @@ pub trait Closer: Send + Sync {
 
 pub struct ChannelInfo {
     pub transport: &'static str,    // "unix" | "fd" | "memory" | "websocket" …
-    pub peer: Option<PeerId>,       // 连接器验证过的对端节点 id；本机子节点由父节点指定
+    pub peer: Option<String>,       // 连接器验证过的对端节点 id；本机子节点由父节点指定
     pub label: String,              // 用在错误信息里的名字，例如 "peer mac"
 }
 
@@ -170,7 +171,7 @@ pub enum ChannelError {
 
 **会话侧的变化**：
 
-- 读线程循环调用 `recv()`，解码后交给现有的 `receive`。`Closed { reason }` 映射为 `Error::Transport("<label>: <reason>")`。
+- 读线程循环调用 `recv()`，解码后交给现有的 `receive`。`Closed { reason }` 映射为 `Error::Transport("<label>: <reason>")`；label 为空时不加前缀，所以本机通道的错误文本和以前一样。
 - 发送超限按编码失败处理：请求直接向调用方返回错误；应答改发错误帧，现在的 `respond` 已经有这条路径。
 
 ### 5.4 Node 接口
@@ -191,7 +192,7 @@ pub enum ChannelError {
 ## 六、分帧与编码
 
 - **编码（协议层）**：JSON，紧凑输出。字符串里的换行在 JSON 中已经转义，所以按行分帧是安全的。编码先做成内部接缝，不开放替换，因为现在只有 JSON 一种。
-- **分帧（通道层）**：字节流通道（Unix socket、继承的 fd）按换行分帧，与 v1 线格式一致。消息型通道（WebSocket）一条消息就是一帧，不加换行。
+- **分帧（通道层）**：字节流通道（Unix socket、继承的 fd）按换行分帧，与现在的线格式一致。消息型通道（WebSocket）一条消息就是一帧，不加换行。
 - **以后的二进制编码**：字节流通道改用长度前缀分帧，WebSocket 改用二进制消息。编码由连接器在建立会话时告诉两端，不在帧里协商，因为 `hello` 本身必须先能解码。
 
 ## 七、连接器
@@ -211,7 +212,7 @@ pub enum ChannelError {
 - Rust 侧：用 `UnixStream::pair()`，在 `pre_exec` 里 `dup2` 到 fd 3。只让这一个 fd 被子进程继承，其余照常 `CLOEXEC`。
 - 兼容：cordis 桥包在 `package.json` 里声明支持的通道（例如 `"rutisChannels": ["unix", "fd"]`），构建时和 `rutisProtocol` 一起核对；未声明 `fd` 的旧版本走路径方式。
 
-**结束原因**：`spawn` 连接器的 `Receiver` 在 EOF 时最多等 1 秒取得退出状态（也就是现在的 `Child::disconnected`），然后返回 `Closed { reason: "Cordis process exited with signal: 9 (SIGKILL)" }`。会话拿到的错误和现在逐字相同。
+**结束原因**：`spawn` 连接器的 `Receiver` 在 EOF 时最多等 1 秒取得退出状态（也就是现在的 `Child::disconnected`），然后返回 `Closed { reason: "Cordis process exited with signal: 9 (SIGKILL)" }`。会话拿到的错误和现在逐字相同。D1 里由 `Channel::with_end_reason` 实现：`Process::mount` 把它包在 Unix 通道外面。
 
 **在框架里怎么用**：连接器不被业务代码直接调用，而是由传输插件包成 `Transport#<种类>` 服务，链接插件依赖它（节点稿 §4.3）：
 
@@ -236,7 +237,7 @@ pub enum ChannelError {
 | 项 | 规定 |
 | --- | --- |
 | 地址 | 监听方配置，例如 `wss://main.example.com/rutis` |
-| 子协议 | `rutis.<会话协议主版本>`，v2 即 `rutis.2`；不符时在升级握手阶段拒绝 |
+| 子协议 | `rutis.<会话协议主版本>`，节点稿的对称协议 v3 即 `rutis.3`；不符时在升级握手阶段拒绝 |
 | TLS | 非回环地址必须是 `wss`；可以由前置反向代理终止 TLS，监听方只听回环地址。拨号方校验对方证书（系统根证书或配置的 CA） |
 | 鉴权 | 升级请求带 `Authorization: Bearer <token>`，或者用客户端证书。监听方经身份插件把凭据映射成对端节点 id，放进 `ChannelInfo.peer`。拨号方按配置知道自己连的是哪个节点，握手时核对对方 `hello` 里的节点 id |
 | 消息 | 一帧一条文本消息（UTF-8 JSON，不带换行）；二进制消息留给以后的二进制编码 |
@@ -273,14 +274,14 @@ pub enum ChannelError {
 
 ## 十二、兼容与版本
 
-- D1、D2 都不改线格式：Unix 和继承 fd 的字节流上仍是逐行 JSON，`rutisProtocol` 仍为 1。启动参数兼容裸路径；fd 方式按 §七 的声明启用。
-- WebSocket 子协议跟着会话协议的主版本走（`rutis.2`）。通道层自身的变化不影响会话协议，反之亦然。
+- D1、D2 都不改线格式，也不改 `rutisProtocol`（现为 2，是 #111 的发布为 `Mount::anchor` 升的，与 D1 无关）：Unix 和继承 fd 的字节流上仍是逐行 JSON。启动参数兼容裸路径；fd 方式按 §七 的声明启用。
+- WebSocket 子协议跟着会话协议的主版本走（`rutis.3`）。通道层自身的变化不影响会话协议，反之亦然。
 
 ## 十三、分阶段
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| D1 | 新建 `rutis-channel`（契约、Unix 字节流、memory）；`rpc.rs` 改用 `Channel`；从 `Process` 拆出会话部分；会话层内部的 `Peer`（`rpc.rs` 的 struct、`peer.mjs`）改名；Node 侧编码去掉换行，worker 的通道代码模块化（路径方式） | 现有测试全部通过；线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 去掉 `cfg(unix)` 后能编译 |
+| D1（已实现） | 新建 `rutis-channel`（契约、Unix 字节流、memory）；`rpc.rs` 改用 `Channel`；从 `Process` 拆出会话部分；会话层内部的 `Peer`（`rpc.rs` 的 struct、`peer.mjs`）改名；Node 侧编码去掉换行，worker 的通道代码模块化（路径方式） | 现有测试全部通过；线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 去掉 `cfg(unix)` 后能编译 |
 | D2 | 继承 fd 的 `spawn`（Rust 与 Node）；装饰器；通道契约测试；会话矩阵 | 契约测试与会话矩阵在所有本地通道上通过 |
 | D3 | WebSocket 绑定的 Rust 实现（`rutis-channel` 的 `websocket` 特性）与 JS 实现（cordis 桥包）；`dial` / `listen` 连接器（由节点稿的 WebSocket 传输插件对外提供） | WebSocket 跨实现测试通过；会话矩阵在回环 WebSocket 上通过 |
 

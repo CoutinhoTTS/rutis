@@ -42,9 +42,9 @@ mod objects;
 mod process;
 #[cfg(unix)]
 mod projection;
-#[cfg(unix)]
+// The session layer runs on any channel; only launching processes and the
+// Unix socket channel are platform specific.
 mod protocol;
-#[cfg(unix)]
 pub mod rpc;
 #[cfg(unix)]
 mod runtime;
@@ -56,13 +56,23 @@ pub use events::{EmitToCordis, EventSink, Events};
 #[cfg(unix)]
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
-pub use process::{Host, HostDispatch, Mount, Process, ServiceEvents};
+pub use process::{Host, HostDispatch, Mount, Process, ServiceEvents, Session};
 #[cfg(unix)]
 pub use projection::Projection;
 #[cfg(unix)]
 pub use runtime::{host_key, CordisRuntime, CordisRuntimePlugin, RuntimeHandle, RuntimeState};
+pub use rutis_channel;
 pub use serde;
 pub use serde_json;
+
+/// A Rust failure as the peer sees it: a `RustError`.
+pub fn native_error(error: impl std::fmt::Display) -> Error {
+    Error::Remote {
+        name: "RustError".into(),
+        message: error.to_string(),
+        graph: None,
+    }
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
