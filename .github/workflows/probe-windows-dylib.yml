@@ -14,15 +14,17 @@ env:
   CARGO_TERM_COLOR: never
   RUTIS_SDK_ARTIFACT_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
 
+# Profiles: release; dev; dev with opt-level 2 for rutis-sdk only; dev with
+# opt-level 2 for every non-workspace package (all SDK dependencies).
 jobs:
   w1-real-sdk:
     name: W1 real SDK (${{ matrix.profile }})
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        profile: [release, dev]
+        profile: [release, dev, dev-sdk-o2, dev-deps-o2]
     defaults:
       run:
         shell: bash
@@ -31,7 +33,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - name: Toolchain
         run: rustc -vV && cargo -V
+      # rutis-cli itself fails to compile on Windows (rutis_dylib::Loader is
+      # Linux-only), but Cargo has already linked rutis_sdk.dll for its graph.
       - name: Try the real host anchor (rutis-cli --features dylib-plugins)
+        if: matrix.profile == 'release' || matrix.profile == 'dev'
         continue-on-error: true
         run: |
           flag=""; [ "${{ matrix.profile }}" = release ] && flag="--release"
@@ -40,15 +45,19 @@ jobs:
           code=$?
           grep -E '^error|LNK[0-9]+' rutis-cli.log | head -30
           echo "RESULT W1.rutis-cli-build[${{ matrix.profile }}]: exit=$code"
-          ls -la target/*/rutis_sdk.dll 2>/dev/null || true
           exit 0
       - name: Build the probe anchor (same graph minus rutis-dylib)
         run: |
-          flag=""; [ "${{ matrix.profile }}" = release ] && flag="--release"
+          case "${{ matrix.profile }}" in
+            release) flags=(--release);;
+            dev) flags=();;
+            dev-sdk-o2) flags=(--config 'profile.dev.package.rutis-sdk.opt-level=2');;
+            dev-deps-o2) flags=(--config 'profile.dev.package."*".opt-level=2');;
+          esac
           cp Cargo.lock docs/probes/windows-dylib/w1-anchor/Cargo.lock
           export CARGO_TARGET_DIR="$PWD/target-w1"
           set +e
-          cargo build --manifest-path docs/probes/windows-dylib/w1-anchor/Cargo.toml $flag > anchor.log 2>&1
+          cargo build --manifest-path docs/probes/windows-dylib/w1-anchor/Cargo.toml "${flags[@]}" > anchor.log 2>&1
           code=$?
           tail -5 anchor.log
           grep -E 'LNK[0-9]+|^error' anchor.log | head -30
@@ -63,6 +72,10 @@ jobs:
           ls -la $dir/rutis_sdk.dll $dir/rutis_sdk.dll.lib $dir/w1-anchor.exe
           ./target-pecount/release/pecount.exe exports $dir/rutis_sdk.dll | tee exports.txt
           echo "RESULT W1[${{ matrix.profile }}]: $(head -1 exports.txt)"
+          real=target/$([ "${{ matrix.profile }}" = release ] && echo release || echo debug)/rutis_sdk.dll
+          if [ -f "$real" ] && [ "${{ matrix.profile }}" != dev-sdk-o2 ] && [ "${{ matrix.profile }}" != dev-deps-o2 ]; then
+            echo "RESULT W1.rutis-cli-graph[${{ matrix.profile }}]: $(./target-pecount/release/pecount.exe exports $real | head -1)"
+          fi
           dumpbin -nologo -exports $dir/rutis_sdk.dll | grep -E 'number of (functions|names)'
           echo "W4 dumpbin -dependents rutis_sdk.dll:"
           dumpbin -nologo -dependents $dir/rutis_sdk.dll | sed -n '/Image has the following dependencies/,/Summary/p'
@@ -83,6 +96,8 @@ jobs:
       matrix:
         profile: [release, dev]
         variant: [base, serde, misc, web, all]
+        include:
+          - { variant: all, profile: dev-deps-o2 }
     defaults:
       run:
         shell: bash
@@ -91,14 +106,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - name: Build
         run: |
-          flag=""; [ "${{ matrix.profile }}" = release ] && flag="--release"
+          case "${{ matrix.profile }}" in
+            release) flags=(--release);;
+            dev) flags=();;
+            dev-deps-o2) flags=(--config 'profile.dev.package."*".opt-level=2' --config 'profile.dev.package.rutis-sdk-copy.opt-level=2');;
+          esac
           case "${{ matrix.variant }}" in
-            base) feats="";; serde) feats="--features serde";; misc) feats="--features misc";;
-            web) feats="--features web";; all) feats="--features serde,misc,web";;
+            base) feats=();; serde) feats=(--features serde);; misc) feats=(--features misc);;
+            web) feats=(--features web);; all) feats=(--features serde,misc,web);;
           esac
           export CARGO_TARGET_DIR="$PWD/target-g"
           set +e
-          cargo build --manifest-path docs/probes/windows-dylib/w1-growth/Cargo.toml -p anchor $flag $feats > build.log 2>&1
+          cargo build --manifest-path docs/probes/windows-dylib/w1-growth/Cargo.toml -p anchor "${flags[@]}" "${feats[@]}" > build.log 2>&1
           code=$?
           tail -5 build.log
           grep -E 'LNK[0-9]+|^error' build.log | head -30

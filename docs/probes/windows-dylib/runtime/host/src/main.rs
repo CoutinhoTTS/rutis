@@ -441,6 +441,34 @@ mod imp {
                 false
             }
         };
+        // Hold the file open with share mode READ only (as a launcher would for
+        // the bundle files), then load it: rename/delete/write must now fail.
+        let c_dir = workdir.join("cache").join("cccc");
+        std::fs::create_dir_all(&c_dir).unwrap();
+        let c = c_dir.join("greeter.dll");
+        std::fs::copy(plugin, &c).unwrap();
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().read(true).share_mode(1 /* FILE_SHARE_READ */).open(&c)
+        };
+        match held {
+            Ok(_handle) => {
+                let hc = load(&c);
+                let c_rename = err(std::fs::rename(&c, c_dir.join("moved.dll")));
+                let c_delete = err(std::fs::remove_file(&c));
+                println!(
+                    "W7 held(share=READ): load={} rename={c_rename} delete={c_delete}",
+                    match hc { Ok(_) => "ok".to_string(), Err(e) => format!("error {e}") }
+                );
+                println!(
+                    "RESULT W7.held: load_ok={} rename_denied={} delete_denied={}",
+                    hc.is_ok(),
+                    c_rename.starts_with("denied"),
+                    c_delete.starts_with("denied")
+                );
+            }
+            Err(e) => println!("RESULT W7.held: could not open with share=READ: {e}"),
+        }
         println!("W7 overwrite={overwrite}");
         println!("W7 copy_over={copy_over}");
         println!("W7 delete={delete}");

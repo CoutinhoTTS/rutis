@@ -152,5 +152,52 @@ Write-Host "W6 sections of greeter.dll (release, MSVC link.exe):"
 # W7 -------------------------------------------------------------------------
 Run 'W7' $host_exe @('w7', "$t1/greeter.dll", (Join-Path $Work 'w7'))
 
+# W8 with the real SDK and the greeter fixture copy ----------------------------
+Push-Location (Join-Path $probe 'w8-real')
+$env:CARGO_TARGET_DIR = Join-Path $Work 't8'
+$env:RUTIS_SDK_ARTIFACT_SHA256 = '0' * 64
+cargo build --release -p w8-real-host -p w8-real-greeter
+$built8 = $LASTEXITCODE
+Remove-Item Env:CARGO_TARGET_DIR
+Pop-Location
+if ($built8 -eq 0) {
+    $t8 = Join-Path $Work 't8/release'
+    $app8 = Join-Path $Work 'app-real'
+    New-Item -ItemType Directory $app8 | Out-Null
+    Copy-Item "$t8/w8-real-host.exe", "$t8/rutis_sdk.dll", $stdFile.FullName $app8
+    $p8 = Join-Path $cache "real-$((Sha "$t8/greeter.dll").Substring(0, 16))/greeter.dll"
+    New-Item -ItemType Directory (Split-Path $p8) | Out-Null
+    Copy-Item "$t8/greeter.dll" $p8
+    Run 'W8 real' (Join-Path $app8 'w8-real-host.exe') @($p8, (Join-Path $Work 'drop-marker.txt'))
+    Write-Host "W8 real greeter.dll sections (export_plugin! uses .note.rutis.meta today):"
+    & $pecount sections $p8
+    Write-Host "W8 real rutis_sdk.dll (release, built with this host) exports:"
+    & $pecount exports "$t8/rutis_sdk.dll" | Select-Object -First 1
+} else {
+    Write-Host "RESULT W8.real: FAIL build exit $built8"
+}
+
+# Side check: is sdk.dll byte-identical across target dirs (cf. Linux repro)?
+Push-Location $runtime
+$variants = [ordered]@{
+    'remap'                 = ''
+    'remap+Brepro'          = '-C link-arg=/Brepro'
+    'remap+Brepro+pdbalt'   = '-C link-arg=/Brepro -C link-arg=/PDBALTPATH:%_PDB%'
+}
+foreach ($name in $variants.Keys) {
+    $hashes = @()
+    foreach ($n in 1, 2) {
+        $td = Join-Path $Work "repro-$($name.Replace('+','-'))-$n"
+        $env:CARGO_TARGET_DIR = $td
+        $env:RUSTFLAGS = "--remap-path-prefix=$td=/target --remap-path-prefix=$runtime=/src $($variants[$name])"
+        cargo build --release -q -p host 2>&1 | Out-Null
+        $hashes += (Sha "$td/release/sdk.dll")
+    }
+    Write-Host "RESULT repro[$name]: identical=$($hashes[0] -eq $hashes[1]) $($hashes -join ' ')"
+}
+Remove-Item Env:RUSTFLAGS
+Remove-Item Env:CARGO_TARGET_DIR
+Pop-Location
+
 # Export counts of the probe SDK, for scale.
 Write-Host "probe sdk.dll exports:"; & $pecount exports "$t1/sdk.dll"

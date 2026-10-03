@@ -35,8 +35,40 @@ fn crate_of(name: &str) -> String {
         }
         return "<legacy?>".into();
     }
-    if name.starts_with("_R") {
-        return "<v0>".into();
+    if let Some(rest) = name.strip_prefix("_R") {
+        // v0 mangling: the first crate root `C[s<base62>_]<len><ident>`.
+        let b = rest.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'C' {
+                let mut j = i + 1;
+                if j < b.len() && b[j] == b's' {
+                    j += 1;
+                    while j < b.len() && b[j].is_ascii_alphanumeric() {
+                        j += 1;
+                    }
+                    if j < b.len() && b[j] == b'_' {
+                        j += 1;
+                    } else {
+                        i += 1;
+                        continue;
+                    }
+                }
+                let start = j;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > start {
+                    let len: usize = rest[start..j].parse().unwrap_or(0);
+                    let j = if j < b.len() && b[j] == b'_' { j + 1 } else { j };
+                    if let Some(ident) = rest.get(j..j + len) {
+                        return ident.to_string();
+                    }
+                }
+            }
+            i += 1;
+        }
+        return "<v0?>".into();
     }
     "<unmangled>".into()
 }
