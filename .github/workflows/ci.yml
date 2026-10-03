@@ -125,7 +125,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/target-${{ matrix.slot }}
         run: |
           mkdir -p "$CARGO_HOME"
-          export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/target -C link-arg=-Wl,-rpath,\$ORIGIN"
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/target"
           export RUTIS_SDK_LOCKFILE="$PWD/Cargo.lock"
           # Build the SDK through the host anchor, as tools/build-dylib-bundle.sh does.
           export RUTIS_SDK_ARTIFACT_SHA256="$(printf '0%.0s' {1..64})"

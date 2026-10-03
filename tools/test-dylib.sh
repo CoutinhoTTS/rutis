@@ -7,7 +7,7 @@ target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
 export CARGO_TARGET_DIR="$target_dir"
 export RUTIS_SDK_LOCKFILE="$repo_dir/Cargo.lock"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo -C link-arg=-Wl,-rpath,\$ORIGIN"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo"
 build_all() {
   cargo build --release -p rutis-dylib -p rutis-greeter-fixture-v1 -p rutis-greeter-fixture-v2 \
     --lib --examples --features rutis-dylib/loader,rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export
@@ -100,6 +100,24 @@ if RUTIS_PLUGIN_INIT_MARKER="$base/l1-init-marker" "$host" --load-only "$base/ba
 fi
 if test -e "$base/l1-init-marker" || ! grep -Fq 'SDK mismatch' "$base/l1.stderr"; then
   cat "$base/l1.stderr" >&2
+  exit 1
+fi
+# The manifest must declare exactly the native libraries the binary links;
+# the check runs before dlopen, so the initializer must not run either.
+grep -Fq 'native_deps = [' "$base/v1/plugin.toml"
+cp -a "$base/v1" "$base/bad-deps"
+sed -i 's/^native_deps = .*/native_deps = []/' "$base/bad-deps/plugin.toml"
+if RUTIS_PLUGIN_INIT_MARKER="$base/deps-init-marker" "$host" --load-only "$base/bad-deps" > "$base/deps.stdout" 2> "$base/deps.stderr"; then
+  echo "undeclared native libraries were accepted" >&2
+  exit 1
+fi
+if test -e "$base/deps-init-marker" || ! grep -Fq 'dependencies: binary links native libraries' "$base/deps.stderr"; then
+  cat "$base/deps.stderr" >&2
+  exit 1
+fi
+# Plugins are built without a run path now that only the host and SDK set one.
+if readelf -d "$base/v1/libgreeter.so" | grep -Eq 'RUNPATH|RPATH'; then
+  echo "plugin carries a run path" >&2
   exit 1
 fi
 echo "smoke artifacts: $base"

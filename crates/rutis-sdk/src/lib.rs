@@ -10,6 +10,10 @@ pub use tokio;
 
 pub type ConfigValue = serde_json::Value;
 
+// Must stay `System` on every platform. With a dynamic libstd, libstd's own
+// allocations do not go through this allocator on Mach-O and Windows, and a
+// custom allocator crashes on Linux too (rust-lang/rust#100781, #114518).
+// See docs/design-dylib-macos-windows-2026-10-03.md §3.5.
 #[global_allocator]
 static SDK_ALLOCATOR: std::alloc::System = std::alloc::System;
 
@@ -109,8 +113,12 @@ macro_rules! export_plugin {
             $crate::is_sha256(RUTIS_PLUGIN_ARTIFACT_SHA256),
             "invalid SDK artifact SHA-256"
         );
+        // Section names per object format; rutis-dylib-meta reads them back.
+        // PE image section names are limited to 8 bytes.
         #[used]
-        #[link_section = ".note.rutis.meta"]
+        #[cfg_attr(target_os = "linux", link_section = ".note.rutis.meta")]
+        #[cfg_attr(target_vendor = "apple", link_section = "__DATA,__rutis_meta")]
+        #[cfg_attr(windows, link_section = ".rutism")]
         static RUTIS_BOOT_META: [u8; $crate::BOOT_SIZE] = $crate::boot_meta(
             $crate::SDK_ID,
             RUTIS_PLUGIN_ARTIFACT_SHA256,

@@ -10,7 +10,7 @@ target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
 export CARGO_TARGET_DIR="$target_dir"
 export RUTIS_SDK_LOCKFILE="$repo_dir/Cargo.lock"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo -C link-arg=-Wl,-rpath,\$ORIGIN"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo"
 
 # Resolve the SDK with the exact host feature graph. The first host binary is
 # throwaway; the second pass binds the SDK artifact that graph produced.

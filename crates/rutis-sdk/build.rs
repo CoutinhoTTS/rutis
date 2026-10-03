@@ -6,6 +6,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Link arguments belong to this artifact rather than to RUSTFLAGS: a
+    // plugin build must reproduce the SDK byte for byte, and RUSTFLAGS would
+    // also reach the plugin itself, which must not carry a run path.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    }
     // Cargo does not expose the invoking workspace lockfile to a dependency's
     // build script. Release tooling passes the actual resolver lock explicitly;
     // ordinary downstream builds can still compile without one.

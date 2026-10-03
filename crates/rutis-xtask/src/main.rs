@@ -80,9 +80,14 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     let sdk = table(&release, "sdk")?;
     let sdk_hash = string(sdk, "artifact_sha256")?;
     let sdk_target = string(sdk, "target")?;
-    if sha256_file(&sdk_file)? != sdk_hash {
+    let sdk_bytes = fs::read(&sdk_file).map_err(|e| format!("{}: {e}", sdk_file.display()))?;
+    if sha256_bytes(&sdk_bytes) != sdk_hash {
         return Err("SDK file differs from SDK release manifest".into());
     }
+    let std_library = rutis_dylib_meta::needed_libraries(&sdk_bytes, sdk_target)?
+        .into_iter()
+        .find(|name| name.starts_with("libstd-"))
+        .ok_or("the SDK does not link a dynamic libstd")?;
     let cargo_toml = read_toml(&manifest)?;
     let package = table(&cargo_toml, "package")?;
     check_shared_duplicates(&manifest)?;
@@ -103,7 +108,7 @@ fn run(raw: Vec<String>) -> Result<(), String> {
             };
             let cargo_home = canonical(&cargo_home).unwrap_or(cargo_home);
             let flags = format!(
-                "{} --remap-path-prefix={}=/src --remap-path-prefix={}=/target --remap-path-prefix={}=/cargo -C link-arg=-Wl,-rpath,$ORIGIN",
+                "{} --remap-path-prefix={}=/src --remap-path-prefix={}=/target --remap-path-prefix={}=/cargo",
                 env::var("RUSTFLAGS").unwrap_or_default(),
                 repo.display(),
                 target_dir.display(),
@@ -146,6 +151,15 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     let bytes = fs::read(&library).map_err(|e| format!("{}: {e}", library.display()))?;
     check_allocator(&bytes, sdk_target)?;
     let boot = rutis_dylib_meta::read_boot(&bytes, sdk_target)?;
+    let sdk_library = rutis_dylib_meta::library_file_name("rutis_sdk", sdk_target)?;
+    let native_deps = rutis_dylib_meta::check_plugin_dependencies(
+        &bytes,
+        sdk_target,
+        &rutis_dylib_meta::SharedLibraries {
+            sdk: &sdk_library,
+            std: &std_library,
+        },
+    )?;
     if boot.sdk_id != string(sdk, "id")? || boot.sdk_artifact != sdk_hash {
         return Err("plugin boot identity differs from the published SDK".into());
     }
@@ -180,11 +194,12 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     }
     let q = |value: &str| toml::Value::String(value.to_owned()).to_string();
     let mut content = format!(
-        "[plugin]\nid = {}\nversion = {}\nlibrary = {}\nlibrary_sha256 = {}\n\n[sdk]\nversion = {}\nid = {}\nartifact_sha256 = {}\n\n[interfaces]\n",
+        "[plugin]\nid = {}\nversion = {}\nlibrary = {}\nlibrary_sha256 = {}\nnative_deps = {}\n\n[sdk]\nversion = {}\nid = {}\nartifact_sha256 = {}\n\n[interfaces]\n",
         q(&boot.id),
         q(&boot.version),
         q(&name),
         q(&library_sha),
+        toml::Value::Array(native_deps.iter().map(|d| toml::Value::String(d.clone())).collect()),
         q(string(sdk, "version")?),
         q(&boot.sdk_id),
         q(&boot.sdk_artifact),
