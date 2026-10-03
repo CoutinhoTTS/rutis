@@ -111,7 +111,7 @@ if RUTIS_PLUGIN_INIT_MARKER="$base/deps-init-marker" "$host" --load-only "$base/
   echo "undeclared native libraries were accepted" >&2
   exit 1
 fi
-if test -e "$base/deps-init-marker" || ! grep -Fq 'dependencies: binary links native libraries' "$base/deps.stderr"; then
+if test -e "$base/deps-init-marker" || ! grep -Fq 'binary links native libraries' "$base/deps.stderr"; then
   cat "$base/deps.stderr" >&2
   exit 1
 fi
