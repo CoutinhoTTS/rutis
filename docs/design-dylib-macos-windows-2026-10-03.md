@@ -42,7 +42,7 @@ v1、v2 是同一个 crate 名,分别在两个 target 目录中构建。原型�
 | E10 | hardened runtime + `com.apple.security.cs.disable-library-validation` | DYLD_* 仍被忽略,SDK 与插件正常加载 | 宿主侧纵深防御选项 |
 | E11 | 插件带 `com.apple.quarantine` 属性后 `dlopen` | 调用**一直不返回**(Gatekeeper 评估,无界面时卡住);`cp` 会把该属性复制到目标文件 | `dlopen` 前检查实际要打开的文件(§3.2) |
 | E12 | 插件导出表中的 weak 定义 | 原型插件中没有 Rust 符号的 weak 定义;工具链自带的 libstd 有 `___isOSVersionAtLeast` 等 compiler-rt 的 weak 定义 | weak 检查只针对 Rust 修饰名(§3.5) |
-| E13 | 启动器(未开 hardened runtime)环境中有 `DYLD_INSERT_LIBRARIES` | 插入库的初始化函数**在启动器 main 之前**执行;启动器用 `-o runtime` 重签后不再执行,main 中也看不到任何 DYLD_* | 启动器必须以 hardened runtime 签名,剥离 DYLD_* 由 dyld 完成(§3.4) |
+| E13 | 启动器(未开 hardened runtime)环境中有 `DYLD_INSERT_LIBRARIES` | 插入库的初始化函数**在启动器 main 之前**执行;启动器用 `-o runtime` 重签后不再执行,main 中也看不到任何 DYLD_* | 注入启动器本身属于“控制进程加载器”,在 SDK 设计稿 §5.4 声明的防护范围之外;启动器只需保证 DYLD_* 不传给宿主(§3.4) |
 | E14 | SDK 中放一个计数的 `#[global_allocator]` | 宿主、插件的分配经过它;**libstd 内部的分配不经过**(`current_dir()`、`read_to_string()` 计数不变)。`nm -m` 显示 libstd 自己导出 `___rust_alloc`,宿主和插件绑定 `(from libsdk)` | 两级命名空间下分配器被拆成两份;SDK 分配器只能是 `System`(§3.5、§八 R1) |
 | E15 | 对 linker-signed 插件执行 `install_name_tool -id`、`strip -x` | `codesign -v` 仍通过,宿主正常加载;Apple 工具会自动重签 linker-signed 的 ad-hoc 签名 | 事后修改不会破坏签名,但会改变字节;仍然在链接时设定(§3.4) |
 | E16 | `DYLD_X=… /usr/bin/env prog`、`/usr/bin/env DYLD_X=… prog`、`/bin/sh -c` | 第一种和第三种被删掉;第二种生效 | SIP 只在执行受保护的系统二进制时清除;E7 的情形真实存在 |
@@ -156,23 +156,23 @@ Linux 没有这个问题:rustc 生成的 `DT_NEEDED` 只是文件名,glibc 按�
 ### 3.4 启动器与代码签名
 
 **修正 issue 原文。** issue 写“SIP 会清除 DYLD_* 环境变量,因此不能依赖环境变量”。后半句对:发布目录靠 `@rpath`/`@loader_path` 指定,
-不靠 `DYLD_LIBRARY_PATH`。前半句不对:SIP 只在执行受保护的系统二进制时清除(E16),E7 中恶意 SDK 在宿主 main 之前运行。
-E13 进一步表明,启动器本身同样会被 `DYLD_INSERT_LIBRARIES` 注入,而且发生在启动器的 main 之前,启动器代码里怎么清理都来不及。
+不靠 `DYLD_LIBRARY_PATH`。前半句不对:SIP 只在执行受保护的系统二进制时清除(E16)。调用者环境中的 DYLD_* 能到达宿主,
+E7 中一个放错的 SDK 在宿主 main 之前就运行了。
 
-**macOS 启动器以 ad-hoc + hardened runtime 签名(`codesign -s - -o runtime`)。** 这样 dyld 在启动器启动时就忽略并删除所有 DYLD_*(E13)。
-启动器只链接 libSystem,library validation 对它没有代价;启动器的哈希不被任何产物绑定,链接后再签名不影响其他校验。
-由此:
+**防护范围与 SDK 设计稿 §5.4 相同:防部署和环境配置出错,不防能控制进程加载器的攻击者。** 在 macOS 上,要防的典型情况是
+开发机环境里留着 `DYLD_LIBRARY_PATH` 或 `DYLD_INSERT_LIBRARIES`,指向另一份 SDK 构建。这些变量对启动器本身没有影响(启动器不链接 SDK),
+有影响的是被启动的宿主。所以启动器的做法与 Linux 清除 `LD_*` 相同:
 
 1. 启动器校验宿主、SDK、libstd 的哈希,与 Linux 相同。
-2. 启动器不需要也无法转存 DYLD_*:它们在 main 之前就被删了。所以 macOS 上**调用者的 DYLD_* 不会传给宿主及其子进程**,文档中写明。
-   这和 Linux 上“转存 `LD_*`、宿主恢复”的行为不同;价值也很小,因为常见的子进程启动方式(经 `/bin/sh`、`/bin/bash`)本来就会被 SIP 清掉 DYLD_*。
-3. `exec` 宿主。宿主不开 hardened runtime(见下),但它的环境中已经没有 DYLD_*。
-4. 打包时检查启动器:签名带 `runtime` 标志;**不带任何 entitlement**,特别是 `com.apple.security.get-task-allow`
-   (它会让 hardened runtime 不再清除 DYLD_*,Xcode 的 Debug 构建默认带它)和 `allow-dyld-environment-variables`;
-   除 `/usr/lib/`、`/System/` 外没有动态依赖(std 静态链接;ad-hoc 签名没有 Team ID,也不能加载 ad-hoc 签名的 libstd)。任一不满足则打包失败。
-5. 纵深防御:启动器在 `exec` 前仍对所有 `DYLD_*` 调用 `env_remove`。正常情况下它们已被 dyld 删除,这一步只防签名配置出错。
-6. ad-hoc 签名 + hardened runtime 清除 DYLD_* 的行为,Apple 只对 hardened runtime 做了说明,没有单独说明 ad-hoc 的情形(§八 R3)。
-   E13 在 macOS 26 上验证过;CI 在 macos-14、macos-15 上各跑一次 DYLD_* 测试作为回归。
+2. 把所有 `DYLD_*` 变量改名为 `RUTIS_ORIG_DYLD_*`,从宿主的环境中删除;不设置任何 `DYLD_*`。
+3. `exec` 宿主。宿主在启动运行时线程前恢复 `RUTIS_ORIG_*`(`rutis-cli` 现有的 `LD_*` 恢复逻辑推广到 `DYLD_`),
+   宿主启动的子进程看到的环境与调用者一致。评审确认:宿主运行中再设置 `DYLD_*` 不影响之后的 `dlopen`。
+4. 启动器不需要特殊签名,用链接器自动加的 ad-hoc 签名即可;宿主的发布方可以按自己的方案重新签名。
+
+**不防的情况,写进文档:** 有人在调用者环境中设置 `DYLD_INSERT_LIBRARIES`,把代码注入启动器本身(E13)。注入的代码在启动器的 main 之前运行,
+启动器无法阻止。这属于控制进程加载器,在防护范围之外。需要防这一点的发布方,可以给启动器加 hardened runtime 签名
+(`codesign -o runtime`,不带任何 entitlement;启动器只依赖系统库,不受 library validation 影响):E13 中这样签名后注入不再生效。
+rutis 不默认这样做。
 
 **宿主是否开 hardened runtime,由宿主的发布方决定,rutis 不做规定。** rutis 负责两件事:加载器在开与不开两种情况下都能工作;
 文档写清楚两种情况的差别。
@@ -183,12 +183,14 @@ E13 进一步表明,启动器本身同样会被 `DYLD_INSERT_LIBRARIES` 注入,�
 | 签名要求 | 无 | SDK、libstd、插件及其原生库要与宿主用同一个 Team ID 签名;或者宿主带 `com.apple.security.cs.disable-library-validation`(E10) |
 | 公证 | 不能公证 | 公证要求开 |
 
-不论开不开,受支持的入口都是启动器(SDK 设计稿 §5.4)。rutis 自带的 `rutis-cli` 不开。CI 中加一个开了 hardened runtime 并带
+不论开不开,受支持的入口都是启动器(SDK 设计稿 §5.4)。宿主开了 hardened runtime 时,dyld 会删除它收到的 DYLD_*,
+步骤 3 的恢复仍然有效,因为恢复是宿主进程内设置环境变量,与 dyld 无关。rutis 自带的 `rutis-cli` 不开。CI 中加一个开了 hardened runtime 并带
 `disable-library-validation` 的宿主变体,确认加载器在这种配置下能完成换代测试。
 
 **链接参数在链接时设定,不做事后修改。** `install_name_tool`、`strip` 不会破坏 linker-signed 的 ad-hoc 签名(E15,Apple 工具会自动重签),
 但会改变字节、引入第二套产物,破坏 L2 与可复现构建。所以 install name、rpath 都由 `build.rs` 注入(§3.3)。
-唯一的例外是启动器的 hardened runtime 重签(上文)。Developer ID 签名的产物则确实不能事后修改。
+发布方用自己的证书重新签名(例如 Developer ID)属于发布流程的最后一步,不影响 SDK 身份:L2 绑定的是 SDK 和插件构建出来时的字节,
+重签会改变字节,所以重签只能用于宿主和启动器,SDK 和插件按构建产物原样发布(需要重签 SDK 和插件的发布方,应在 L2 计算之前完成签名)。
 CI 加一步 `codesign --verify` 检查发布目录中的每个文件。
 
 ### 3.5 V2:两级命名空间的影响
@@ -233,8 +235,8 @@ E5 回答了 SDK 设计稿 V2 的主要问题:`RTLD_LOCAL` + 两级命名空间�
 
 | 测试 | 预期 |
 | --- | --- |
-| 经启动器启动,调用者环境中有 `DYLD_LIBRARY_PATH`、`DYLD_INSERT_LIBRARIES`,指向带初始化函数(写标记文件)的合法 SDK / 插入库 | 宿主正常启动,标记文件不存在 |
-| 启动器签名缺少 `runtime` 标志 | 打包失败 |
+| 经启动器启动,调用者环境中有 `DYLD_LIBRARY_PATH`,指向一个带初始化函数(写标记文件)的合法 SDK | 宿主加载的是发布目录中的 SDK,标记文件不存在;宿主的子进程能看到原来的 `DYLD_LIBRARY_PATH` |
+| 经启动器启动,调用者环境中有 `DYLD_INSERT_LIBRARIES`,插入库的初始化函数记录所在进程 | 插入库可能在启动器中运行(不防),但不在宿主中运行 |
 | 插件依赖写成绝对路径的 SDK(复现 E3) | `dlopen` 前被拒绝,原因为依赖不符 |
 | 插件带 LC_RPATH、flat lookup、`@loader_path` 依赖 | 打包失败;手工打包的在加载前被拒绝 |
 | 插件动态链接一个系统原生库(如 `/usr/lib/libz.1.dylib`) | 正常加载;清单 `[native_deps]` 中有该库 |
@@ -248,7 +250,34 @@ E5 回答了 SDK 设计稿 V2 的主要问题:`RTLD_LOCAL` + 两级命名空间�
 **CI。** 新增 `dylib-macos` 任务(macos-15,arm64),运行与 `dylib-linux` 相同的三个脚本和 `loader_host` 示例;
 `sdk-repro` 矩阵加入两个 macos-15 runner。`static-platforms` 中的 macOS 条目保留,继续检查默认静态构建。
 
-### 3.8 验收映射
+### 3.8 其他开发者签名的插件
+
+SDK 设计稿面向一方插件。插件也可以来自其他团队或公司,用他们自己的 Apple 开发者账号签名。这在技术上可行,条件如下。
+
+**签名。** 是否能加载,取决于宿主的签名方式:
+
+| 宿主 | 其他开发者签名的插件 |
+| --- | --- |
+| 不开 hardened runtime | 能加载;ad-hoc 签名的也能加载 |
+| 开 hardened runtime,带 `disable-library-validation` | 能加载;宿主仍然可以公证 |
+| 开 hardened runtime,不带该权限 | 不能加载:系统只允许与宿主同一 Team ID 签名的库 |
+
+从网上下载的插件带 quarantine 属性,必须由插件作者公证,或由用户手动去掉该属性(§3.2)。
+
+**可选:按 Team ID 限制插件来源。** 宿主可以配置一个允许的 Team ID 列表。配置后,加载器在 `dlopen` 之前,对缓存中实际要打开的文件
+用 Security 框架(`SecStaticCodeCreateWithPath` + `SecStaticCodeCheckValidity`)校验签名有效,且签名证书的 Team ID 在列表中;
+不满足即拒绝,ad-hoc 签名的插件也被拒绝。未配置时不检查,行为与现在相同。这一检查只在 macOS 上提供,与 L1/L2 互相独立:
+L1/L2 确认插件与 SDK 兼容,Team ID 确认插件是谁签的。插件的原生库(§3.3)不在检查范围内。
+
+**构建条件是更大的障碍。** 插件必须链接与宿主完全相同的 SDK 产物:同一个 rustc、同一份锁文件、同一套 feature。
+现在的做法是插件打包时把宿主的包一起纳入同一次 Cargo 构建(SDK 设计稿 §5.3),外部开发者因此需要拿到宿主的构建锚点和锁文件,
+并且每次 SDK 升级都要重新编译。要让外部开发者方便地构建插件,需要发布一份“SDK 构建包”(锁文件 + 构建锚点 + 构建参数),
+并证明不同的 Cargo 依赖图能构建出相同的 SDK 字节(SDK 设计稿 §5.3 记录的未证明项)。这一项另开 issue。
+
+**信任。** dylib 插件和宿主在同一个进程中运行,没有隔离,插件的错误会直接导致宿主崩溃,也能访问宿主的全部内存。
+签名只能说明插件是谁做的,不能说明它安全。不受控的代码应走协议插件(SDK 设计稿 §一 非目标)。
+
+### 3.9 验收映射
 
 | #102 验收项 | 对应 |
 | --- | --- |
@@ -292,15 +321,15 @@ W1 不依赖本文其他改动,可以立即开始。
 | 0b | 修正 SDK 可复现测试:按宿主锚点构建(前提二) | — |
 | A1 | `rutis-dylib-meta`(`object`);Linux 改用它读引导 blob;打包工具改写为 Rust;脚本公共函数。Linux 行为与 SDK 字节都不变 | 0a |
 | A2 | 链接参数改由 `build.rs` 按产物注入;依赖检查(§3.3);`export_plugin!` 节名按格式选择;显式 `[profile.release]`;SDK minor 升级 | A1、0b |
-| B | macOS:`unix` 模块与平台 cfg、SDK install name、启动器 hardened runtime、quarantine、分配器断言、构建诊断、`dylib-macos` CI 与 sdk-repro | A2 |
+| B | macOS:`unix` 模块与平台 cfg、SDK install name、启动器清除与恢复 DYLD_*、quarantine、可选的 Team ID 检查、分配器断言、构建诊断、`dylib-macos` CI 与 sdk-repro | A2 |
 | C | Windows 验证 W1–W8 与 SDK 设计稿 §十一 记录。W1–W5、W7 不依赖其他 PR,立即开始;W6、W8 用 A2 之后的节名和夹具 | W6/W8 依赖 A2 |
 
 A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖。
 
 ## 六、已决定事项(2026-10-03)
 
-1. **宿主的 hardened runtime**:由宿主的发布方决定,rutis 不做规定;加载器两种情况都支持,`rutis-cli` 不开(§3.4)。
-   启动器必须开,这一点不变。
+1. **hardened runtime**:宿主和启动器是否开,都由发布方决定,rutis 不做规定;加载器两种情况都支持,`rutis-cli` 不开(§3.4)。
+   启动器只负责不把 DYLD_* 传给宿主;注入启动器本身不在防护范围内。
 2. **插件依赖原生库**:允许。限制在依赖的写法上(§3.3)。
 3. **Windows 的 VC++ 运行库**:用户自行安装,rutis 不分发、不检查(W4)。
 
@@ -310,7 +339,7 @@ A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖�
 
 | 级别 | 意见 | 处理 |
 | --- | --- | --- |
-| P1 | 启动器自身会被 `DYLD_INSERT_LIBRARIES` 注入,在其 main 之前执行,原测试预期无法达成 | 启动器以 hardened runtime 签名;删除 DYLD_* 转存与恢复;测试预期改为“标记不存在”(§3.4、E13) |
+| P1 | 启动器自身会被 `DYLD_INSERT_LIBRARIES` 注入,在其 main 之前执行,原测试预期无法达成 | 事实成立。按 SDK 设计稿 §5.4 的防护范围,注入启动器本身属于“控制进程加载器”,定为不防;启动器只保证 DYLD_* 不传给宿主,并像 Linux 一样由宿主恢复;测试预期改为“不在宿主中运行”(§3.4)。起初的处理是要求启动器开 hardened runtime,后经讨论撤回 |
 | P1 | macOS 上 libstd 内部分配不经过 SDK 分配器 | SDK 分配器限定为 `System`,加断言和回归测试(§3.5、E14) |
 | P1 | rpath 写在 RUSTFLAGS 中作用于所有产物,“插件无 rpath”与现有构建冲突;按产物注入的机制没写 | 链接参数改由各 crate `build.rs` 注入;放进改变 SDK 字节的 A2(§3.3、§五) |
 | P1 | 现有可复现测试构建的是静态 std 的 SDK 变体,不是发布产物 | 列为前提二和 PR 0b(§一) |
@@ -338,7 +367,7 @@ A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖�
 | R1a | 让 SDK 静态包含 std,进程中只有一份分配器 shim | 调研建议的方案。**本机验证不可行**:Cargo 对作为依赖的 dylib 强制传 `-C prefer-dynamic`;绕过 Cargo 直接用 rustc 构建出静态包含 std 的 SDK 后,宿主和插件都无法链接它(`cannot satisfy dependencies so 'core' only shows up once`) | 排除 |
 | R1b | `-flat_namespace`、`__DATA,__interpose` | 都只影响跨镜像的导入;libstd 调用自己导出的 `__rust_alloc` 很可能是镜像内调用,改不了。flat namespace 还会引入全局符号冲突,破坏多版本共存 | 排除 |
 | R2 | install name 默认是绝对路径(E2) | 上游没有改默认值([#28640](https://github.com/rust-lang/rust/issues/28640) 仍开放)。`-C rpath` 会顺带设 `@rpath/<文件名>`,但同时给所有产物写入按构建目录计算的 LC_RPATH。Cargo 的 `rustc-link-arg-*` 没有 dylib 变体,只能用作用于整个包的 `rustc-link-arg` | 保持 §3.3 的 `build.rs` 方案 |
-| R3 | DYLD_* 注入(E7、E13) | Apple DTS 确认 hardened runtime 进程忽略并清除 DYLD_*,例外是 `allow-dyld-environment-variables` 和 `get-task-allow` 两个 entitlement。没有找到 ad-hoc + runtime 的专门说明 | 打包检查启动器无 entitlement、无非系统依赖;启动器仍 `env_remove`;多版本 macOS 回归(§3.4) |
+| R3 | DYLD_* 注入(E7、E13) | Apple DTS 确认 hardened runtime 进程忽略并清除 DYLD_*,例外是 `allow-dyld-environment-variables` 和 `get-task-allow` 两个 entitlement。没有找到 ad-hoc + runtime 的专门说明 | 只作为发布方可选的加固手段写进 §3.4;选用时启动器不得带 `get-task-allow`、`allow-dyld-environment-variables` |
 | R4 | quarantine(E11) | Apple 文档:10.15 起,带 quarantine 的插件只有经过公证才能加载,否则需要用户在系统设置中批准(无界面时表现为卡住)。单个 dylib 无法 staple 公证票据。音频插件宿主普遍让用户执行 `xattr -d` 或发布已公证的插件 | 保持“加载前拒绝 + 给出 `xattr -d` 命令”(§3.2) |
 | R5 | 同 install name、不同路径(E5) | Apple 说明 dyld 先按路径定位文件,再按文件查已加载表;以完整路径 `dlopen` 时两份文件是两个镜像。风险在插件的 `@rpath/…` 依赖:dyld 会先复用已加载的同名镜像 | §3.3 已把插件依赖限定为已由宿主加载的 SDK 和 libstd,这一复用正是需要的行为 |
 | R6 | 永不 dlclose | macOS 上用过 TLS 的镜像(Rust 的 `print!` 就会用),dyld 本来就忽略 `dlclose`;abi_stable 也明确不支持卸载 | 印证 SDK 设计稿 §九 |
