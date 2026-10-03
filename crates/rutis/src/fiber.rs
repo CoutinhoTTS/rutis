@@ -1264,10 +1264,26 @@ impl FiberView {
                 return Box::pin(async move { join_task(&task).await });
             }
         }
+        let task = match self.register_dispose(|_| Ok(())) {
+            Ok(task) => task,
+            Err(_) => unreachable!("an unconditional dispose is always registered"),
+        };
+        Box::pin(async move { join_task(&task).await })
+    }
+
+    /// Register the dispose (or join the one registered) if `check` accepts
+    /// the transition state. Check and registration share one lock: no new
+    /// generation can start between them, and a restart that comes after
+    /// sees the terminal task and is refused.
+    pub(crate) fn register_dispose(
+        &self,
+        check: impl FnOnce(&Trans) -> Result<(), CordisError>,
+    ) -> Result<Arc<TransitionTask>, CordisError> {
         // 登记在调用点同步完成(评审 #2):dispose() 返回后,并发的
         // restart() 立刻可见终态任务并拒绝,不依赖本 future 被 poll
         let (task, newly_registered) = {
             let mut tr = self.inner.transition.lock().unwrap();
+            check(&tr)?;
             match &tr.terminal_task {
                 Some(task) => (task.clone(), false),
                 None => {
@@ -1284,7 +1300,7 @@ impl FiberView {
                 task.complete(self.inner.stopped_error());
             }
         }
-        Box::pin(async move { join_task(&task).await })
+        Ok(task)
     }
 
     /// 限制等待时间，不强制终止正在执行的插件或清理任务。

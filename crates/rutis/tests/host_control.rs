@@ -173,6 +173,96 @@ async fn a_plugin_can_dispose_itself() {
     assert!(root.dispose_self().is_err(), "the root shuts down instead");
 }
 
+/// Keeps the context of every generation it applies in.
+struct Keeper(Arc<Mutex<Vec<Ctx>>>);
+
+impl Plugin for Keeper {
+    fn name(&self) -> &str {
+        "keeper"
+    }
+
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        self.0.lock().unwrap().push(ctx.clone());
+        Box::pin(async { Ok(Effect::Done) })
+    }
+}
+
+async fn settled(view: &rutis::FiberView, state: rutis::FiberState) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut watch = view.watch();
+        while watch.borrow().state != state {
+            watch.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("never reached {state:?}: {:?}", view.state()));
+}
+
+#[tokio::test]
+async fn a_stale_context_cannot_dispose_the_next_generation() {
+    let root = Ctx::root().unwrap();
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let view = root.plugin(Keeper(kept.clone()));
+    (&view).await.unwrap();
+    let first = kept.lock().unwrap()[0].clone();
+    view.restart().await.unwrap();
+    assert!(matches!(
+        first.dispose_self(),
+        Err(CordisError::InactiveEffect)
+    ));
+    assert_eq!(view.state().state, rutis::FiberState::Active);
+
+    // The current generation still can.
+    let second = kept.lock().unwrap()[1].clone();
+    second.dispose_self().unwrap();
+    settled(&view, rutis::FiberState::Disposed).await;
+}
+
+#[tokio::test]
+async fn dispose_self_during_a_restart_is_refused() {
+    let root = Ctx::root().unwrap();
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let view = root.plugin(Keeper(kept.clone()));
+    (&view).await.unwrap();
+    let first = kept.lock().unwrap()[0].clone();
+    let generation = view.state().generation;
+    // The restart has cancelled the generation and is queued, not done.
+    let restart = tokio::spawn(view.restart());
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        first.dispose_self(),
+        Err(CordisError::InactiveEffect)
+    ));
+    restart.await.unwrap().unwrap();
+    assert_eq!(view.state().state, rutis::FiberState::Active);
+    assert!(view.state().generation > generation);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispose_self_racing_a_restart_is_all_or_nothing() {
+    for _ in 0..200 {
+        let root = Ctx::root().unwrap();
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let view = root.plugin(Keeper(kept.clone()));
+        (&view).await.unwrap();
+        let first = kept.lock().unwrap()[0].clone();
+        let restart = tokio::spawn(view.restart());
+        let disposed = tokio::task::spawn_blocking(move || first.dispose_self())
+            .await
+            .unwrap();
+        let _ = restart.await.unwrap();
+        // Accepted: the fiber ends disposed. Refused: the restart's
+        // generation runs on.
+        let expected = match disposed {
+            Ok(()) => rutis::FiberState::Disposed,
+            Err(CordisError::InactiveEffect) => rutis::FiberState::Active,
+            Err(other) => panic!("{other:?}"),
+        };
+        settled(&view, expected).await;
+        root.shutdown().await.unwrap();
+    }
+}
+
 /// Records each build's config.
 struct Recording(Arc<Mutex<Vec<u32>>>);
 
