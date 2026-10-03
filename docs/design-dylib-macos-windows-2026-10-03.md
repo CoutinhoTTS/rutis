@@ -121,22 +121,35 @@ Linux 没有这个问题:rustc 生成的 `DT_NEEDED` 只是文件名,glibc 按�
 `already-loaded-by-rpath`)。评审还确认:不带 LC_RPATH 的插件,缺失的 `@rpath` 依赖只会到宿主的 `@loader_path`(发布目录)查找,
 不会到插件所在的缓存目录查找。
 
-**加载前依赖检查(新增,SDK 设计稿 §7.1 第 2 步的一部分)。** 白名单,遇到未知项一律拒绝:
+**加载前依赖检查(新增,SDK 设计稿 §7.1 第 2 步的一部分)。** 插件的依赖分三类,遇到不属于任何一类的一律拒绝。
+
+| 类别 | 允许什么 | 理由 |
+| --- | --- | --- |
+| Rust 共享部分 | `librutis_sdk`;**精确等于**启动器绑定的 `libstd-<hash>` | 必须复用宿主已加载的那一份 |
+| 原生库(如 `libssl`、`libz`、系统框架) | 允许 | 插件可以动态链接系统里或用户安装的原生库 |
+| 其他 Rust dylib | 不允许 | 会带进第二份 std 或 SDK |
+
+原生库的写法要求(防止从插件缓存目录或其他不受控的位置找库):
 
 - Mach-O:
-  - 所有 dylib 类加载命令(`LC_LOAD_DYLIB`、`LC_LOAD_WEAK_DYLIB`、`LC_REEXPORT_DYLIB`、`LC_LOAD_UPWARD_DYLIB`、`LC_LAZY_LOAD_DYLIB`)
-    的路径只能是:`@rpath/librutis_sdk.dylib`;**精确等于**启动器绑定的 `@rpath/libstd-<hash>.dylib`;`/usr/lib/`、`/System/Library/` 下的系统库(规范化后匹配)。
-  - 依赖路径中出现 `@executable_path`、`@loader_path`、`..` 即拒绝。
+  - 检查所有 dylib 类加载命令(`LC_LOAD_DYLIB`、`LC_LOAD_WEAK_DYLIB`、`LC_REEXPORT_DYLIB`、`LC_LOAD_UPWARD_DYLIB`、`LC_LAZY_LOAD_DYLIB`)。
+  - SDK 和 libstd 必须写成 `@rpath/librutis_sdk.dylib`、`@rpath/libstd-<hash>.dylib`;其他 `@rpath/…` 依赖拒绝(它们会被解析到发布目录,而发布目录里没有这些库)。
+  - 原生库必须是绝对路径,例如 `/usr/lib/libz.1.dylib`、`/System/Library/Frameworks/…`、`/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`。
+  - 依赖路径中出现 `@executable_path`、`@loader_path`、相对路径或 `..` 即拒绝。
   - 插件不得有 `LC_RPATH`;不认识的带 `LC_REQ_DYLD` 位的命令拒绝。
-  - 必须是 `MH_TWOLEVEL`,拒绝 `MH_FORCE_FLAT` 和 flat lookup 绑定:插件的 C 依赖若以 `-undefined dynamic_lookup` 构建,
-    v2 的符号可能绑到 v1。
+  - 必须是 `MH_TWOLEVEL`,拒绝 `MH_FORCE_FLAT` 和 flat lookup 绑定:插件的 C 依赖若以 `-undefined dynamic_lookup` 构建,v2 的符号可能绑到 v1。
   - 宿主和 SDK(打包时检查)另外拒绝 `LC_DYLD_ENVIRONMENT`。
 - ELF:
-  - `DT_NEEDED` 只能是 `librutis_sdk.so`、精确的 `libstd-<hash>.so`,以及明确名单中的系统库:`libc.so.6`、`libm.so.6`、`libgcc_s.so.1`、
-    `libpthread.so.0`、`libdl.so.2`、`ld-linux-*.so.*`;不得含 `/`。
+  - `DT_NEEDED` 不得含 `/`;SDK 必须是 `librutis_sdk.so`,libstd 必须精确等于绑定的文件名;其他名字视为原生库,由系统动态链接器按标准路径查找。
   - 插件不得有 `DT_RUNPATH`/`DT_RPATH`;拒绝 `DT_AUXILIARY`、`DT_FILTER`、`DT_AUDIT`、`DT_DEPAUDIT`。
-- **这是相对 SDK 设计稿的新增限制**:插件不能动态链接其他系统库(如 `libssl`),只能静态链入。确有需要时,以清单字段显式声明、
-  由宿主配置允许,本轮不做。
+- 名字形如 `libstd-*`、`librutis_sdk*` 但与绑定值不同的依赖,按“其他 Rust dylib”拒绝。间接依赖里的 Rust dylib 无法在加载前完全识别,写进插件作者指南。
+
+原生库**不在启动器的校验范围内**:它们由部署插件的人负责,与插件本身一样被视为可信。为了便于排查和审计:
+
+- 打包工具把插件的原生库依赖写进清单 `[native_deps]`;加载器核对二进制中的依赖与清单一致,不一致即拒绝。
+- 原生库缺失时,`dlopen`(`RTLD_NOW`)直接失败,错误信息中带上缺失的库名。
+- Linux 上动态链接器按 SONAME 复用已加载的库:两个插件版本依赖同一 SONAME 的不同实现时,后加载的会用到先加载的那份。不兼容的原生库版本必须有不同的 SONAME(系统库通常如此),写进插件作者指南。
+- 宿主若开了 hardened runtime(§3.4),原生库同样要满足签名要求。
 
 打包时用同一套检查核对宿主和 SDK,替代 `build-dylib-bundle.sh` 里的 `ldd`;CI 另用 `otool -L`/`otool -l` 输出供人工对照。
 
@@ -161,10 +174,17 @@ E13 进一步表明,启动器本身同样会被 `DYLD_INSERT_LIBRARIES` 注入,�
 6. ad-hoc 签名 + hardened runtime 清除 DYLD_* 的行为,Apple 只对 hardened runtime 做了说明,没有单独说明 ad-hoc 的情形(§八 R3)。
    E13 在 macOS 26 上验证过;CI 在 macos-14、macos-15 上各跑一次 DYLD_* 测试作为回归。
 
-**宿主的 hardened runtime(可选,建议另开 issue)。** E9/E10:宿主开 hardened runtime 后,即使用户绕过启动器直接运行宿主,DYLD_* 也被忽略;
-代价是 library validation 拒绝 ad-hoc 签名的 SDK 和插件,需要 `disable-library-validation` entitlement,
-或者宿主、SDK、libstd、插件都用同一个 Team ID 签名。公证(notarization)要求 hardened runtime,对外分发时必须做这个选择。
-本轮宿主保持 ad-hoc 签名,SDK 设计稿 §5.4 的启动器仍是唯一受支持的入口。
+**宿主是否开 hardened runtime,由宿主的发布方决定,rutis 不做规定。** rutis 负责两件事:加载器在开与不开两种情况下都能工作;
+文档写清楚两种情况的差别。
+
+| | 不开 | 开 |
+| --- | --- | --- |
+| 绕过启动器直接运行宿主时,DYLD_* | 生效(E7) | 被忽略(E9) |
+| 签名要求 | 无 | SDK、libstd、插件及其原生库要与宿主用同一个 Team ID 签名;或者宿主带 `com.apple.security.cs.disable-library-validation`(E10) |
+| 公证 | 不能公证 | 公证要求开 |
+
+不论开不开,受支持的入口都是启动器(SDK 设计稿 §5.4)。rutis 自带的 `rutis-cli` 不开。CI 中加一个开了 hardened runtime 并带
+`disable-library-validation` 的宿主变体,确认加载器在这种配置下能完成换代测试。
 
 **链接参数在链接时设定,不做事后修改。** `install_name_tool`、`strip` 不会破坏 linker-signed 的 ad-hoc 签名(E15,Apple 工具会自动重签),
 但会改变字节、引入第二套产物,破坏 L2 与可复现构建。所以 install name、rpath 都由 `build.rs` 注入(§3.3)。
@@ -217,6 +237,9 @@ E5 回答了 SDK 设计稿 V2 的主要问题:`RTLD_LOCAL` + 两级命名空间�
 | 启动器签名缺少 `runtime` 标志 | 打包失败 |
 | 插件依赖写成绝对路径的 SDK(复现 E3) | `dlopen` 前被拒绝,原因为依赖不符 |
 | 插件带 LC_RPATH、flat lookup、`@loader_path` 依赖 | 打包失败;手工打包的在加载前被拒绝 |
+| 插件动态链接一个系统原生库(如 `/usr/lib/libz.1.dylib`) | 正常加载;清单 `[native_deps]` 中有该库 |
+| 二进制的原生库依赖与清单 `[native_deps]` 不一致 | 加载前被拒绝 |
+| 宿主开 hardened runtime + `disable-library-validation` | 换代测试通过 |
 | 缓存中同哈希条目带 quarantine 属性 | 加载前被拒绝,不卡住 |
 | fat 插件、x86_64 插件、iOS 模拟器插件 | 加载前被拒绝,原因为格式、架构或平台 |
 | SDK 计数分配器(E14) | 宿主与插件的分配经过 SDK;断言 SDK 分配器类型为 `System` |
@@ -247,7 +270,7 @@ W1 不依赖本文其他改动,可以立即开始。
 | W1 | **导出符号数量** | 用当前 `rutis-sdk` 按宿主锚点构建 `rutis_sdk.dll`,用 `object` 读 PE 导出目录计数;同时看链接是否报 LNK1189(导入库对象数超限)。release(opt-level 3)和 dev(opt-level 0)各测一次:dylib 会导出泛型单态化,而 share-generics 在 opt-level 0/1 默认开启,dev 构建的导出数会大得多(§八 R7)。再加 `tokio/full`、`serde` derive 等常见依赖各构建一次,估算增长速度 | 当前已超限,或余量不够一次常规依赖升级。工具链固定为 stable,不能用 `-Z` 参数;release 下 share-generics 本来就关闭,也没有降低导出数的余地 |
 | W2 | **同名 DLL 多版本** | `LoadLibraryExW` 以完整路径加载 `<cache>/<hashA>/greeter.dll` 和 `<cache>/<hashB>/greeter.dll` | 第二次返回第一次的模块,且无法通过路径或缓存文件名规避 |
 | W3 | **依赖解析** | 宿主对 SDK/std 的静态导入按标准搜索顺序(应用目录优先)解析;插件以 `LOAD_LIBRARY_SEARCH_APPLICATION_DIR \| LOAD_LIBRARY_SEARCH_SYSTEM32` 加载(不用 `DLL_LOAD_DIR`,它会搜索插件所在的缓存目录,与 §3.3 拒绝 `@loader_path` 同理),其 SDK 依赖应复用已加载模块。分别在工作目录、`PATH`、`.local` 重定向目录中放同名 DLL 测试 | 存在无法关闭的路径,使宿主或插件解析到发布目录外的 SDK/std。注意 `SetDefaultDllDirectories` 只影响之后的 `LoadLibrary`,管不到宿主自身的静态导入 |
-| W4 | **std DLL 与 VC 运行时** | `std-*.dll` 放进发布目录并由启动器校验。预编译的 `std-*.dll` 本身动态依赖 `vcruntime140.dll` 等 VC 运行时,无论宿主是否 `+crt-static`,运行时都需要它 | 不算不可行,但要决定:要求用户安装 VC++ 运行库,还是随附并校验 |
+| W4 | **std DLL 与 VC 运行时** | `std-*.dll` 放进发布目录并由启动器校验。预编译的 `std-*.dll` 本身动态依赖 `vcruntime140.dll` 等 VC 运行时,无论宿主是否 `+crt-static`,运行时都需要它 | 不算不可行。VC++ 运行库由用户自行安装,不随包分发,启动器也不检查,只在文档中说明 |
 | W5 | **加载锁** | 插件初始化(`rutis_plugin_entry`)在 `LoadLibrary` 返回后调用,不在加载锁内。要验证的是:Rust std 的 TLS 回调、插件私有依赖中的 `.CRT$XCU` 静态初始化(如 `ctor`、`inventory`)在加载锁下运行时会不会死锁 | 常见依赖在加载锁下死锁且无法用规则禁止 |
 | W6 | **引导 blob** | `#[link_section = ".rutism"]` + `#[used]` 在 MSVC 链接器 `/OPT:REF` 下是否保留;`object` 能否定位 | 无法保留且没有替代(例如导出一个数据符号,从导出表定位) |
 | W7 | **文件占用** | 已加载 DLL 无法覆盖或删除;确认内容寻址缓存只新建、不覆盖,损坏条目被占用时给出可读错误 | 不预期不可行 |
@@ -274,11 +297,12 @@ W1 不依赖本文其他改动,可以立即开始。
 
 A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖。
 
-## 六、未决问题
+## 六、已决定事项(2026-10-03)
 
-1. 宿主是否开 hardened runtime,以及对外分发的签名方案(Team ID 还是 `disable-library-validation`)。建议另开 issue,与公证一起决定。
-2. 是否允许插件动态链接白名单之外的系统库(§3.3)。本轮不允许。
-3. Windows 的 VC 运行时:要求安装还是随附(W4)。
+1. **宿主的 hardened runtime**:由宿主的发布方决定,rutis 不做规定;加载器两种情况都支持,`rutis-cli` 不开(§3.4)。
+   启动器必须开,这一点不变。
+2. **插件依赖原生库**:允许。限制在依赖的写法上(§3.3)。
+3. **Windows 的 VC++ 运行库**:用户自行安装,rutis 不分发、不检查(W4)。
 
 ## 七、评审记录(2026-10-03)
 
@@ -293,7 +317,7 @@ A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖�
 | P1 | Windows 验证缺少跨 DLL 运行期行为(TLS、tokio 上下文) | 新增 W8 |
 | P2 | `install_name_tool`/`strip` 会破坏签名的说法错误 | 改正,理由改为可复现与单一产物(§3.4、E15) |
 | P2 | quarantine 检查应针对实际打开的缓存文件;缓存写入本来就不继承扩展属性 | 改正(§3.2) |
-| P2 | 依赖检查不完整,应为白名单、未知项拒绝 | 补全 Mach-O/ELF 规则,libstd 精确匹配,列出系统库名单并标为新增限制(§3.3) |
+| P2 | 依赖检查不完整,应为白名单、未知项拒绝 | 补全 Mach-O/ELF 规则,libstd 精确匹配(§3.3);原生库后来按 §六 第 2 条改为允许 |
 | P2 | 一律禁止 weak 定义会误伤 compiler-rt helper | 只禁止 Rust 修饰名,helper 白名单(§3.5) |
 | P2 | L1 的 macOS 输入选错 | 改为从 `LC_BUILD_VERSION` 读出、只做诊断(§3.6) |
 | P2 | `rutis-dylib-meta` 单独成 crate 的理由不成立 | 理由改为 xtask 不链接 SDK;补充常量一致性测试(§3.1) |
@@ -315,10 +339,10 @@ A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖�
 | R1b | `-flat_namespace`、`__DATA,__interpose` | 都只影响跨镜像的导入;libstd 调用自己导出的 `__rust_alloc` 很可能是镜像内调用,改不了。flat namespace 还会引入全局符号冲突,破坏多版本共存 | 排除 |
 | R2 | install name 默认是绝对路径(E2) | 上游没有改默认值([#28640](https://github.com/rust-lang/rust/issues/28640) 仍开放)。`-C rpath` 会顺带设 `@rpath/<文件名>`,但同时给所有产物写入按构建目录计算的 LC_RPATH。Cargo 的 `rustc-link-arg-*` 没有 dylib 变体,只能用作用于整个包的 `rustc-link-arg` | 保持 §3.3 的 `build.rs` 方案 |
 | R3 | DYLD_* 注入(E7、E13) | Apple DTS 确认 hardened runtime 进程忽略并清除 DYLD_*,例外是 `allow-dyld-environment-variables` 和 `get-task-allow` 两个 entitlement。没有找到 ad-hoc + runtime 的专门说明 | 打包检查启动器无 entitlement、无非系统依赖;启动器仍 `env_remove`;多版本 macOS 回归(§3.4) |
-| R4 | quarantine(E11) | Apple 文档:10.15 起,带 quarantine 的插件只有经过公证才能加载,否则需要用户在系统设置中批准(无界面时表现为卡住)。单个 dylib 无法 staple 公证票据。音频插件宿主普遍让用户执行 `xattr -d` 或发布已公证的插件 | 保持“加载前拒绝 + 给出 `xattr -d` 命令”(§3.2);公证并入 §六 第 1 条 |
+| R4 | quarantine(E11) | Apple 文档:10.15 起,带 quarantine 的插件只有经过公证才能加载,否则需要用户在系统设置中批准(无界面时表现为卡住)。单个 dylib 无法 staple 公证票据。音频插件宿主普遍让用户执行 `xattr -d` 或发布已公证的插件 | 保持“加载前拒绝 + 给出 `xattr -d` 命令”(§3.2) |
 | R5 | 同 install name、不同路径(E5) | Apple 说明 dyld 先按路径定位文件,再按文件查已加载表;以完整路径 `dlopen` 时两份文件是两个镜像。风险在插件的 `@rpath/…` 依赖:dyld 会先复用已加载的同名镜像 | §3.3 已把插件依赖限定为已由宿主加载的 SDK 和 libstd,这一复用正是需要的行为 |
 | R6 | 永不 dlclose | macOS 上用过 TLS 的镜像(Rust 的 `print!` 就会用),dyld 本来就忽略 `dlclose`;abi_stable 也明确不支持卸载 | 印证 SDK 设计稿 §九 |
 | R7 | Windows 导出上限(W1) | 问题真实存在:Bevy [#1110](https://github.com/bevyengine/bevy/issues/1110)(2020 至今未关)、[#14930](https://github.com/bevyengine/bevy/issues/14930)。原因之一是 dylib 仍导出泛型单态化,share-generics 在 opt-level 0/1 默认开启。Bevy 要求 Windows 上动态链接时依赖开 `opt-level=3`。stable 上没有其他手段:`-Zshare-generics=n` 和 `#[export_visibility]`([#151425](https://github.com/rust-lang/rust/issues/151425))都是 unstable | W1 区分 release/dev 测量;若只有 release 低于上限,规定 SDK 在任何 profile 下都以 opt-level ≥ 2 构建(写进 `[profile.*.package.rutis-sdk]`) |
 | R8 | Windows 跨 DLL TLS(W8) | rustc 1.70 起([#108089](https://github.com/rust-lang/rust/pull/108089))msvc 目标对 dylib 的跨 crate TLS 访问改走 shim 函数;1.98 把 TLS 析构改为 FLS 实现。tokio 只在 SDK 中有一份时,上下文应是单份 | W8 风险下调,但仍需实测 |
 | R9 | 同名 DLL 两个版本(W2) | Microsoft 文档:传完整路径时只在该路径查找;依赖 DLL 按模块名解析,并优先复用已加载的同名模块 | W2 预期可行;插件目录中不得再放 SDK 副本 |
-| R10 | VC 运行时(W4) | rustup 预编译的 std 动态链接 CRT,需要 vcruntime140.dll 和 UCRT;与 `+crt-static` 混用会在进程中出现多份 CRT | 不开 `crt-static`;是否随附 VC++ 运行库仍是 §六 第 3 条 |
+| R10 | VC 运行时(W4) | rustup 预编译的 std 动态链接 CRT,需要 vcruntime140.dll 和 UCRT;与 `+crt-static` 混用会在进程中出现多份 CRT | 不开 `crt-static`;VC++ 运行库由用户安装(§六 第 3 条) |
