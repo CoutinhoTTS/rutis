@@ -50,7 +50,11 @@ impl Plugin for Greeter {
     feature = "export",
     not(any(feature = "changed_identity", feature = "fail_once"))
 ))]
-rutis_sdk::export_plugin! { id: "greeter", factory: Factory }
+rutis_sdk::export_plugin! {
+    id: "greeter",
+    factory: Factory,
+    schema: rutis_sdk::serde_json::json!({ "type": "object", "properties": { "greeting": { "type": "string" } } }),
+}
 
 #[cfg(all(
     feature = "export",

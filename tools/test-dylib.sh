@@ -10,7 +10,7 @@ cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo -C link-arg=-Wl,-rpath,\$ORIGIN"
 build_all() {
   cargo build --release -p rutis-dylib -p rutis-greeter-fixture-v1 -p rutis-greeter-fixture-v2 \
-    --lib --examples --features rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export
+    --lib --examples --features rutis-dylib/loader,rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export
 }
 export RUTIS_SDK_ARTIFACT_SHA256="$(printf '0%.0s' {1..64})"
 build_all
@@ -50,7 +50,7 @@ done
 
 # A third module changes id/name/injects; both swap and direct update must reject it.
 cargo build --release -p rutis-dylib -p rutis-greeter-fixture-v1 -p rutis-greeter-fixture-v2 \
-  --lib --examples --features rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export,rutis-greeter-fixture-v2/changed_identity
+  --lib --examples --features rutis-dylib/loader,rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export,rutis-greeter-fixture-v2/changed_identity
 test "$(sha256sum "$target_dir/release/librutis_sdk.so" | cut -d ' ' -f 1)" = "$sdk_sha"
 cargo xtask pack-plugin \
   --manifest-path "$repo_dir/tests/dylib-fixtures/greeter-v2/Cargo.toml" \
@@ -61,7 +61,7 @@ cargo xtask pack-plugin \
 
 # The first entry call fails; retry must reuse its mapped version slot.
 cargo build --release -p rutis-dylib -p rutis-greeter-fixture-v1 -p rutis-greeter-fixture-v2 \
-  --lib --examples --features rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export,rutis-greeter-fixture-v2/fail_once
+  --lib --examples --features rutis-dylib/loader,rutis-greeter-fixture-v1/export,rutis-greeter-fixture-v2/export,rutis-greeter-fixture-v2/fail_once
 test "$(sha256sum "$target_dir/release/librutis_sdk.so" | cut -d ' ' -f 1)" = "$sdk_sha"
 cargo xtask pack-plugin \
   --manifest-path "$repo_dir/tests/dylib-fixtures/greeter-v2/Cargo.toml" \
@@ -74,6 +74,7 @@ v1_hash="$(sha256sum "$base/v1/libgreeter.so" | cut -d ' ' -f 1)"
 mkdir -p "$base/cache/$v1_hash"
 printf truncated > "$base/cache/$v1_hash/libgreeter.so"
 RUTIS_PLUGIN_CACHE="$base/cache" RUTIS_PLUGIN_DROP_MARKER="$base/plugin-drop-marker" "$host" "$base/v1" "$base/v2" "$base/changed-identity" "$base/retry-entry"
+"$target_dir/release/examples/loader_host" "$base"
 cp "$base/v1/plugin.toml" "$base/bad-boot/plugin.toml"
 bad_sha="$(sha256sum "$base/bad-boot/libgreeter.so" | cut -d ' ' -f 1)"
 sed -i "s/$(sha256sum "$base/v1/libgreeter.so" | cut -d ' ' -f 1)/$bad_sha/" "$base/bad-boot/plugin.toml"

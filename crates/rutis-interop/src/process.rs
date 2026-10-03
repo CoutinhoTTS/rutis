@@ -57,6 +57,10 @@ pub struct Mount<'a> {
     pub events: Option<(Vec<String>, Arc<dyn EventSink>)>,
     /// Events the rutis side may emit into Cordis (see `Process::emit`).
     pub emits: Vec<String>,
+    /// With no `plugins`: start an empty Context whose Cordis resolves from
+    /// this file (a `package.json`), and load plugins later one by one with
+    /// [`Process::load_row`].
+    pub anchor: Option<&'a Path>,
 }
 impl Imports {
     fn update(&self, name: String, handle: Option<String>, version: u64) {
@@ -286,6 +290,7 @@ impl Process {
                 hosts,
                 events: None,
                 emits: Vec::new(),
+                anchor: None,
             },
         )
         .await
@@ -300,6 +305,7 @@ impl Process {
             hosts,
             events: forwarded,
             emits,
+            anchor,
         } = mount;
         let (forwarded_names, forwarded) = match forwarded {
             Some((names, sink)) => (names, Some(sink)),
@@ -313,8 +319,14 @@ impl Process {
             .into_iter()
             .map(|host| (host.name, host.dispatch))
             .collect();
-        let Some((plugin, _)) = plugins.first() else {
-            return Err(Error::Value("a mount needs at least one plugin".into()));
+        let plugin = match (plugins.first(), anchor) {
+            (Some((plugin, _)), _) => *plugin,
+            (None, Some(anchor)) => anchor,
+            (None, None) => {
+                return Err(Error::Value(
+                    "a mount needs at least one plugin or an anchor".into(),
+                ))
+            }
         };
         let plugins: Vec<Value> = plugins
             .iter()
@@ -384,6 +396,51 @@ impl Process {
             process.imports.update(name, handle, version);
         }
         Ok(process)
+    }
+
+    /// Load one plugin into the Context as row `key` (rows mode, see
+    /// [`Mount::anchor`]). `isolate` gives (service, label) pairs: rows
+    /// naming the same label share that service's scope; `inject` lists
+    /// extra services the row waits for. Resolves once the plugin settled.
+    pub async fn load_row(
+        &self,
+        key: &str,
+        entry: &Path,
+        config: Value,
+        isolate: &[(String, String)],
+        inject: &[String],
+    ) -> Result<(), Error> {
+        self.call_async(
+            "",
+            "rows.load",
+            json!([key, entry, config, isolate, inject]),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Give row `key` a new config. Cordis commits volatile values in place
+    /// (`loader/volatile-update`, as dsh's loader does); any other change
+    /// restarts the row with the config. An inactive row keeps it for its
+    /// next activation.
+    pub async fn update_row(&self, key: &str, config: Value) -> Result<(), Error> {
+        self.call_async("", "rows.update", json!([key, config]))
+            .await
+            .map(|_| ())
+    }
+
+    /// Dispose row `key`.
+    pub async fn unload_row(&self, key: &str) -> Result<(), Error> {
+        self.call_async("", "rows.unload", json!([key]))
+            .await
+            .map(|_| ())
+    }
+
+    /// The JSON Schema of the plugin at `entry` (its schemastery `Config`
+    /// converted), or `None` when it declares none.
+    pub async fn row_schema(&self, entry: &Path) -> Result<Option<Value>, Error> {
+        let schema = self.call_async("", "rows.schema", json!([entry])).await?;
+        Ok((!schema.is_null()).then_some(schema))
     }
 
     /// The handle of the object currently in an exported slot, if available.

@@ -8,18 +8,24 @@
 mod catalog;
 mod edit;
 mod error;
+#[cfg(all(unix, feature = "interop"))]
+mod interop;
 mod loader;
 mod patch;
 mod persist;
 mod resolver;
+mod volatile;
 
 pub use catalog::{ExprScope, Expressions, ServiceCatalog};
 pub use edit::{apply_edit, Edit};
 pub use error::{Failure, LoaderError, PersistError};
+#[cfg(all(unix, feature = "interop"))]
+pub use interop::{resolve_entry, InteropResolver};
 pub use loader::{
     Editable, EntryInfo, EntryStatus, Isolate, Loader, LoaderChanged, LoaderOptions, LoaderPlugin,
-    NewEntry, PendingEditDropped, ReconcileReport,
+    NewEntry, PendingEditDropped, ReconcileReport, RowInfo,
 };
 pub use patch::{apply_patches, Composed, ComposedRow, Layer, Owner, Patch, PatchWarning};
 pub use persist::{NoPersist, Persist, Version};
 pub use resolver::{Builtins, Chain, Resolved, Resolver};
+pub use volatile::{volatile_key, volatile_paths, VolatileUpdate};

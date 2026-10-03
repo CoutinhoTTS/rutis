@@ -1264,10 +1264,26 @@ impl FiberView {
                 return Box::pin(async move { join_task(&task).await });
             }
         }
+        let task = match self.register_dispose(|_| Ok(())) {
+            Ok(task) => task,
+            Err(_) => unreachable!("an unconditional dispose is always registered"),
+        };
+        Box::pin(async move { join_task(&task).await })
+    }
+
+    /// Register the dispose (or join the one registered) if `check` accepts
+    /// the transition state. Check and registration share one lock: no new
+    /// generation can start between them, and a restart that comes after
+    /// sees the terminal task and is refused.
+    pub(crate) fn register_dispose(
+        &self,
+        check: impl FnOnce(&Trans) -> Result<(), CordisError>,
+    ) -> Result<Arc<TransitionTask>, CordisError> {
         // 登记在调用点同步完成(评审 #2):dispose() 返回后,并发的
         // restart() 立刻可见终态任务并拒绝,不依赖本 future 被 poll
         let (task, newly_registered) = {
             let mut tr = self.inner.transition.lock().unwrap();
+            check(&tr)?;
             match &tr.terminal_task {
                 Some(task) => (task.clone(), false),
                 None => {
@@ -1284,7 +1300,7 @@ impl FiberView {
                 task.complete(self.inner.stopped_error());
             }
         }
-        Box::pin(async move { join_task(&task).await })
+        Ok(task)
     }
 
     /// 限制等待时间，不强制终止正在执行的插件或清理任务。
@@ -1429,6 +1445,59 @@ impl FiberView {
     pub fn current_config<C: Send + Sync + 'static>(&self) -> Option<Arc<C>> {
         let boxed = self.inner.config.lock().unwrap().clone()?;
         boxed.downcast::<C>().ok()
+    }
+
+    /// The identity of this fiber, as its contexts report in
+    /// [`Ctx::instance`]; use it to address instance events to the plugin.
+    pub fn instance(&self) -> crate::InstanceId {
+        self.inner.instance
+    }
+
+    /// Store `new_config` without restarting: the running instance keeps
+    /// going and later loads (restart, dependency reload) build from the new
+    /// config. Only `validate_config` runs. For changes the plugin applies
+    /// in place, such as cordis's volatile fields; everything else should
+    /// use [`FiberView::update`]. Refused like `update` for closed or
+    /// disposed fibers, static plugins and a mismatched config type.
+    pub fn set_config<C: Send + Sync + 'static>(
+        &self,
+        new_config: C,
+    ) -> Result<(), Arc<CordisError>> {
+        let this = &self.inner;
+        {
+            let tr = this.transition.lock().unwrap();
+            if this.ctx.shared().closing.load(Ordering::SeqCst)
+                || this.closing.load(Ordering::SeqCst)
+            {
+                return Err(Arc::new(CordisError::Closed));
+            }
+            if !this.is_root && (tr.terminal_task.is_some() || !this.alive.load(Ordering::SeqCst)) {
+                return Err(Arc::new(CordisError::InactiveEffect));
+            }
+        }
+        let factory = this
+            .factory
+            .as_ref()
+            .filter(|f| f.config_type_id() == TypeId::of::<C>())
+            .ok_or_else(|| {
+                Arc::new(CordisError::Validation {
+                    issues: vec![if this.factory.is_some() {
+                        "config type mismatch".into()
+                    } else {
+                        "fiber has no factory (static plugin has no config)".into()
+                    }],
+                })
+            })?;
+        let boxed: Arc<dyn Any + Send + Sync> = Arc::new(new_config);
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            factory.validate_config_erased(boxed.as_ref())
+        })) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(Arc::new(e)),
+            Err(p) => return Err(Arc::new(panic_error(p))),
+        }
+        *this.config.lock().unwrap() = Some(boxed);
+        Ok(())
     }
 }
 

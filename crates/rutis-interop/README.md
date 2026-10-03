@@ -134,3 +134,7 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 | `… 1.0.0 is installed, 2.0.0 is required` | 让 npm 项目与 `version` 一致 |
 | `… speaks protocol N, this rutis-interop speaks M` | 安装与 crate 匹配的 `@arcships/rutis-interop` |
 | `native plugin dependencies are unresolved: … (name)`（运行时） | 缺少的服务需要放进同一个 `group`，或在 `provide` 中由 rutis 提供 |
+
+## 逐个装载（rows）
+
+`Mount { anchor: Some(package_json), .. }` 不带插件时启动一个空的 Cordis Context，之后用 `Process::load_row` / `unload_row` 逐个装载、卸载插件，`row_schema` 读取插件 schemastery `Config` 转成的 JSON Schema。rutis-loader 的 `InteropResolver` 就是这样把 JavaScript 插件作为行来管理的。

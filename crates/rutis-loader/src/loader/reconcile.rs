@@ -10,11 +10,12 @@ use serde_json::Value;
 use crate::error::Failure;
 use crate::patch::{apply_patches, Layer};
 use crate::resolver::Resolved;
+use crate::volatile::{volatile_change, volatile_paths, VolatileUpdate};
 use crate::LoaderError;
 
 use super::desired::{Desired, Eval, Row, RowScope};
 use super::plugins::{EntryConfig, EntryFactory, GroupPlugin};
-use super::{EntryInfo, EntryStatus, Group, Inner, ReconcileReport, Running, State};
+use super::{EntryInfo, EntryStatus, Group, Inner, LoaderChanged, ReconcileReport, Running, State};
 
 /// The module's own injects followed by the row's `inject`, deduplicated.
 fn combined_injects(resolved: &Resolved, scope: &RowScope) -> Vec<TypeKey> {
@@ -27,15 +28,14 @@ fn combined_injects(resolved: &Resolved, scope: &RowScope) -> Vec<TypeKey> {
     keys
 }
 
-fn owned_signature(scope: &RowScope) -> (Vec<(String, String)>, Vec<String>) {
-    let (isolate, inject) = scope.signature();
-    (
-        isolate
-            .into_iter()
-            .map(|(n, l)| (n.to_owned(), l.to_owned()))
-            .collect(),
-        inject.into_iter().map(str::to_owned).collect(),
-    )
+/// The catalog scope a row runs with: none for a resolver that handles
+/// scope itself, else the row's resolved scope (`None` when it failed).
+fn effective_scope(resolved: &Resolved, row: &Row) -> Option<RowScope> {
+    if resolved.foreign_scope {
+        Some(RowScope::default())
+    } else {
+        row.scope.as_ref().ok().cloned()
+    }
 }
 
 impl Inner {
@@ -130,9 +130,31 @@ impl Inner {
             }
             let id = row.id.clone();
             let name = row.name.clone().unwrap_or_default();
-            let row_ctx = row.scope.context(&ctx);
-            let scope = owned_signature(&row.scope);
-            let extra: Vec<TypeKey> = row.scope.inject_keys().cloned().collect();
+            let scope = row.raw_scope.signature();
+            // A resolver that handles isolate/inject itself (foreign scope)
+            // gets the parent context as is; others need the catalog's keys.
+            let resolved = if row.group {
+                None
+            } else {
+                match state.resolved.get(&name).cloned() {
+                    Some(Ok(resolved)) => Some(resolved),
+                    _ => continue,
+                }
+            };
+            let foreign = resolved.as_ref().is_some_and(|r| r.foreign_scope);
+            let rust_scope = if foreign {
+                RowScope::default()
+            } else {
+                match &row.scope {
+                    Ok(scope) => scope.clone(),
+                    Err(error) => {
+                        state.rejected.insert(id, error.clone());
+                        continue;
+                    }
+                }
+            };
+            let row_ctx = rust_scope.context(&ctx);
+            let extra: Vec<TypeKey> = rust_scope.inject_keys().cloned().collect();
             state.next_token += 1;
             let token = state.next_token;
             if row.group {
@@ -142,6 +164,7 @@ impl Inner {
                     injects: extra,
                     token,
                 });
+                self.monitor(id.clone(), view.clone());
                 state.running.insert(
                     id,
                     Running {
@@ -152,6 +175,7 @@ impl Inner {
                         group: true,
                         name,
                         injects: Vec::new(),
+                        factory_name: String::new(),
                         resolved: None,
                         config: Value::Null,
                         scope,
@@ -160,9 +184,7 @@ impl Inner {
                 );
                 continue;
             }
-            let Some(Ok(resolved)) = state.resolved.get(&name).cloned() else {
-                continue;
-            };
+            let resolved = resolved.expect("a leaf row resolved above");
             let config = match self.eval().value(&row.config, Some(&row_ctx)) {
                 Ok(config) => config,
                 Err(error) => {
@@ -187,7 +209,7 @@ impl Inner {
                 continue;
             }
             state.rejected.remove(&id);
-            let injects = combined_injects(&resolved, &row.scope);
+            let injects = combined_injects(&resolved, &rust_scope);
             let view = row_ctx.plugin_with(
                 EntryFactory {
                     name: name.clone(),
@@ -198,6 +220,7 @@ impl Inner {
                     value: config.clone(),
                 },
             );
+            self.monitor(id.clone(), view.clone());
             state.running.insert(
                 id,
                 Running {
@@ -208,6 +231,7 @@ impl Inner {
                     group: false,
                     name,
                     injects,
+                    factory_name: resolved.factory.name().to_owned(),
                     resolved: Some(resolved),
                     config,
                     scope,
@@ -215,6 +239,50 @@ impl Inner {
                 },
             );
         }
+    }
+
+    /// Watch a spawned fiber; if it ends while still this row's record, the
+    /// plugin disposed itself: drop the record and disable the row, as
+    /// cordis's loader does. Disposals the loader starts (or a group's
+    /// cascade) remove the record first, so they are not mistaken for it.
+    fn monitor(self: &Arc<Self>, id: String, view: FiberView) {
+        let weak = Arc::downgrade(self);
+        let mut watch = view.watch();
+        tokio::spawn(async move {
+            loop {
+                if watch.borrow().state == FiberState::Disposed {
+                    break;
+                }
+                if watch.changed().await.is_err() {
+                    return;
+                }
+            }
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            {
+                let mut state = inner.state.lock().unwrap();
+                match state.running.get(&id) {
+                    Some(running) if running.view.id == view.id => {
+                        let running = state.running.remove(&id).unwrap();
+                        let key = Some(id.clone());
+                        if state.groups.get(&key).map(|g| g.token) == Some(running.token) {
+                            state.groups.remove(&key);
+                        }
+                    }
+                    _ => return,
+                }
+            }
+            let loader = super::Loader {
+                inner: inner.clone(),
+            };
+            let error = loader
+                .set_disabled(&id, true)
+                .await
+                .err()
+                .map(|e| e.to_string());
+            inner.emit(LoaderChanged::SelfDisposed { id, error });
+        });
     }
 
     pub(super) fn root(&self) -> Option<Ctx> {
@@ -304,7 +372,7 @@ impl Inner {
             let mut state = self.state.lock().unwrap();
             let before = Self::failures(&state);
             let root = state.groups.get(&None).map(|g| g.ctx.clone());
-            state.desired = self.build_desired(&state.layers, root.as_ref());
+            state.desired = self.build_desired(&state.composed_layers(), root.as_ref());
             let names: Vec<String> = state
                 .desired
                 .rows
@@ -337,7 +405,7 @@ impl Inner {
                 if row.parent != running.parent
                     || row.group != running.group
                     || !state.desired.wanted(row)
-                    || owned_signature(&row.scope) != running.scope
+                    || row.raw_scope.signature() != running.scope
                 {
                     continue;
                 }
@@ -345,7 +413,9 @@ impl Inner {
                     let name = row.name.clone().unwrap_or_default();
                     match state.resolved.get(&name) {
                         Some(Ok(resolved))
-                            if combined_injects(resolved, &row.scope) == running.injects => {}
+                            if effective_scope(resolved, row).is_some_and(|s| {
+                                combined_injects(resolved, &s) == running.injects
+                            }) && resolved.factory.name() == running.factory_name => {}
                         _ => continue,
                     }
                 }
@@ -400,11 +470,13 @@ impl Inner {
         }
 
         let mut updates = Vec::new();
+        let mut notifications = Vec::new();
         {
             let mut state = self.state.lock().unwrap();
             let state = &mut *state;
             let mut settled = Vec::new();
             let mut unevaluable = Vec::new();
+            let mut volatile = Vec::new();
             for (id, running) in state.running.iter() {
                 if running.group {
                     continue;
@@ -432,6 +504,17 @@ impl Inner {
                     settled.push(id.clone());
                     continue;
                 }
+                if same_module && running.view.state().state == FiberState::Active {
+                    let paths = resolved
+                        .schema
+                        .as_ref()
+                        .map(volatile_paths)
+                        .unwrap_or_default();
+                    if let Some(changed) = volatile_change(&running.config, &desired, &paths) {
+                        volatile.push((id.clone(), resolved.clone(), desired, changed));
+                        continue;
+                    }
+                }
                 let config = EntryConfig {
                     resolved: resolved.clone(),
                     value: desired,
@@ -450,10 +533,40 @@ impl Inner {
             for (id, error) in unevaluable {
                 state.rejected.insert(id, error);
             }
+            // Volatile-only changes: store without restarting, then tell the
+            // plugin. A refused store falls back to an ordinary update.
+            for (id, resolved, desired, paths) in volatile {
+                let Some(running) = state.running.get_mut(&id) else {
+                    continue;
+                };
+                let config = EntryConfig {
+                    resolved: resolved.clone(),
+                    value: desired.clone(),
+                };
+                if running.view.set_config(config.clone()).is_ok() {
+                    running.config = desired.clone();
+                    state.rejected.remove(&id);
+                    let running = &state.running[&id];
+                    notifications.push((
+                        running.ctx.clone(),
+                        crate::volatile::key_for(running.view.instance()),
+                        VolatileUpdate {
+                            paths,
+                            config: desired,
+                        },
+                    ));
+                } else {
+                    let name = running.name.clone();
+                    updates.push((id, running.view.clone(), running.view.update(config), name));
+                }
+            }
             let groups: Vec<Option<String>> = state.groups.keys().cloned().collect();
             for group in groups {
                 self.spawn_children(state, &group);
             }
+        }
+        for (ctx, key, update) in notifications {
+            let _ = ctx.events().emit(&ctx, &key, Arc::new(update));
         }
         for (id, view, update, name) in updates {
             let result = update.await;
@@ -557,11 +670,7 @@ impl Inner {
                 .overridden
                 .iter()
                 .map(|(field, &layer)| {
-                    let name = state
-                        .layers
-                        .get(layer)
-                        .map(|l| l.name.clone())
-                        .unwrap_or_default();
+                    let name = state.layer_name(layer).unwrap_or_default().to_owned();
                     (field.clone(), name)
                 })
                 .collect(),

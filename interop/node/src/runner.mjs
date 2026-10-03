@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Process } from './client.mjs'
+import { toJsonSchema } from './schema.mjs'
 
 const [socketPath, pluginPath] = process.argv.slice(2)
 
@@ -10,7 +11,9 @@ function cordisOf(entry) {
   try { return createRequire(entry).resolve('@deepseek-ai/cordis') } catch { return undefined }
 }
 const cordisPath = cordisOf(pluginPath)
-const { Context } = await import(cordisPath ? pathToFileURL(cordisPath).href : '@deepseek-ai/cordis')
+const { Context, resolveConfig } = await import(cordisPath ? pathToFileURL(cordisPath).href : '@deepseek-ai/cordis')
+// Volatile config helpers from the cosmokit that Cordis itself uses.
+const cosmokit = await import(pathToFileURL(createRequire(cordisPath ?? fileURLToPath(import.meta.resolve('@deepseek-ai/cordis'))).resolve('@deepseek-ai/cosmokit')).href).catch(() => ({}))
 let peer
 const ctx = new Context()
 let fibers
@@ -19,6 +22,8 @@ let closing = false
 let disposing
 let version = 0
 let emits = new Set() // events the rutis side may emit here
+// Rows: plugins rutis-loader manages one by one in this Context (`rows.*`).
+const rows = new Map() // key -> { fiber, inner, config }
 
 // Each exported service slot is projected as a sequence of object handles.
 // A handle always addresses the object it was created for; when the slot
@@ -101,13 +106,108 @@ ctx.on('internal/set', (_ctx, _name, _value, _error, next) => {
   return result
 })
 
-// Exporters go first (they consume the services), then the plugins in
-// reverse load order, like a native composition unwinding.
+// Exporters go first (they consume the services), then rows and the
+// plugins in reverse load order, like a native composition unwinding.
 function dispose() {
   return disposing ??= (async () => {
     for (const slot of slots.values()) await slot.exporter?.dispose()
+    for (const { fiber } of [...rows.values()].reverse()) await fiber.dispose()
+    rows.clear()
     for (const fiber of [...(fibers ?? [])].reverse()) await fiber.dispose()
   })()
+}
+
+// A plugin module: an `apply` export is a function plugin; otherwise the
+// default export, which is how packaged plugins ship their Service class.
+async function pluginOf(entry) {
+  const own = cordisOf(entry)
+  if (cordisPath && own && own !== cordisPath) {
+    throw new Error(`${entry} resolves a different Cordis (${own}) than ${pluginPath} (${cordisPath})`)
+  }
+  const module = await import(pathToFileURL(entry).href)
+  return typeof module.apply === 'function' ? module : (module.default ?? module)
+}
+
+// `plugin()` returns a thenable `Object.create(fiber)`; state written through
+// it (`update` sets `_config`) would land on the wrapper and never reach the
+// fiber that later activates. Rows keep the fiber itself.
+const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeOf(wrapped) : wrapped
+
+// One row: `isolate` as [name, label] pairs (rows naming a label share its
+// scope), `inject` as extra service names gating the row. With `inject`, the
+// plugin runs inside a gate fiber (`inner`), from the row's latest config.
+async function loadRow([key, entry, config, isolate, inject]) {
+  if (rows.has(key)) throw new Error(`row ${key} is already loaded`)
+  const plugin = await pluginOf(entry)
+  let scope = ctx
+  for (const [name, label] of isolate ?? []) scope = scope.isolate(name, Symbol.for(`rutis-row:${label}`))
+  const row = { fiber: undefined, inner: undefined, config }
+  const fiber = fiberOf(inject?.length
+    ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { row.inner = fiberOf(gated.plugin(plugin, row.config)) } })
+    : scope.plugin(plugin, config))
+  row.fiber = fiber
+  if (!inject?.length) row.inner = fiber
+  rows.set(key, row)
+  try {
+    await fiber.await()
+  } catch (error) {
+    rows.delete(key)
+    await fiber.dispose()
+    throw error
+  }
+  return null
+}
+
+// A new config for a row. Volatile values are committed into the running
+// plugin's references and announced with `loader/volatile-update`, as
+// cordis-plugin-loader's `_commitVolatile` does. Whenever that cannot apply
+// the change — ordinary values changed too, or the parsed config holds no
+// volatile references to commit into — the row takes an ordinary update
+// (a restart), so the plugin never keeps running on the old values.
+// (rutis-loader sends only changes its schema calls volatile; Cordis's parse
+// of the config has the last word.)
+async function updateRow([key, config]) {
+  const row = rows.get(key)
+  if (!row) throw new Error(`row ${key} is not loaded`)
+  row.config = config
+  const fiber = row.inner
+  // A gate whose plugin fiber is gone re-applies from row.config.
+  if (!fiber || fiber.uid === null) return null
+  // Not running (waiting for its own inject, or failed): store the config
+  // in the fiber, which activates from it.
+  if (fiber.state !== 2) {
+    fiber.update(config, true)
+    return null
+  }
+  if (commitVolatile(fiber, config)) return null
+  fiber.update(config, true)
+    await fiber.await()
+  return null
+}
+
+// Whether the change was committed in place. Throws when the config does
+// not validate.
+function commitVolatile(fiber, raw) {
+  const { volatileEntries, updateVolatile, deepEqual } = cosmokit
+  if (!volatileEntries || !resolveConfig) return false
+  const refs = volatileEntries(fiber.config)
+  if (!refs.length) return false
+  const candidate = resolveConfig(fiber.runtime, fiber.ctx.waterfall(fiber, 'internal/config', raw, () => raw))
+  if (!deepEqual(fiber.config, candidate, true)) return false
+  fiber._config = raw
+  const paths = refs.flatMap(({ path, ref }) => {
+    const source = path.reduce((value, key) => Reflect.get(value, key), candidate)
+    if (deepEqual(ref.get(), source.get(), true)) return []
+    updateVolatile(ref, source)
+    return [path]
+  })
+  if (paths.length) {
+    const self = Object.create(fiber.ctx)
+    // Only the row's own fiber hears it.
+    self[Context.filter] = owner => owner.fiber === fiber
+    fiber.ctx.emit(self, 'loader/volatile-update', paths)
+  }
+  return true
 }
 
 // A rutis service seen from Cordis: bound methods call the Rust host
@@ -136,7 +236,7 @@ function hostProxy(name, methods) {
 function mount(args) {
   if (fibers) throw new Error('plugins are already mounted')
   fibers = []
-  for (const [name, methods] of Object.entries(args.services)) {
+  for (const [name, methods] of Object.entries(args.services ?? {})) {
     if (name.includes('#')) throw new Error(`service name ${name} cannot be projected`)
     slots.set(name, { methods: new Set(methods), scope: undefined, object: undefined, identity: undefined, handle: null, generation: 0, version: 0 })
   }
@@ -153,11 +253,7 @@ function mount(args) {
       }
     }
     for (const { entry, config } of plugins) {
-      const module = await import(pathToFileURL(entry).href)
-      // An `apply` export is a function plugin; otherwise use the default
-      // export, which is how packaged plugins ship their Service class.
-      const plugin = typeof module.apply === 'function' ? module : (module.default ?? module)
-      fibers.push(ctx.plugin(plugin, config))
+      fibers.push(ctx.plugin(await pluginOf(entry), config))
     }
     for (const [name, slot] of slots) slot.exporter = exporter(name, slot)
     await Promise.all([...fibers, ...[...slots.values()].map(slot => slot.exporter)].map(fiber => fiber.await()))
@@ -206,6 +302,17 @@ function dispatch(target, method, args) {
         if (!slots.get(entry.name).methods.has(property)) throw new Error(`unknown service property ${entry.name}.${property}`)
         return entry.object[property]
       }
+      case 'rows.load': return loadRow(args ?? [])
+      case 'rows.update': return updateRow(args ?? [])
+      case 'rows.unload': {
+        const row = rows.get(args?.[0])
+        rows.delete(args?.[0])
+        return row ? row.fiber.dispose().then(() => null) : null
+      }
+      case 'rows.schema': return pluginOf(args?.[0]).then(plugin => {
+        const schema = plugin.Config ?? plugin.schema
+        return schema ? toJsonSchema(schema) : null
+      })
       case 'release': {
         const entry = handles.get(args?.[0])
         if (entry) { entry.released = true; if (!entry.current) handles.delete(args[0]) }

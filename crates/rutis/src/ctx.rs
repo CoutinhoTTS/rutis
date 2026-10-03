@@ -1219,6 +1219,36 @@ impl Ctx {
         view
     }
 
+    /// Close the plugin's own fiber, as cordis's `ctx.fiber.dispose()`.
+    /// Returns at once; the fiber unloads after the current apply or
+    /// callback returns, so never wait for it from inside the plugin. The
+    /// root cannot dispose itself this way (use [`Ctx::shutdown`]).
+    ///
+    /// Only the generation this context belongs to can dispose: a context
+    /// kept past a restart, or used while a restart is under way, gets
+    /// [`CordisError::InactiveEffect`] and the new generation keeps running.
+    pub fn dispose_self(&self) -> Result<(), CordisError> {
+        let fiber = self.0.fiber.upgrade().ok_or(CordisError::InactiveEffect)?;
+        if fiber.is_root {
+            return Err(CordisError::Validation {
+                issues: vec!["the root disposes through shutdown".into()],
+            });
+        }
+        // Registration happens in the call; the join future is not needed.
+        FiberView::from_inner(fiber).register_dispose(|tr| {
+            let stale = self.0.generation.is_some_and(|g| g != tr.generation);
+            // A restart cancels the generation's token before it unloads.
+            if stale
+                || self.cancellation_token().is_cancelled()
+                || matches!(tr.state, FiberState::Unloading | FiberState::Disposed)
+            {
+                return Err(CordisError::InactiveEffect);
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// 当前 fiber 代的取消 token(D27:每代独立 token,卸载第②步取消)。
     pub fn cancellation_token(&self) -> CancellationToken {
         if let Some(token) = &self.0.generation_token {

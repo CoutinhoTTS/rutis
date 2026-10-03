@@ -46,6 +46,10 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
+      # JavaScript plugins as rutis-loader rows (needs the interop runtime).
+      - name: cargo test (rutis-loader interop rows)
+        run: cargo test -p rutis-loader --features interop
+
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
 

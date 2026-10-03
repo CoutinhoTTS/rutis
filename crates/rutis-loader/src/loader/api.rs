@@ -1,17 +1,18 @@
 //! The public `Loader` methods.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use rutis::{FiberView, PluginId};
 use serde_json::Value;
 
 use crate::edit::Edit;
-use crate::patch::Layer;
+use crate::patch::{Layer, Patch};
 use crate::LoaderError;
 
 use super::{
     Editable, EntryInfo, Inner, Isolate, Loader, LoaderChanged, NewEntry, PendingEditDropped,
-    ReconcileReport,
+    ReconcileReport, RowInfo,
 };
 
 fn generate_id(taken: impl Fn(&str) -> bool) -> String {
@@ -81,9 +82,58 @@ impl Loader {
         Ok(report)
     }
 
-    /// The current layers.
+    /// The application's layers, as last given to `reconcile`.
     pub fn layers(&self) -> Vec<Layer> {
         self.inner.state.lock().unwrap().layers.clone()
+    }
+
+    /// The overlay layers, in composition order.
+    pub fn overlays(&self) -> Vec<Layer> {
+        self.inner.state.lock().unwrap().overlays.clone()
+    }
+
+    /// The editable layer and the stored version the loader holds for it.
+    pub fn editable(&self) -> Option<Editable> {
+        let state = self.inner.state.lock().unwrap();
+        state
+            .editable
+            .map(|i| Editable::new(state.layers[i].name.clone(), state.version.clone()))
+    }
+
+    /// Set (`Some`) or remove (`None`) the overlay layer `name` and reconcile.
+    ///
+    /// Overlays are composed after the application's layers and kept across
+    /// `reconcile`; they are never persisted and their rows cannot be edited
+    /// (they sit above the editable layer). A development channel loads
+    /// plugins this way without touching the user's configuration.
+    pub async fn set_overlay(
+        &self,
+        name: &str,
+        patches: Option<Vec<Patch>>,
+    ) -> Result<ReconcileReport, LoaderError> {
+        let inner = &self.inner;
+        let _op = inner.op.lock().await;
+        inner.check_open()?;
+        {
+            let mut state = inner.state.lock().unwrap();
+            if state.layers.iter().any(|l| l.name == name) {
+                return Err(LoaderError::InvalidEntry(format!(
+                    "{name:?} is an application layer"
+                )));
+            }
+            let at = state.overlays.iter().position(|l| l.name == name);
+            match (at, patches) {
+                (Some(i), Some(patches)) => state.overlays[i].patches = patches,
+                (None, Some(patches)) => state.overlays.push(Layer::new(name, patches)),
+                (Some(i), None) => {
+                    state.overlays.remove(i);
+                }
+                (None, None) => {}
+            }
+        }
+        let report = inner.reconcile_inner().await;
+        inner.emit(LoaderChanged::Overlay(name.to_owned()));
+        Ok(report)
     }
 
     /// Edits applied but not yet persisted.
@@ -112,6 +162,23 @@ impl Loader {
     pub fn get(&self, id: &str) -> Option<EntryInfo> {
         let state = self.inner.state.lock().unwrap();
         state.desired.row(id).map(|row| Inner::info(&state, row))
+    }
+
+    /// The row whose fiber has `instance` (the plugin's `ctx.instance()`).
+    /// Answers from inside `apply`: the loader records a fiber before its
+    /// first load runs.
+    pub fn row(&self, instance: rutis::InstanceId) -> Option<RowInfo> {
+        let state = self.inner.state.lock().unwrap();
+        let (id, _) = state
+            .running
+            .iter()
+            .find(|(_, r)| r.view.instance() == instance)?;
+        let row = state.desired.row(id)?;
+        Some(RowInfo {
+            id: id.clone(),
+            isolate: row.raw_scope.isolate.clone(),
+            inject: row.raw_scope.inject.clone(),
+        })
     }
 
     /// The row whose fiber is `plugin` or an ancestor of it.
@@ -164,7 +231,10 @@ impl Loader {
             .groups
             .get(&row.parent)
             .or(state.groups.get(&None))
-            .map(|g| row.scope.context(&g.ctx));
+            .map(|g| match &row.scope {
+                Ok(scope) => scope.context(&g.ctx),
+                Err(_) => g.ctx.clone(),
+            });
         Some(self.inner.eval().value(&row.config, base.as_ref()))
     }
 
@@ -300,22 +370,87 @@ impl Loader {
 
     /// Resolve a row's module again (a dylib upgrade, say) and apply it.
     /// Changes no layer and persists nothing.
+    ///
+    /// All or nothing: if the new module does not resolve, its dry run
+    /// fails, or rows newly fail with it, the previous module stays (and is
+    /// reloaded after a failed apply) and the error is returned.
     pub async fn reload(&self, id: &str) -> Result<ReconcileReport, LoaderError> {
         let inner = &self.inner;
         let _op = inner.op.lock().await;
         inner.check_open()?;
-        {
-            let mut state = inner.state.lock().unwrap();
-            let name = state
+        let (name, previous, layers, before) = {
+            let state = inner.state.lock().unwrap();
+            let row = state
                 .desired
                 .row(id)
-                .ok_or_else(|| LoaderError::UnknownEntry(id.to_owned()))?
-                .name
-                .clone()
-                .unwrap_or_default();
-            state.resolved.remove(&name);
+                .ok_or_else(|| LoaderError::UnknownEntry(id.to_owned()))?;
+            let name = row.name.clone().unwrap_or_default();
+            (
+                name.clone(),
+                state.resolved.get(&name).cloned(),
+                state.composed_layers(),
+                Inner::failures(&state),
+            )
+        };
+        let fresh = inner.resolver.resolve(&name).await;
+        let resolved = match fresh {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                // A row that never resolved shows the new reason; a running
+                // module stays.
+                if !matches!(previous, Some(Ok(_))) {
+                    inner
+                        .state
+                        .lock()
+                        .unwrap()
+                        .resolved
+                        .insert(name, Err(error.clone()));
+                    inner.reconcile_inner().await;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(Ok(previous)) = &previous {
+            if Arc::ptr_eq(previous, &resolved) {
+                return Ok(inner.reconcile_inner().await);
+            }
         }
+        inner.dry_run(&layers, id, Some(resolved.clone())).await?;
+        inner
+            .state
+            .lock()
+            .unwrap()
+            .resolved
+            .insert(name.clone(), Ok(resolved));
         let report = inner.reconcile_inner().await;
+        if !report.new_failures.is_empty() {
+            {
+                let mut state = inner.state.lock().unwrap();
+                match previous {
+                    Some(previous) => state.resolved.insert(name, previous),
+                    None => state.resolved.remove(&name),
+                };
+            }
+            inner.reconcile_inner().await;
+            let lingering: Vec<crate::Failure> = {
+                let state = inner.state.lock().unwrap();
+                Inner::failures(&state)
+                    .into_iter()
+                    .filter(|f| !before.contains(f))
+                    .map(|(f, _)| f)
+                    .collect()
+            };
+            return Err(if lingering.is_empty() {
+                LoaderError::ApplyFailed {
+                    failures: report.new_failures,
+                }
+            } else {
+                LoaderError::RollbackFailed {
+                    apply: report.new_failures,
+                    rollback: lingering,
+                }
+            });
+        }
         inner.emit(LoaderChanged::Reloaded(id.to_owned()));
         Ok(report)
     }

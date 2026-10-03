@@ -16,6 +16,13 @@ serde_json = { version = "1", features = ["preserve_order"] }
 schemars = "1"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+rutis-interop = { path = "../rutis-interop", version = "0.1.0", optional = true }
+url = { version = "2", optional = true }
+
+[features]
+# InteropResolver: JavaScript (Cordis) plugins as rows, through rutis-interop (Unix).
+interop = ["dep:rutis-interop", "dep:url"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+tempfile = "3"

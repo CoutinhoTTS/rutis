@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rutis", "crates/rutis-agent", "crates/rutis-cli", "crates/rutis-dsh", "crates/aimux-llm", "crates/rutis-sdk", "crates/rutis-dylib", "crates/rutis-dylib-launcher", "crates/rutis-xtask", "crates/rutis-interop", "crates/rutis-loader", "examples/native-mount", "examples/dsh-baseline", "examples/interop-experiments", "tests/dylib-fixtures/greeter-v1", "tests/dylib-fixtures/greeter-v2"]
+members = ["crates/rutis", "crates/rutis-agent", "crates/rutis-cli", "crates/rutis-dsh", "crates/aimux-llm", "crates/rutis-sdk", "crates/rutis-dylib", "crates/rutis-dylib-launcher", "crates/rutis-xtask", "crates/rutis-interop", "crates/rutis-loader", "crates/rutis-dev", "examples/native-mount", "examples/dsh-baseline", "examples/interop-experiments", "tests/dylib-fixtures/greeter-v1", "tests/dylib-fixtures/greeter-v2"]
 
 [workspace.package]
 edition = "2021"
