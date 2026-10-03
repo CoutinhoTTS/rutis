@@ -2,7 +2,7 @@
 name = "rutis-dylib"
 description = "Optional loader for trusted rutis dylib plugins"
 edition.workspace = true
-version = "0.1.0"
+version = "0.2.0"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
