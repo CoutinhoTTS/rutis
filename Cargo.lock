@@ -2829,6 +2829,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rutis-channel"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rutis-cli"
 version = "0.6.0"
 dependencies = [
