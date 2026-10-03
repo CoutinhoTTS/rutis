@@ -15,7 +15,7 @@
 
 **前提一:P3–P6 先进 main。** #98(P3 `DylibResolver`)到 #101 合入的是各自的堆叠基分支,不是 main:
 `origin/main` 停在 #97,`DylibResolver` 只在 `feat/loader-catalog-expr` 上,P6 的完整代码在 `feat/loader-volatile` 上。
-#102 的验收包括 `loader_host` 示例,所以要等 [#104](https://github.com/arcships/rutis/pull/104)(把同一棵树合进 main)合入。本文以该树为基线。
+#102 的验收包括 `loader_host` 示例,[#104](https://github.com/arcships/rutis/pull/104) 已于 2026-10-03 把同一棵树合进 main,这一前提已满足。
 
 **前提二:修正现有的 SDK 可复现测试。** `tools/test-dylib-repro.sh` 和 CI 的 `sdk-repro` 用 `cargo build -p rutis-sdk` 构建。
 SDK 作为 primary package 时,Cargo 不传 `-C prefer-dynamic`,产出的是**静态链接 std** 的变体;实际发布的 SDK 是作为
@@ -90,10 +90,13 @@ Linux 的手写 `elf_section` 删除,改用同一套代码,现有 Linux 测试(�
 `dlopen`/`dlsym`/`dladdr` 的用法不变。macOS 上的差异:
 
 - **库文件名**不再写死:打包工具按目标三元组推出前后缀(`lib*.so`、`lib*.dylib`、`*.dll`)。加载器本来就读清单中的 `library`。
-- **quarantine(E11)**:`dlopen` 前检查**实际要打开的缓存文件**是否带 `com.apple.quarantine`,有则拒绝,错误中说明原因和解除方法
-  (`xattr -d com.apple.quarantine`),由用户决定;加载器不自动清除,那等于替用户绕过 Gatekeeper。
-  只查源文件不够:`ensure_cached` 会复用哈希一致的已有缓存条目(`linux.rs:555`),用户用 `cp` 或 Finder 放进去的同哈希文件可能带着该属性。
-  缓存的写入路径是“读字节 → 写临时文件 → rename”,本来就不会继承扩展属性。
+- **quarantine(E11)**:检查两处,任一处带 `com.apple.quarantine` 就拒绝。错误中说明原因和解除方法(`xattr -d com.apple.quarantine`),
+  由用户决定;加载器不自动清除,那等于替用户绕过 Gatekeeper。
+  1. **源文件**:每次 `load` 都在读取源文件、写入或复用缓存**之前**检查,不论缓存是否命中。缓存的写入路径是“读字节 → 写临时文件 → rename”,
+     不会带上扩展属性;如果只查缓存,第一次加载一个下载来的插件时,quarantine 在写入缓存时就丢了,检查形同虚设。
+     复制进缓存不能被当作用户已经同意。
+  2. **缓存文件**:`dlopen` 前检查实际要打开的缓存文件。`ensure_cached` 会复用哈希一致的已有缓存条目(`linux.rs:555`),
+     用户用 `cp` 或 Finder 放进去的同哈希文件可能带着该属性。
 - **覆盖已映射的文件**:原地改写已加载的 dylib 会因代码签名页校验失败导致进程被杀。现有缓存“临时文件 + 原子 rename、
   不原地覆盖”的规则已覆盖这一点,在注释中写明。
 - **宿主自检** `loaded_sdk_path()` 仍用 `dladdr`;评审确认 macOS 返回展开后的绝对路径。
@@ -242,7 +245,9 @@ E5 回答了 SDK 设计稿 V2 的主要问题:`RTLD_LOCAL` + 两级命名空间�
 | 插件动态链接一个系统原生库(如 `/usr/lib/libz.1.dylib`) | 正常加载;清单 `[native_deps]` 中有该库 |
 | 二进制的原生库依赖与清单 `[native_deps]` 不一致 | 加载前被拒绝 |
 | 宿主开 hardened runtime + `disable-library-validation` | 换代测试通过 |
-| 缓存中同哈希条目带 quarantine 属性 | 加载前被拒绝,不卡住 |
+| 源文件带 quarantine,缓存为空 | 读取和写入缓存之前被拒绝,缓存中不出现该文件 |
+| 源文件带 quarantine,缓存中已有同哈希的干净条目 | 被拒绝(源文件检查不因缓存命中而跳过) |
+| 源文件干净,缓存中同哈希条目带 quarantine | `dlopen` 前被拒绝,不卡住 |
 | fat 插件、x86_64 插件、iOS 模拟器插件 | 加载前被拒绝,原因为格式、架构或平台 |
 | SDK 计数分配器(E14) | 宿主与插件的分配经过 SDK;断言 SDK 分配器类型为 `System` |
 | 发布目录 `codesign --verify` | 全部通过 |
@@ -317,7 +322,7 @@ W1 不依赖本文其他改动,可以立即开始。
 
 | PR | 内容 | 依赖 |
 | --- | --- | --- |
-| 0a | [#104](https://github.com/arcships/rutis/pull/104):P3–P6 合进 main | — |
+| 0a | [#104](https://github.com/arcships/rutis/pull/104):P3–P6 合进 main(已合入) | — |
 | 0b | 修正 SDK 可复现测试:按宿主锚点构建(前提二) | — |
 | A1 | `rutis-dylib-meta`(`object`);Linux 改用它读引导 blob;打包工具改写为 Rust;脚本公共函数。Linux 行为与 SDK 字节都不变 | 0a |
 | A2 | 链接参数改由 `build.rs` 按产物注入;依赖检查(§3.3);`export_plugin!` 节名按格式选择;显式 `[profile.release]`;SDK minor 升级 | A1、0b |
@@ -375,3 +380,10 @@ A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖�
 | R8 | Windows 跨 DLL TLS(W8) | rustc 1.70 起([#108089](https://github.com/rust-lang/rust/pull/108089))msvc 目标对 dylib 的跨 crate TLS 访问改走 shim 函数;1.98 把 TLS 析构改为 FLS 实现。tokio 只在 SDK 中有一份时,上下文应是单份 | W8 风险下调,但仍需实测 |
 | R9 | 同名 DLL 两个版本(W2) | Microsoft 文档:传完整路径时只在该路径查找;依赖 DLL 按模块名解析,并优先复用已加载的同名模块 | W2 预期可行;插件目录中不得再放 SDK 副本 |
 | R10 | VC 运行时(W4) | rustup 预编译的 std 动态链接 CRT,需要 vcruntime140.dll 和 UCRT;与 `+crt-static` 混用会在进程中出现多份 CRT | 不开 `crt-static`;VC++ 运行库由用户安装(§六 第 3 条) |
+
+## 九、PR 评审记录(#105,2026-10-03)
+
+| 级别 | 意见 | 处理 |
+| --- | --- | --- |
+| P2 | quarantine 只检查复制后的缓存文件可被绕过:缓存按字节写入,不保留扩展属性,下载插件第一次加载时属性丢失 | 源文件在读取、写入或复用缓存之前检查,不论缓存是否命中;缓存文件在 `dlopen` 前再检查;增加三种验收(§3.2、§3.7) |
+
