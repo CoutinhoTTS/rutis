@@ -220,7 +220,8 @@ impl Loader {
                 format!("library SHA-256 mismatch: {actual_hash}"),
             ));
         }
-        let boot = parse_boot(&bytes).map_err(|e| fail("boot metadata", e))?;
+        let boot = rutis_dylib_meta::read_boot(&bytes, rutis_sdk::SDK_TARGET)
+            .map_err(|e| fail("boot metadata", e))?;
         if boot.sdk_id != SDK_ID
             || boot.sdk_artifact != self.sdk_artifact_sha256
             || boot.sdk_id != manifest.sdk.id
@@ -463,120 +464,17 @@ impl PluginFactory<DylibConfig> for DylibFactory {
     }
 }
 
-struct BootMeta {
-    sdk_id: String,
-    sdk_artifact: String,
-    id: String,
-    version: String,
-}
-fn parse_boot(bytes: &[u8]) -> Result<BootMeta, String> {
-    // Rust embeds another copy of the static in its .rustc metadata. A raw
-    // magic search therefore cannot identify the blob that the linker maps.
-    let boot = elf_section(bytes, b".note.rutis.meta")?;
-    if boot.len() != BOOT_SIZE || !boot.starts_with(BOOT_MAGIC) {
-        return Err("invalid plugin boot section".into());
+// The SDK cannot depend on rutis-dylib-meta (that would change its identity),
+// so the boot format is written down twice. Keep the two in step.
+const _: () = {
+    assert!(BOOT_SIZE == rutis_dylib_meta::BOOT_SIZE);
+    assert!(BOOT_MAGIC.len() == rutis_dylib_meta::BOOT_MAGIC.len());
+    let mut i = 0;
+    while i < BOOT_MAGIC.len() {
+        assert!(BOOT_MAGIC[i] == rutis_dylib_meta::BOOT_MAGIC[i]);
+        i += 1;
     }
-    let mut pos = BOOT_MAGIC.len();
-    let mut next = || -> Result<String, String> {
-        let len_bytes = boot
-            .get(pos..pos + 2)
-            .ok_or("truncated boot field length")?;
-        let len = u16::from_le_bytes([len_bytes[0], len_bytes[1]]) as usize;
-        pos += 2;
-        let value = boot.get(pos..pos + len).ok_or("truncated boot field")?;
-        pos += len;
-        std::str::from_utf8(value)
-            .map(str::to_string)
-            .map_err(|e| e.to_string())
-    };
-    Ok(BootMeta {
-        sdk_id: next()?,
-        sdk_artifact: next()?,
-        id: next()?,
-        version: next()?,
-    })
-}
-
-fn elf_section<'a>(bytes: &'a [u8], wanted: &[u8]) -> Result<&'a [u8], String> {
-    if bytes.get(..6) != Some(b"\x7fELF\x02\x01") {
-        return Err("expected little-endian ELF64".into());
-    }
-    let u16_at = |pos: usize| -> Result<usize, String> {
-        let raw: [u8; 2] = bytes
-            .get(pos..pos + 2)
-            .ok_or("truncated ELF header")?
-            .try_into()
-            .unwrap();
-        Ok(u16::from_le_bytes(raw) as usize)
-    };
-    let u32_at = |pos: usize| -> Result<usize, String> {
-        let raw: [u8; 4] = bytes
-            .get(pos..pos + 4)
-            .ok_or("truncated ELF section")?
-            .try_into()
-            .unwrap();
-        Ok(u32::from_le_bytes(raw) as usize)
-    };
-    let u64_at = |pos: usize| -> Result<usize, String> {
-        let raw: [u8; 8] = bytes
-            .get(pos..pos + 8)
-            .ok_or("truncated ELF section")?
-            .try_into()
-            .unwrap();
-        usize::try_from(u64::from_le_bytes(raw)).map_err(|_| "ELF offset too large".into())
-    };
-    let offset = u64_at(40)?;
-    let size = u16_at(58)?;
-    let count = u16_at(60)?;
-    let names = u16_at(62)?;
-    if size < 64 || count == 0 || names >= count {
-        return Err("unsupported ELF section table".into());
-    }
-    let section = |index: usize| -> Result<(usize, usize, usize), String> {
-        let base = offset
-            .checked_add(index.checked_mul(size).ok_or("ELF section overflow")?)
-            .ok_or("ELF section overflow")?;
-        let _ = bytes
-            .get(base..base + 64)
-            .ok_or("truncated ELF section table")?;
-        Ok((u32_at(base)?, u64_at(base + 24)?, u64_at(base + 32)?))
-    };
-    let (_, name_offset, name_size) = section(names)?;
-    let names = bytes
-        .get(
-            name_offset
-                ..name_offset
-                    .checked_add(name_size)
-                    .ok_or("ELF name table overflow")?,
-        )
-        .ok_or("truncated ELF name table")?;
-    let mut found = None;
-    for index in 0..count {
-        let (name, data_offset, data_size) = section(index)?;
-        let Some(name_bytes) = names.get(name..) else {
-            return Err("bad ELF section name".into());
-        };
-        let Some(end) = name_bytes.iter().position(|b| *b == 0) else {
-            return Err("unterminated ELF section name".into());
-        };
-        if &name_bytes[..end] == wanted {
-            if found.is_some() {
-                return Err("duplicate plugin boot section".into());
-            }
-            found = Some(
-                bytes
-                    .get(
-                        data_offset
-                            ..data_offset
-                                .checked_add(data_size)
-                                .ok_or("ELF section overflow")?,
-                    )
-                    .ok_or("truncated plugin boot section")?,
-            );
-        }
-    }
-    found.ok_or_else(|| "plugin boot section missing".into())
-}
+};
 
 fn sha_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))

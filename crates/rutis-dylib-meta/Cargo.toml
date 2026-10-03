@@ -1,0 +1,14 @@
+[package]
+name = "rutis-dylib-meta"
+description = "Read the identity and dependencies of a rutis dylib plugin without loading it"
+edition.workspace = true
+version = "0.1.0"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+object = { version = "0.40", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"] }
+
+[dev-dependencies]
+object = { version = "0.40", default-features = false, features = ["read_core", "elf", "macho", "pe", "std", "write"] }
