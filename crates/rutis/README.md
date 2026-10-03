@@ -21,6 +21,10 @@ rutis = "0.6.0"
 
 首次使用建议先读[应用设计指南](https://github.com/arcships/rutis/blob/main/docs/development-guide.md)，再按[开发手册](https://github.com/arcships/rutis/blob/main/docs/development-handbook.md)实现。配套示例可在仓库中运行：`cargo run -p rutis --example development_workflow`。
 
+## 0.6.1
+
+为插件控制面（新 crate [rutis-loader](https://crates.io/crates/rutis-loader)）补充的接口，无破坏性变更：`impl Plugin for Box<dyn Plugin>`、`Ctx::view`、`Ctx::dispose_self`、`FiberView::instance`、`FiberView::set_config`，以及服务注册或移除时发出的 `ServiceChanged` 事件。见 [0.6.0 → 0.6.1 升级说明](../../docs/migration-0.6.0-to-0.6.1.md)。
+
 ## 0.6
 
 会继续扩展的错误、诊断与观察类型标为 `#[non_exhaustive]`，此后增加字段或变体不再是破坏性变更；`EventOptions` 改用 `EventOptions::default().prepend(true)` 构造。诊断新增同键 emit 积压（`event_backlogs`）。见 [0.5 → 0.6 迁移说明](../../docs/migration-0.5-to-0.6.md)。

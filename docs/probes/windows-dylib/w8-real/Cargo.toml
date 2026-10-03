@@ -1,0 +1,7 @@
+# W8 with the real SDK: crates/rutis-sdk, a copy of tests/dylib-fixtures/greeter-v1
+# (without its Linux-only .init_array marker) and a host that runs the plugin
+# on a rutis Ctx. Build both in one invocation so the SDK is built once:
+#   cargo build --release -p w8-real-host -p w8-real-greeter
+[workspace]
+resolver = "2"
+members = ["host", "greeter"]
