@@ -62,6 +62,35 @@ pub fn expand(layers: &[Layer], base: &Path) -> Expansion {
     expansion
 }
 
+/// The file an include's `path` names: `fileURLToPath(new URL(path, base))`
+/// with `base` a directory, as cordis-plugin-include resolves it. So the
+/// path is a URL reference: percent-escapes decode, `?` and `#` end it, and
+/// `file:` URLs work; what Node's `fileURLToPath` refuses is an error.
+pub fn include_file(base: &Path, path: &str) -> Result<PathBuf, String> {
+    let invalid = |why: &str| format!("include path {path:?}: {why}");
+    let base = url::Url::from_directory_path(paths::absolute(base))
+        .map_err(|()| invalid("the base directory is not a file URL"))?;
+    let url = base.join(path).map_err(|e| invalid(&e.to_string()))?;
+    if url.scheme() != "file" {
+        return Err(invalid("not a file URL"));
+    }
+    let raw = url.path().as_bytes();
+    for (i, byte) in raw.iter().enumerate() {
+        if *byte != b'%' {
+            continue;
+        }
+        let hex = raw.get(i + 1..i + 3).unwrap_or_default();
+        if hex.len() != 2 || !hex.iter().all(u8::is_ascii_hexdigit) {
+            return Err(invalid("malformed percent-escape"));
+        }
+        if hex.eq_ignore_ascii_case(b"2f") {
+            return Err(invalid("must not include an encoded /"));
+        }
+    }
+    url.to_file_path()
+        .map_err(|()| invalid("names a remote host"))
+}
+
 fn children(
     id: &str,
     row: &Value,
@@ -77,8 +106,7 @@ fn children(
         .get("path")
         .and_then(Value::as_str)
         .ok_or("config.path must be a file path")?;
-    let path = path.strip_prefix("file://").unwrap_or(path);
-    let file = PathBuf::from(paths::resolve(&base.to_string_lossy(), &[path]));
+    let file = include_file(base, path)?;
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !matches!(ext, "yml" | "yaml" | "json") {
         return Err(format!("extension {ext:?} not supported"));
@@ -156,6 +184,43 @@ fn prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Expectations from Node: `fileURLToPath(new URL(path, base))`.
+    #[test]
+    fn include_paths_resolve_like_node() {
+        let base = Path::new("/p/my profile");
+        let cases: [(&str, Option<&str>); 22] = [
+            ("./a.yml", Some("/p/my profile/a.yml")),
+            ("a.yml", Some("/p/my profile/a.yml")),
+            ("my file.yml", Some("/p/my profile/my file.yml")),
+            ("my%20file.yml", Some("/p/my profile/my file.yml")),
+            ("sub/../b.yml", Some("/p/my profile/b.yml")),
+            ("../up.yml", Some("/p/up.yml")),
+            ("/abs/c.yml", Some("/abs/c.yml")),
+            ("/abs dir/c.yml", Some("/abs dir/c.yml")),
+            ("file:///abs/%E6%8F%92%E4%BB%B6.yml", Some("/abs/插件.yml")),
+            ("插件.yml", Some("/p/my profile/插件.yml")),
+            ("a%23b.yml", Some("/p/my profile/a#b.yml")),
+            ("a#frag.yml", Some("/p/my profile/a")),
+            ("q.yml?x=1", Some("/p/my profile/q.yml")),
+            ("100%25.yml", Some("/p/my profile/100%.yml")),
+            ("100%.yml", None),
+            ("a%2Fb.yml", None),
+            ("file://localhost/l.yml", Some("/l.yml")),
+            ("file://server/s.yml", None),
+            ("http://x/h.yml", None),
+            ("a\\b.yml", Some("/p/my profile/a/b.yml")),
+            ("//host/x.yml", None),
+            ("~/t.yml", Some("/p/my profile/~/t.yml")),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                include_file(base, path).ok(),
+                expected.map(PathBuf::from),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn expands_nested_includes_with_prefixed_ids() {
