@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Peer } from '../src/peer.mjs'
+import { Session } from '../src/session.mjs'
 const data = value => ({ type: 'data', value })
 function harness(dispatch) {
   const sent = [], incoming = []
   let fault
-  const peer = new Peer({
+  const peer = new Session({
     dispatch,
     send: line => sent.push(JSON.parse(line)),
     pump: () => { assert.ok(incoming.length, 'sync caller must not strand'); peer.receive(incoming.shift()) },

@@ -12,7 +12,7 @@ rutis 应用进程                                   Node 进程
 | ctx.plugin(bindings::Plugin) |                | runner.mjs                |
 |   Projection                 |                |   真实 Cordis Context     |
 |   -> provide_mut_as / 替换   |  Unix socket   |   原 TS 插件              |
-|   Process + rpc::Connection  | <============> |   Peer（client.mjs）      |
+|   Process + rpc::Connection  | <============> |   Session（client.mjs）   |
 |                              |  逐行 JSON 帧  |   I/O Worker              |
 +------------------------------+                +---------------------------+
 ```
@@ -23,7 +23,7 @@ rutis 应用进程                                   Node 进程
 | 挂载插件 | 生成代码 | 启动 Node 进程、注册清理 effect、把服务交给 `Projection` 发布 |
 | `Projection` | `crates/rutis-interop/src/projection.rs` | 把 Cordis 服务槽位的变化映射为 rutis 服务的注册、替换和撤销 |
 | `Process` / `rpc` | `crates/rutis-interop/src/{process,rpc,protocol}.rs` | 进程管理、线协议、调用与引用表 |
-| runner / Peer | `interop/node/src/{runner,client,peer,io-worker,errors}.mjs` | 按顺序加载一个或一组原插件，跟踪服务槽位，执行调用 |
+| runner / Session | `interop/node/src/{runner,client,session,io-worker,codec,errors}.mjs`、`channel/` | 按顺序加载一个或一组原插件，跟踪服务槽位，执行调用 |
 
 rutis 内核和 Cordis 都没有为兼容做任何修改。
 
