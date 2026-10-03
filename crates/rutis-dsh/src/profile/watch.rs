@@ -4,14 +4,17 @@
 //! files, user, home and overlay layers, included files) and, when any
 //! changed, reads the profile again and reconciles the loader. Reconcile
 //! reports new failures but never rolls back: the change came from outside.
-//! A file that cannot be read or parsed keeps the running tree.
+//! A file that cannot be read or parsed keeps the running tree: that
+//! includes a broken bundle or include, which a fresh boot would skip but
+//! which mid-edit or mid-install is usually transient. The files that
+//! failed stay watched, so fixing them reloads.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use rutis_loader::{Loader, ReconcileReport};
 
-use super::layers::{load, version_of, ProfileContext};
+use super::layers::{load, version_of, Profile, ProfileContext, SkipKind};
 
 /// What a reload produced.
 #[derive(Debug)]
@@ -40,6 +43,18 @@ fn fingerprint(files: &[PathBuf]) -> Vec<(PathBuf, String)> {
             (file.clone(), version.0)
         })
         .collect()
+}
+
+/// What makes `profile` unfit to replace a running one.
+fn broken(profile: &Profile) -> Option<String> {
+    let mut problems: Vec<String> = profile
+        .skipped
+        .iter()
+        .filter(|s| s.kind == SkipKind::Broken)
+        .map(|s| format!("bundle {:?}: {}", s.package, s.reason))
+        .collect();
+    problems.extend(profile.issues.iter().cloned());
+    (!problems.is_empty()).then(|| problems.join("; "))
 }
 
 /// Poll `context`'s files every `interval` and reconcile `loader` on change.
@@ -71,6 +86,10 @@ pub fn watch(
             };
             // Files may have come or gone (a bundle added, an include).
             seen = fingerprint(&profile.files);
+            if let Some(error) = broken(&profile) {
+                on_reload(Reload::Failed(error));
+                continue;
+            }
             match loader
                 .reconcile(profile.layers, Some(profile.editable))
                 .await

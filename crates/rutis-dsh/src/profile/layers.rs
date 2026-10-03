@@ -80,7 +80,19 @@ impl ProfileContext {
 #[derive(Debug, Clone)]
 pub struct SkippedBundle {
     pub package: String,
+    pub kind: SkipKind,
     pub reason: String,
+}
+
+/// Why a bundle was skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    /// It declares a dsh runtime this one does not satisfy: a verdict on
+    /// the bundle, not on the disk.
+    Incompatible,
+    /// It could not be found, read or parsed — possibly mid-install or
+    /// mid-edit, so a reload should not act on it.
+    Broken,
 }
 
 #[derive(Debug, Clone)]
@@ -387,24 +399,37 @@ fn bundle_layer(
     runtime: Option<&str>,
     exemptions: &BTreeMap<String, Vec<String>>,
     files: &mut Vec<PathBuf>,
-) -> Result<Layer, String> {
+) -> Result<Layer, (SkipKind, String)> {
+    let broken = |reason: String| (SkipKind::Broken, reason);
     let profile_anchor = context.dir.join("package.json");
     let dir = package_dir(&context.install_anchor, package)
         .or_else(|| package_dir(&profile_anchor, package))
         .ok_or_else(|| {
-            format!(
+            // Watch where the profile would find it, to see it installed.
+            files.push(
+                context
+                    .dir
+                    .join("node_modules")
+                    .join(package)
+                    .join("package.json"),
+            );
+            broken(format!(
                 "cannot resolve profile bundle {package:?} from the dsh installation or {}",
                 context.dir.display()
-            )
+            ))
         })?;
     let manifest_path = dir.join("package.json");
-    let manifest = read_json(&manifest_path).map_err(|e| e.to_string())?;
+    // Watched before it is read, so a broken file is seen when it is fixed.
+    files.push(manifest_path.clone());
+    let manifest = read_json(&manifest_path).map_err(|e| broken(e.to_string()))?;
     let bundle = manifest.pointer("/dsh/bundle").ok_or_else(|| {
-        format!("profile bundle {package:?} declares no dsh.bundle in its package.json")
+        broken(format!(
+            "profile bundle {package:?} declares no dsh.bundle in its package.json"
+        ))
     })?;
     if let Some(runtime) = runtime {
-        if let Some(reason) = incompatibility(&manifest, runtime, exemptions)? {
-            return Err(reason);
+        if let Some(reason) = incompatibility(&manifest, runtime, exemptions).map_err(broken)? {
+            return Err((SkipKind::Incompatible, reason));
         }
     }
     let declared: Vec<String> = match bundle.get("patch") {
@@ -413,14 +438,18 @@ fn bundle_layer(
             .iter()
             .map(|v| v.as_str().unwrap().to_owned())
             .collect(),
-        _ => return Err("dsh.bundle.patch must be a file path or a list of file paths".into()),
+        _ => {
+            return Err(broken(
+                "dsh.bundle.patch must be a file path or a list of file paths".into(),
+            ))
+        }
     };
     let mut patches = Vec::new();
     for file in declared {
         let path = dir.join(file);
-        let source = read(&path).map_err(|e| e.to_string())?;
-        patches.extend(parse_patch_list(&path, &source).map_err(|e| e.to_string())?);
-        files.push(path);
+        files.push(path.clone());
+        let source = read(&path).map_err(|e| broken(e.to_string()))?;
+        patches.extend(parse_patch_list(&path, &source).map_err(|e| broken(e.to_string()))?);
     }
     Ok(Layer::new(package, patches))
 }
@@ -474,7 +503,11 @@ pub fn load(context: &ProfileContext) -> Result<Profile, ProfileError> {
             &mut files,
         ) {
             Ok(layer) => layers.push(layer),
-            Err(reason) => skipped.push(SkippedBundle { package, reason }),
+            Err((kind, reason)) => skipped.push(SkippedBundle {
+                package,
+                kind,
+                reason,
+            }),
         }
     }
 
@@ -514,12 +547,12 @@ pub fn load(context: &ProfileContext) -> Result<Profile, ProfileError> {
 
     for overlay in &context.overlays {
         let path = paths::absolute(overlay);
+        files.push(path.clone());
         let source = read(&path)?;
         layers.push(Layer::new(
             format!("patch:{}", path.display()),
             parse_patch_list(&path, &source)?,
         ));
-        files.push(path);
     }
 
     let disabled = context.telemetry_disabled.as_deref().unwrap_or("");

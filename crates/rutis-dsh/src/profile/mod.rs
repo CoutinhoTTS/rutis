@@ -23,7 +23,7 @@ use std::sync::Arc;
 use rutis_loader::{Expressions, LoaderOptions, ServiceCatalog};
 use serde::Serialize;
 
-pub use layers::{load, Profile, ProfileContext, ProfileError, SkippedBundle};
+pub use layers::{load, Profile, ProfileContext, ProfileError, SkipKind, SkippedBundle};
 pub use persist::UserLayerStore;
 
 /// The `profileContext` service dsh's rows read (`ctx.get('profileContext')`).

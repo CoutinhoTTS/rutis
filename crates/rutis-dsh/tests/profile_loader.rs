@@ -278,3 +278,83 @@ async fn external_changes_reload() {
     .expect("failed reload reported");
     assert_eq!(state(&loader, "added"), Some(FiberState::Active));
 }
+
+async fn until(what: &str, reloads: &Arc<Mutex<Vec<String>>>, done: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}: {:?}", reloads.lock().unwrap()));
+}
+
+#[tokio::test]
+async fn broken_bundles_and_includes_keep_the_tree_and_recover() {
+    let (_dir, context) = setup();
+    let mut text = user_file(&context);
+    text.push_str("- insert:\n    - id: inc\n      name: cordis:include\n      config:\n        path: ./inc.yml\n");
+    std::fs::write(context.user_layer_path(), &text).unwrap();
+    let include = context.dir.join("inc.yml");
+    std::fs::write(&include, "- id: inc-child\n  name: echo\n").unwrap();
+    let base = context.dir.join("node_modules/fake-base/base.yml");
+    let base_text = std::fs::read_to_string(&base).unwrap();
+
+    let log = Log::default();
+    let (_root, loader, files) = start(&context, &log).await;
+    assert_eq!(state(&loader, "inc:inc-child"), Some(FiberState::Active));
+    let reloads = Arc::new(Mutex::new(Vec::new()));
+    let sink = reloads.clone();
+    let _watcher = watch::watch(
+        loader.clone(),
+        context.clone(),
+        files,
+        Duration::from_millis(20),
+        move |reload| sink.lock().unwrap().push(format!("{reload:?}")),
+    );
+    let failures = || {
+        reloads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.starts_with("Failed"))
+            .count()
+    };
+
+    // A broken include is a failed reload, not an empty include.
+    std::fs::write(&include, "- [ unclosed\n").unwrap();
+    until("include failure", &reloads, || failures() == 1).await;
+    assert_eq!(state(&loader, "inc:inc-child"), Some(FiberState::Active));
+    // Fixing it is seen: the file stayed watched.
+    std::fs::write(
+        &include,
+        "- id: inc-child\n  name: echo\n- id: inc-2\n  name: echo\n",
+    )
+    .unwrap();
+    until("include recovery", &reloads, || {
+        state(&loader, "inc:inc-2") == Some(FiberState::Active)
+    })
+    .await;
+
+    // A bundle file gone mid-install keeps the bundle's rows.
+    std::fs::remove_file(&base).unwrap();
+    until("bundle failure", &reloads, || failures() == 2).await;
+    assert_eq!(state(&loader, "from-base"), Some(FiberState::Active));
+    assert!(reloads
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .contains("fake-base"));
+    // Restoring it is seen although the last load could not read it.
+    std::fs::write(
+        &base,
+        format!("{base_text}    - id: base-2\n      name: echo\n"),
+    )
+    .unwrap();
+    until("bundle recovery", &reloads, || {
+        state(&loader, "base-2") == Some(FiberState::Active)
+    })
+    .await;
+    assert_eq!(state(&loader, "from-base"), Some(FiberState::Active));
+}
