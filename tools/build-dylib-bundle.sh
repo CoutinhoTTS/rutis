@@ -4,13 +4,18 @@ set -euo pipefail
 # Build a Linux or macOS rutis-cli bundle whose public entry point is the verifier.
 # Optional first argument selects a fresh output directory instead of the
 # default content-addressed directory under target. Existing bundles are never overwritten.
-repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Physical paths: rustc sees symlinks resolved (macOS /tmp is /private/tmp),
+# and --remap-path-prefix only matches the path rustc sees.
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_dir"
 . tools/lib/dylib-common.sh
 target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
+mkdir -p "$target_dir"
+target_dir="$(cd "$target_dir" && pwd -P)"
 export CARGO_TARGET_DIR="$target_dir"
 export RUTIS_SDK_LOCKFILE="$repo_dir/Cargo.lock"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+cargo_home="$(cd "$cargo_home" 2> /dev/null && pwd -P || printf '%s' "$cargo_home")"
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$repo_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo"
 
 # Resolve the SDK with the exact host feature graph. The first host binary is

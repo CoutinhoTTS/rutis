@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Physical paths: rustc sees symlinks resolved (macOS /tmp is /private/tmp),
+# and --remap-path-prefix only matches the path rustc sees.
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 . "$repo_dir/tools/lib/dylib-common.sh"
-base="$(mktemp -d /tmp/rutis-dylib-repro.XXXXXX)"
+base="$(cd "$(mktemp -d /tmp/rutis-dylib-repro.XXXXXX)" && pwd -P)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+cargo_home="$(cd "$cargo_home" 2> /dev/null && pwd -P || printf '%s' "$cargo_home")"
 for slot in a b; do
   source_dir="$base/$slot/source"
   target_dir="$base/$slot/target"
