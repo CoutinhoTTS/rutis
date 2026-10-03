@@ -1,0 +1,13 @@
+[package]
+name = "anchor"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+serde = ["rutis-sdk-copy/serde"]
+misc = ["rutis-sdk-copy/misc"]
+web = ["rutis-sdk-copy/web"]
+
+[dependencies]
+rutis-sdk-copy = { path = "../sdk-copy" }

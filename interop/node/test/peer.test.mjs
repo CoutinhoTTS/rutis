@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { Peer } from '../src/peer.mjs'
+
+const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).rutisProtocol
 const data = value => ({ type: 'data', value })
 function harness(dispatch) {
   const sent = [], incoming = []
@@ -11,7 +14,7 @@ function harness(dispatch) {
     pump: () => { assert.ok(incoming.length, 'sync caller must not strand'); peer.receive(incoming.shift()) },
     abort: error => { fault = error },
   })
-  peer.receive({ op: 'hello', version: 1 })
+  peer.receive({ op: 'hello', version: PROTOCOL })
   return { peer, sent, incoming, fault: () => fault }
 }
 const invoke = (id, method, path = []) => ({ op: 'invoke', id: `rust:${id}`, path, target: 'test', method, args: data([]) })

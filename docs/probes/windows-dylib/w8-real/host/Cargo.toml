@@ -1,0 +1,11 @@
+[package]
+name = "w8-real-host"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rutis-sdk = { path = "../../../../../crates/rutis-sdk" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }

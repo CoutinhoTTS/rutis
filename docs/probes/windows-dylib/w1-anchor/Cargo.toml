@@ -1,0 +1,20 @@
+# Host anchor for W1: the dependency graph of `rutis-cli --features dylib-plugins`
+# without rutis-dylib (its loader is Linux-only, so rutis-cli does not build on
+# Windows). rutis-sdk is a dependency here, so Cargo passes -C prefer-dynamic
+# and the SDK links std dynamically, as in the real bundle.
+[package]
+name = "w1-anchor"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+rutis-sdk = { path = "../../../../crates/rutis-sdk" }
+rutis = { path = "../../../../crates/rutis" }
+rutis-agent = { path = "../../../../crates/rutis-agent" }
+aimux-core = "0.3.0"
+aimux-providers = "0.3.0"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "process", "io-util"] }
