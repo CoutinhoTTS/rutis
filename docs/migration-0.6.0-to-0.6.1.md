@@ -105,7 +105,7 @@ loader.set_disabled("main", true).await?;
 - **volatile 字段**：schema 中带 `"x-volatile": true` 的字段只改了它们时不重启，插件在 apply 里 `ctx.events().on(ctx, &volatile_key(ctx), ...)` 接收 `VolatileUpdate`。
 - **卸载自己**：`ctx.dispose_self()`，loader 会把该行设为停用并写进可编辑层。
 
-插件来源除了编译进宿主的 `Builtins`，还有 Linux 上的 dylib 插件（`rutis-dylib` 的 `loader` feature，`dylib:<目录>`）和 JavaScript（Cordis）插件（本 crate 的 `interop` feature）。dylib 插件与宿主共用一份 SDK 产物，能否加载取决于 SDK 身份（`SDK_ID`，计入 SDK 依赖树的包名与版本，见 [dylib SDK 设计](design-dylib-sdk-2026-09-24.md) §5.2），与 Rust API 是否兼容无关：
+插件来源除了编译进宿主的 `Builtins`，还有 dylib 插件（`rutis-dylib` 的 `loader` feature，`dylib:<目录>`，支持 Linux、macOS 与 Windows x64/MSVC）和 JavaScript（Cordis）插件（本 crate 的 `interop` feature）。dylib 插件与宿主共用一份 SDK 产物，能否加载取决于 SDK 身份（`SDK_ID`，计入 SDK 依赖树的包名与版本，见 [dylib SDK 设计](design-dylib-sdk-2026-09-24.md) §5.2），与 Rust API 是否兼容无关：
 
 - 继续使用原来那份 SDK 产物（不重建 SDK、身份不变）时，已编译的插件照常加载，loader 视其为没有配置 schema。
 - 用本次的锁文件重建 SDK 和动态宿主时，SDK 依赖树中的 `rutis` 变为 0.6.1，SDK 身份随之改变，插件须用新 SDK 重新编译，否则加载时被拒绝。
