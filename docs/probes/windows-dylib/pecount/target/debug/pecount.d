@@ -1,1 +1,0 @@
-/Users/eric8810/Code/rutis/.claude/worktrees/agent-ae50ecb552f460ea5/docs/probes/windows-dylib/pecount/target/debug/pecount: /Users/eric8810/Code/rutis/.claude/worktrees/agent-ae50ecb552f460ea5/docs/probes/windows-dylib/pecount/src/main.rs
