@@ -57,6 +57,123 @@ pub fn exported_symbols(bytes: &[u8], target: &str) -> Result<Vec<String>, Strin
     Ok(names)
 }
 
+/// The Rust libraries a plugin must share with the host, by the file names
+/// its dynamic section records.
+pub struct SharedLibraries<'a> {
+    /// The SDK, e.g. `librutis_sdk.so`.
+    pub sdk: &'a str,
+    /// The exact dynamic libstd the host runs with, e.g. `libstd-<hash>.so`.
+    pub std: &'a str,
+}
+
+/// Checks a plugin's dynamic dependencies before it is loaded and returns
+/// its native ones (everything that is not the SDK or libstd), sorted.
+///
+/// The SDK and libstd must be the host's copies; another Rust dylib would
+/// bring a second std or SDK. Native libraries are allowed, but only by a
+/// form the platform loader resolves outside the plugin cache.
+pub fn check_plugin_dependencies(
+    bytes: &[u8],
+    target: &str,
+    shared: &SharedLibraries<'_>,
+) -> Result<Vec<String>, String> {
+    let file = open(bytes, target)?;
+    match file.format() {
+        BinaryFormat::Elf => check_elf_dependencies(bytes, shared),
+        format => Err(format!(
+            "dependency check is not implemented for {format:?}"
+        )),
+    }
+}
+
+/// File names of the libraries `bytes` depends on, as recorded in the file.
+pub fn needed_libraries(bytes: &[u8], target: &str) -> Result<Vec<String>, String> {
+    let file = open(bytes, target)?;
+    match file.format() {
+        BinaryFormat::Elf => Ok(elf_dynamic(bytes)?
+            .into_iter()
+            .filter(|(tag, _)| *tag == DT_NEEDED)
+            .map(|(_, value)| value)
+            .collect()),
+        format => Err(format!(
+            "dependency listing is not implemented for {format:?}"
+        )),
+    }
+}
+
+use object::elf::{
+    DynamicTag, DT_AUDIT, DT_AUXILIARY, DT_DEPAUDIT, DT_FILTER, DT_NEEDED, DT_RPATH, DT_RUNPATH,
+};
+
+/// The string-valued dynamic entries that decide what gets loaded.
+fn elf_dynamic(bytes: &[u8]) -> Result<Vec<(DynamicTag, String)>, String> {
+    let file = object::read::elf::ElfFile64::<object::LittleEndian>::parse(bytes)
+        .map_err(|e| e.to_string())?;
+    let table = file
+        .elf_section_table()
+        .dynamic_table(file.endian(), bytes)
+        .map_err(|e| e.to_string())?;
+    let mut entries = Vec::new();
+    for entry in &table {
+        if [
+            DT_NEEDED,
+            DT_RPATH,
+            DT_RUNPATH,
+            DT_AUXILIARY,
+            DT_FILTER,
+            DT_AUDIT,
+            DT_DEPAUDIT,
+        ]
+        .contains(&entry.tag)
+        {
+            let value = table.string(entry).map_err(|e| e.to_string())?;
+            entries.push((entry.tag, String::from_utf8_lossy(value).into_owned()));
+        }
+    }
+    Ok(entries)
+}
+
+fn check_elf_dependencies(
+    bytes: &[u8],
+    shared: &SharedLibraries<'_>,
+) -> Result<Vec<String>, String> {
+    let (mut sdk, mut std) = (false, false);
+    let mut native = Vec::new();
+    for (tag, value) in elf_dynamic(bytes)? {
+        match tag {
+            DT_RPATH | DT_RUNPATH => {
+                return Err(format!("plugin carries a run path ({value}); plugins must not"))
+            }
+            tag if tag != DT_NEEDED => {
+                return Err(format!(
+                    "plugin uses a filter or audit library ({value}); not allowed"
+                ))
+            }
+            _ if value.contains('/') => {
+                return Err(format!("dependency {value} is a path; only file names are allowed"))
+            }
+            _ if value == shared.sdk => sdk = true,
+            _ if value == shared.std => std = true,
+            _ if value.starts_with("libstd-") || value.starts_with("librutis_sdk") => {
+                return Err(format!(
+                    "plugin depends on {value}, not the host's {} and {}; rebuild it against this SDK",
+                    shared.sdk, shared.std
+                ))
+            }
+            _ => native.push(value),
+        }
+    }
+    if !sdk || !std {
+        return Err(format!(
+            "plugin must link {} and {} dynamically; it would otherwise carry its own copy",
+            shared.sdk, shared.std
+        ));
+    }
+    native.sort();
+    native.dedup();
+    Ok(native)
+}
+
 /// File name of a shared library called `name` on `target`.
 pub fn library_file_name(name: &str, target: &str) -> Result<String, String> {
     let name = name.replace('-', "_");
@@ -330,6 +447,98 @@ mod tests {
         assert!(read_boot(&fat, "aarch64-apple-darwin")
             .unwrap_err()
             .contains("universal"));
+    }
+
+    /// A minimal ELF shared object whose dynamic section holds `entries`.
+    fn elf_with_dynamic(entries: &[(DynamicTag, &str)]) -> Vec<u8> {
+        use object::elf;
+        let header = write::elf::FileHeader {
+            os_abi: elf::ELFOSABI_SYSV,
+            abi_version: 0,
+            e_type: elf::ET_DYN,
+            e_machine: elf::EM_X86_64,
+            e_entry: 0,
+            e_flags: elf::FileFlags(0),
+        };
+        let mut bytes = Vec::new();
+        {
+            let mut w = write::elf::Writer::new(Endianness::Little, true, &mut bytes);
+            let ids: Vec<_> = entries
+                .iter()
+                .map(|(_, value)| w.add_dynamic_string(value.as_bytes()))
+                .collect();
+            w.reserve_file_header();
+            w.reserve_dynstr().unwrap();
+            w.reserve_dynamic(entries.len() + 1);
+            w.reserve_null_section_index();
+            w.reserve_dynstr_section_index();
+            w.reserve_dynamic_section_index();
+            w.reserve_shstrtab_section_index();
+            w.reserve_shstrtab().unwrap();
+            w.reserve_section_headers();
+            w.write_file_header(&header).unwrap();
+            w.write_dynstr();
+            w.write_align_dynamic();
+            for ((tag, _), id) in entries.iter().zip(ids) {
+                w.write_dynamic_string(*tag, id).unwrap();
+            }
+            w.write_dynamic(elf::DT_NULL, 0).unwrap();
+            w.write_shstrtab();
+            w.write_null_section_header();
+            w.write_dynstr_section_header(0);
+            w.write_dynamic_section_header(0);
+            w.write_shstrtab_section_header();
+        }
+        bytes
+    }
+
+    const SHARED: SharedLibraries<'static> = SharedLibraries {
+        sdk: "librutis_sdk.so",
+        std: "libstd-0123.so",
+    };
+    const LINUX: &str = "x86_64-unknown-linux-gnu";
+
+    #[test]
+    fn plugin_dependencies_return_the_native_libraries() {
+        let bytes = elf_with_dynamic(&[
+            (DT_NEEDED, "libz.so.1"),
+            (DT_NEEDED, "librutis_sdk.so"),
+            (DT_NEEDED, "libstd-0123.so"),
+            (DT_NEEDED, "libc.so.6"),
+        ]);
+        assert_eq!(
+            check_plugin_dependencies(&bytes, LINUX, &SHARED).unwrap(),
+            ["libc.so.6", "libz.so.1"]
+        );
+        assert_eq!(
+            needed_libraries(&bytes, LINUX).unwrap(),
+            ["libz.so.1", "librutis_sdk.so", "libstd-0123.so", "libc.so.6"]
+        );
+    }
+
+    #[test]
+    fn plugin_dependencies_reject_what_could_load_another_copy() {
+        let base = [
+            (DT_NEEDED, "librutis_sdk.so"),
+            (DT_NEEDED, "libstd-0123.so"),
+        ];
+        let reject = |extra: (DynamicTag, &str), expected: &str| {
+            let mut entries = base.to_vec();
+            entries.push(extra);
+            let error =
+                check_plugin_dependencies(&elf_with_dynamic(&entries), LINUX, &SHARED).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        };
+        reject((DT_RUNPATH, "$ORIGIN"), "run path");
+        reject((DT_RPATH, "/opt/lib"), "run path");
+        reject((DT_AUDIT, "libaudit.so"), "audit");
+        reject((DT_NEEDED, "/opt/lib/libz.so.1"), "is a path");
+        reject((DT_NEEDED, "libstd-9999.so"), "rebuild it against this SDK");
+        reject((DT_NEEDED, "librutis_sdk-old.so"), "rebuild it against this SDK");
+        let no_std = elf_with_dynamic(&[(DT_NEEDED, "librutis_sdk.so")]);
+        assert!(check_plugin_dependencies(&no_std, LINUX, &SHARED)
+            .unwrap_err()
+            .contains("dynamically"));
     }
 
     #[test]

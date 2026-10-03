@@ -11,7 +11,7 @@ for slot in a b; do
   tar -C "$repo_dir" --exclude=./target --exclude=./.git -cf - . | tar -C "$source_dir" -xf -
   export CARGO_TARGET_DIR="$target_dir"
   export RUTIS_SDK_LOCKFILE="$source_dir/Cargo.lock"
-  export RUSTFLAGS="--remap-path-prefix=$source_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo -C link-arg=-Wl,-rpath,\$ORIGIN"
+  export RUSTFLAGS="--remap-path-prefix=$source_dir=/src --remap-path-prefix=$target_dir=/target --remap-path-prefix=$cargo_home=/cargo"
   # Build the SDK through the host anchor, as tools/build-dylib-bundle.sh does.
   # Built as the primary package, rutis-sdk would statically link std and
   # produce a different artifact from the one the host links.

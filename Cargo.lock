@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-dylib"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "rutis",
@@ -2970,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-sdk"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rutis",
  "serde_json",

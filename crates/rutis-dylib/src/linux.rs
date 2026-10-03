@@ -54,6 +54,8 @@ struct PluginManifest {
     version: String,
     library: String,
     library_sha256: String,
+    /// Native libraries the plugin links, as its dynamic section records them.
+    native_deps: Vec<String>,
 }
 #[derive(Deserialize)]
 struct SdkManifest {
@@ -98,6 +100,9 @@ unsafe impl Send for Retained {}
 /// verified the host, SDK and dynamic libstd files, and before creating root.
 pub struct Loader {
     sdk_artifact_sha256: String,
+    /// File names plugins must use for the SDK and the host's libstd.
+    sdk_library: String,
+    std_library: String,
     cache: PathBuf,
     interfaces: HashMap<String, semver::Version>,
     max_versions: usize,
@@ -131,12 +136,24 @@ impl Loader {
             ));
         }
         let actual = loaded_sdk_path().map_err(|e| error("<host>", "", "startup", e))?;
-        let actual_hash = sha_file(&actual).map_err(|e| error("<host>", "", "startup", e))?;
+        let sdk_bytes = fs::read(&actual)
+            .map_err(|e| error("<host>", "", "startup", format!("{}: {e}", actual.display())))?;
+        let actual_hash = sha_bytes(&sdk_bytes);
         if actual_hash != sdk_artifact_sha256 {
             return Err(error("<host>", "", "startup", format!("loaded SDK artifact mismatch at {}: expected {sdk_artifact_sha256}, got {actual_hash}", actual.display())));
         }
+        let startup = |e: String| error("<host>", "", "startup", e);
+        let sdk_library = rutis_dylib_meta::library_file_name("rutis_sdk", rutis_sdk::SDK_TARGET)
+            .map_err(startup)?;
+        let std_library = rutis_dylib_meta::needed_libraries(&sdk_bytes, rutis_sdk::SDK_TARGET)
+            .map_err(startup)?
+            .into_iter()
+            .find(|name| name.starts_with("libstd-"))
+            .ok_or_else(|| startup("the SDK does not link a dynamic libstd".into()))?;
         Ok(Self {
             sdk_artifact_sha256,
+            sdk_library,
+            std_library,
             cache: cache.into(),
             interfaces,
             max_versions,
@@ -232,6 +249,25 @@ impl Loader {
             return Err(fail(
                 "boot metadata",
                 "binary identity differs from manifest or host".into(),
+            ));
+        }
+        // dlopen would resolve these before any check of ours could run again.
+        let native = rutis_dylib_meta::check_plugin_dependencies(
+            &bytes,
+            rutis_sdk::SDK_TARGET,
+            &rutis_dylib_meta::SharedLibraries {
+                sdk: &self.sdk_library,
+                std: &self.std_library,
+            },
+        )
+        .map_err(|e| fail("dependencies", e))?;
+        let mut declared = manifest.plugin.native_deps.clone();
+        declared.sort();
+        declared.dedup();
+        if native != declared {
+            return Err(fail(
+                "dependencies",
+                format!("binary links native libraries {native:?}, manifest declares {declared:?}"),
             ));
         }
         let mut retained = self.retained.lock().unwrap();

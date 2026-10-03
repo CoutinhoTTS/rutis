@@ -13,3 +13,10 @@ rust-version = "1.85"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "process", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 thiserror = "2"
+
+# Cargo's defaults, written out because the dylib SDK must be reproducible
+# (docs/design-dylib-sdk-2026-09-24.md §5.3): debug info on macOS records
+# absolute object file paths that --remap-path-prefix does not rewrite.
+[profile.release]
+debug = 0
+strip = "debuginfo"
