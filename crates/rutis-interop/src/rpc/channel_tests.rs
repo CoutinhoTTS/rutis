@@ -253,3 +253,63 @@ async fn an_oversized_answer_becomes_an_error_answer() {
         "the callback of the refused answer is not granted"
     );
 }
+
+/// A sender whose channel ends after `left` messages.
+struct BreaksAfter {
+    inner: Box<dyn Sender>,
+    left: usize,
+}
+impl Sender for BreaksAfter {
+    fn send(&mut self, message: Vec<u8>) -> Result<(), ChannelError> {
+        if self.left == 0 {
+            return Err(ChannelError::closed("the channel broke"));
+        }
+        self.left -= 1;
+        self.inner.send(message)
+    }
+}
+
+#[test]
+fn an_answer_on_an_ended_channel_closes_the_session() {
+    // On a thread of its own, so a hang fails the test instead of the run.
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let (local, remote) = rutis_channel::pair(16);
+            // The hello goes out; the answer below does not.
+            let local = Channel {
+                sender: Box::new(BreaksAfter {
+                    inner: local.sender,
+                    left: 1,
+                }),
+                ..local
+            };
+            let peer = Connection::open(local, Arc::new(Echo)).unwrap();
+            let mut remote = Remote::new(remote);
+            remote.handshake();
+            peer.ready().await.unwrap();
+            remote.send(Frame::Invoke {
+                id: "node:1".into(),
+                path: vec![],
+                target: "svc".into(),
+                method: "echo".into(),
+                args: WireValue::Data(json!([])),
+            });
+            peer.closed().await;
+            let error = peer
+                .invoke_async("svc", "ping", Value::List(vec![]))
+                .await
+                .unwrap_err();
+            done.send(error.to_string()).unwrap();
+        });
+    });
+    let error = finished
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the session does not close after a failed answer");
+    assert_eq!(error, "the channel broke");
+}

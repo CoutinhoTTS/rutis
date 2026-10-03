@@ -1398,40 +1398,48 @@ impl Connection {
     }
     fn respond(&self, id: String, result: Reply) {
         let mut grants = Vec::new();
-        let mut writer = self.0.writer.lock().unwrap();
-        let frame = match &result {
-            Ok(value) => match self.encode_granting(value, &mut grants) {
-                Ok(value) => Frame::Return {
-                    id: id.clone(),
-                    value,
+        // The writer is held in this block only: taking back grants and
+        // closing the session (`close` takes the writer too) come after it,
+        // on every path.
+        let (delivered, written) = {
+            let mut writer = self.0.writer.lock().unwrap();
+            let frame = match &result {
+                Ok(value) => match self.encode_granting(value, &mut grants) {
+                    Ok(value) => Frame::Return {
+                        id: id.clone(),
+                        value,
+                    },
+                    Err(error) => Frame::Throw {
+                        id: id.clone(),
+                        error: error.into(),
+                    },
                 },
                 Err(error) => Frame::Throw {
                     id: id.clone(),
-                    error: error.into(),
+                    error: error.clone().into(),
                 },
-            },
-            Err(error) => Frame::Throw {
-                id: id.clone(),
-                error: error.clone().into(),
-            },
-        };
-        let written = match self.write_locked(&mut **writer, frame) {
-            // The channel refused the answer and stays usable: answer with
-            // the refusal instead, and take back what the answer granted.
-            Err(Unsent::Refused(error)) => {
-                let written = self.write_locked(
-                    &mut **writer,
-                    Frame::Throw {
-                        id,
-                        error: error.into(),
-                    },
-                );
-                drop(writer);
-                self.release_grants(grants);
-                written
+            };
+            match self.write_locked(&mut **writer, frame) {
+                Ok(()) => (true, Ok(())),
+                // The channel refused the answer and stays usable: answer
+                // with the refusal instead.
+                Err(Unsent::Refused(error)) => (
+                    false,
+                    self.write_locked(
+                        &mut **writer,
+                        Frame::Throw {
+                            id,
+                            error: error.into(),
+                        },
+                    ),
+                ),
+                Err(unsent) => (false, Err(unsent)),
             }
-            written => written,
         };
+        if !delivered {
+            // What the undelivered answer granted.
+            self.release_grants(grants);
+        }
         if let Err(unsent) = written {
             self.close(unsent.into_error());
         }
