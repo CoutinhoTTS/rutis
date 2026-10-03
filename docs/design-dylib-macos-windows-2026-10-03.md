@@ -332,7 +332,8 @@ W1 不依赖本文其他改动,可以立即开始。
 A1 是纯重构;A2 改变 SDK 字节,集中做一次升级;B 和 C 互不依赖。
 
 实现进度(2026-10-03):0b [#113](https://github.com/arcships/rutis/pull/113)、A1 [#114](https://github.com/arcships/rutis/pull/114)、
-A2 [#115](https://github.com/arcships/rutis/pull/115)、B [#116](https://github.com/arcships/rutis/pull/116) 已开 PR;C 进行中。
+A2 [#115](https://github.com/arcships/rutis/pull/115)、B [#116](https://github.com/arcships/rutis/pull/116)、
+C [#119](https://github.com/arcships/rutis/pull/119)(Windows 可行,实现见 [#118](https://github.com/arcships/rutis/issues/118))已开 PR。
 与本文的差别:清单字段实现为 `[plugin]` 下的 `native_deps` 数组;Team ID 检查的接口是 `Loader::require_team_ids`;
 示例宿主在 macOS 上带 run path(指向 target 目录与工具链 libstd),以便测试开了 hardened runtime 的宿主;
 示例插件的初始化标记在 macOS 上放进 `__DATA,__mod_init_func`。
@@ -382,10 +383,10 @@ A2 [#115](https://github.com/arcships/rutis/pull/115)、B [#116](https://github.
 | R4 | quarantine(E11) | Apple 文档:10.15 起,带 quarantine 的插件只有经过公证才能加载,否则需要用户在系统设置中批准(无界面时表现为卡住)。单个 dylib 无法 staple 公证票据。音频插件宿主普遍让用户执行 `xattr -d` 或发布已公证的插件 | 保持“加载前拒绝 + 给出 `xattr -d` 命令”(§3.2) |
 | R5 | 同 install name、不同路径(E5) | Apple 说明 dyld 先按路径定位文件,再按文件查已加载表;以完整路径 `dlopen` 时两份文件是两个镜像。风险在插件的 `@rpath/…` 依赖:dyld 会先复用已加载的同名镜像 | §3.3 已把插件依赖限定为已由宿主加载的 SDK 和 libstd,这一复用正是需要的行为 |
 | R6 | 永不 dlclose | macOS 上用过 TLS 的镜像(Rust 的 `print!` 就会用),dyld 本来就忽略 `dlclose`;abi_stable 也明确不支持卸载 | 印证 SDK 设计稿 §九 |
-| R7 | Windows 导出上限(W1) | 问题真实存在:Bevy [#1110](https://github.com/bevyengine/bevy/issues/1110)(2020 至今未关)、[#14930](https://github.com/bevyengine/bevy/issues/14930)。原因之一是 dylib 仍导出泛型单态化,share-generics 在 opt-level 0/1 默认开启。Bevy 要求 Windows 上动态链接时依赖开 `opt-level=3`。stable 上没有其他手段:`-Zshare-generics=n` 和 `#[export_visibility]`([#151425](https://github.com/rust-lang/rust/issues/151425))都是 unstable | W1 区分 release/dev 测量;若只有 release 低于上限,规定 SDK 在任何 profile 下都以 opt-level ≥ 2 构建(写进 `[profile.*.package.rutis-sdk]`) |
+| R7 | Windows 导出上限(W1) | 问题真实存在:Bevy [#1110](https://github.com/bevyengine/bevy/issues/1110)(2020 至今未关)、[#14930](https://github.com/bevyengine/bevy/issues/14930)。原因之一是 dylib 仍导出泛型单态化,share-generics 在 opt-level 0/1 默认开启。Bevy 要求 Windows 上动态链接时依赖开 `opt-level=3`。stable 上没有其他手段:`-Zshare-generics=n` 和 `#[export_visibility]`([#151425](https://github.com/rust-lang/rust/issues/151425))都是 unstable | W1 实测([#119](https://github.com/arcships/rutis/pull/119)):release 1597 项、dev 14545 项。只给 `rutis-sdk` 包设 opt-level 2 没有作用(dev 仍为 14543),要给全部依赖设才降到 2609。所以如需压低 dev 构建的导出数,应写 `[profile.dev.package."*"] opt-level = 2` |
 | R8 | Windows 跨 DLL TLS(W8) | rustc 1.70 起([#108089](https://github.com/rust-lang/rust/pull/108089))msvc 目标对 dylib 的跨 crate TLS 访问改走 shim 函数;1.98 把 TLS 析构改为 FLS 实现。tokio 只在 SDK 中有一份时,上下文应是单份 | W8 风险下调,但仍需实测 |
 | R9 | 同名 DLL 两个版本(W2) | Microsoft 文档:传完整路径时只在该路径查找;依赖 DLL 按模块名解析,并优先复用已加载的同名模块 | W2 预期可行;插件目录中不得再放 SDK 副本 |
-| R10 | VC 运行时(W4) | rustup 预编译的 std 动态链接 CRT,需要 vcruntime140.dll 和 UCRT;与 `+crt-static` 混用会在进程中出现多份 CRT | 不开 `crt-static`;VC++ 运行库由用户安装(§六 第 3 条) |
+| R10 | VC 运行时(W4) | 调研称 rustup 预编译的 std 依赖 vcruntime140.dll。**W4 实测推翻**:`std-*.dll` 不依赖 VC 运行时;依赖它的是 SDK、宿主和插件(`VCRUNTIME140.dll` 与 UCRT) | 不开 `crt-static`;VC++ 运行库由用户安装(§六 第 3 条) |
 
 ## 九、PR 评审记录(#105,2026-10-03)
 
