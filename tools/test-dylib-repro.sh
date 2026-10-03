@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$repo_dir/tools/lib/dylib-common.sh"
 base="$(mktemp -d /tmp/rutis-dylib-repro.XXXXXX)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 for slot in a b; do
@@ -17,13 +18,17 @@ for slot in a b; do
   # produce a different artifact from the one the host links.
   export RUTIS_SDK_ARTIFACT_SHA256="$(printf '0%.0s' {1..64})"
   cargo build --release --locked --offline -p rutis-cli --features dylib-plugins --manifest-path "$source_dir/Cargo.toml"
-  sdk_file="$target_dir/release/librutis_sdk.so"
-  if ! readelf -d "$sdk_file" | grep -Eq 'NEEDED.*\[libstd-[^]]*\.so\]'; then
-    readelf -d "$sdk_file" >&2
+  sdk_file="$target_dir/release/$(lib_name rutis-sdk)"
+  if ! needed_libs "$sdk_file" | grep -Eq "(^|/)libstd-[^/]*\.$dylib_ext\$"; then
+    needed_libs "$sdk_file" >&2
     echo "SDK does not depend on the dynamic libstd" >&2
     exit 1
   fi
-  sha256sum "$sdk_file" | cut -d ' ' -f 1 > "$base/$slot.sha"
+  if test "$dylib_os" = macos && dsymutil -s "$sdk_file" | grep -q 'N_OSO'; then
+    echo "SDK records object file paths (N_OSO debug map); it cannot be reproducible" >&2
+    exit 1
+  fi
+  sha256_of "$sdk_file" > "$base/$slot.sha"
 done
 cmp "$base/a.sha" "$base/b.sha"
 echo "two independent source and target paths produced the same SDK artifact: $(cat "$base/a.sha")"

@@ -2,8 +2,6 @@
 //! A verified, immutable bundle launcher must run the host before this API is
 //! used: a mismatched SDK can execute during Rust startup, before `Loader::new`.
 
-#[cfg(not(target_os = "linux"))]
-compile_error!("rutis-dylib currently supports Linux only; use the static host on this target");
 #[cfg(panic = "abort")]
 compile_error!("rutis-dylib requires panic = unwind");
 
@@ -103,6 +101,8 @@ pub struct Loader {
     /// File names plugins must use for the SDK and the host's libstd.
     sdk_library: String,
     std_library: String,
+    #[cfg(target_os = "macos")]
+    allowed_team_ids: Option<Vec<String>>,
     cache: PathBuf,
     interfaces: HashMap<String, semver::Version>,
     max_versions: usize,
@@ -143,17 +143,15 @@ impl Loader {
             return Err(error("<host>", "", "startup", format!("loaded SDK artifact mismatch at {}: expected {sdk_artifact_sha256}, got {actual_hash}", actual.display())));
         }
         let startup = |e: String| error("<host>", "", "startup", e);
-        let sdk_library = rutis_dylib_meta::library_file_name("rutis_sdk", rutis_sdk::SDK_TARGET)
-            .map_err(startup)?;
-        let std_library = rutis_dylib_meta::needed_libraries(&sdk_bytes, rutis_sdk::SDK_TARGET)
-            .map_err(startup)?
-            .into_iter()
-            .find(|name| name.starts_with("libstd-"))
-            .ok_or_else(|| startup("the SDK does not link a dynamic libstd".into()))?;
+        let sdk_library = rutis_dylib_meta::sdk_reference(rutis_sdk::SDK_TARGET).map_err(startup)?;
+        let std_library =
+            rutis_dylib_meta::std_reference(&sdk_bytes, rutis_sdk::SDK_TARGET).map_err(startup)?;
         Ok(Self {
             sdk_artifact_sha256,
             sdk_library,
             std_library,
+            #[cfg(target_os = "macos")]
+            allowed_team_ids: None,
             cache: cache.into(),
             interfaces,
             max_versions,
@@ -161,7 +159,16 @@ impl Loader {
         })
     }
 
-    /// Loads trusted code. The caller is responsible for accepting that ELF
+    /// Only load plugins with a valid signature from an Apple-issued
+    /// certificate of one of these Team IDs. Ad-hoc signed plugins are then
+    /// rejected. Without this call, the signer is not checked.
+    #[cfg(target_os = "macos")]
+    pub fn require_team_ids(mut self, team_ids: Vec<String>) -> Self {
+        self.allowed_team_ids = Some(team_ids);
+        self
+    }
+
+    /// Loads trusted code. The caller is responsible for accepting that library
     /// initializers run inside the host as soon as `dlopen` is called.
     pub unsafe fn load(&self, dir: impl AsRef<Path>) -> Result<Arc<Module>, LoadError> {
         let manifest_path = dir.as_ref().join("plugin.toml");
@@ -229,6 +236,10 @@ impl Loader {
             return Err(fail("manifest", "library must be a filename".into()));
         }
         let source_library = dir.as_ref().join(library);
+        // Checked before the bytes are read: the cache copy drops extended
+        // attributes, and copying it there is no consent to load it.
+        #[cfg(target_os = "macos")]
+        reject_quarantined(&source_library).map_err(|e| fail("quarantine", e))?;
         let bytes = fs::read(&source_library).map_err(|e| fail("binary", e.to_string()))?;
         let actual_hash = sha_bytes(&bytes);
         if actual_hash != manifest.plugin.library_sha256 {
@@ -293,6 +304,15 @@ impl Loader {
             }
             let cached = self.cache.join(&actual_hash).join(library);
             ensure_cached(&cached, &bytes, &actual_hash).map_err(|e| fail("cache", e))?;
+            // A reused cache entry may have been placed by hand.
+            #[cfg(target_os = "macos")]
+            {
+                reject_quarantined(&cached).map_err(|e| fail("quarantine", e))?;
+                if let Some(team_ids) = &self.allowed_team_ids {
+                    crate::macos::check_team_id(&cached, team_ids)
+                        .map_err(|e| fail("code signature", e))?;
+                }
+            }
             let handle = open_library(&cached).map_err(|e| fail("dlopen", e))?;
             // Every successful dlopen remains mapped, even if entry fails.
             retained.push(Retained {
@@ -518,6 +538,19 @@ fn sha_bytes(bytes: &[u8]) -> String {
 fn sha_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(sha_bytes(&bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn reject_quarantined(path: &Path) -> Result<(), String> {
+    if crate::macos::quarantined(path)? {
+        return Err(format!(
+            "{} has the com.apple.quarantine attribute; loading it would wait for Gatekeeper. \
+             If you trust it, run: xattr -d com.apple.quarantine {}",
+            path.display(),
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_cached(path: &Path, bytes: &[u8], hash: &str) -> Result<(), String> {

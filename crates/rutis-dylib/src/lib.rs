@@ -1,13 +1,16 @@
 //! Optional in-process loader for trusted, first-party Rust dylib plugins.
-//! The dynamic loader is available on Linux; other targets retain the static
-//! host build without compiling platform-specific loader code.
+//! The dynamic loader is available on Linux and macOS; other targets retain
+//! the static host build without compiling platform-specific loader code.
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "linux")]
-pub use linux::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::*;
 
-#[cfg(all(target_os = "linux", feature = "loader"))]
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "loader"))]
 mod resolver;
-#[cfg(all(target_os = "linux", feature = "loader"))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "loader"))]
 pub use resolver::DylibResolver;
