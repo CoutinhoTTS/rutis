@@ -435,7 +435,10 @@ mod manifest_tests {
         let error = failure(root, config);
         assert!(error.contains("speaks protocol 99"), "{error}");
 
-        write(&runtime.join("package.json"), r#"{ "rutisProtocol": 1 }"#);
+        write(
+            &runtime.join("package.json"),
+            &format!(r#"{{ "rutisProtocol": {} }}"#, crate::PROTOCOL),
+        );
         fs::create_dir_all(runtime.join("node_modules")).unwrap();
         let error = failure(root, config);
         assert!(error.contains("store-plugin is not installed"), "{error}");
