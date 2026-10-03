@@ -78,3 +78,4 @@ cargo test --workspace
 - **导出数**：一个 DLL 最多导出 65535 个符号。release 构建的 `rutis_sdk.dll` 约 1600 个，`build-dylib-bundle.sh` 在超过 30000 时失败。dev 构建（opt-level 0）会导出泛型实例，当前约 14500 个，依赖大量增加时可能接近上限；需要时给 SDK 的全部依赖设 opt-level ≥ 2，例如 `[profile.dev.package."*"] opt-level = 2` 加上对 `rutis` 等工作区成员的单独设置。只给 `rutis-sdk` 一个包设置没有效果。
 - **构建**：SDK 和宿主由各自的 `build.rs` 加链接参数 `/Brepro`，去掉链接器写入的时间戳；连同路径重映射，SDK 在不同目录构建时字节相同。
 - **测试**：上面三个脚本在 Git Bash 中运行。Windows 上另外测试：缓存目录、工作目录和 `PATH` 中放同名 DLL 不被使用；宿主运行期间发布目录的三个文件不能修改、删除或改名；强制结束启动器后宿主随之结束；缺少任一运行文件时启动器拒绝。
+- **CI**：Windows 的 dylib 测试约 30 分钟，放在单独的 `dylib-windows` workflow 里，只在 PR 改动 dylib 相关代码（SDK、`rutis-dylib*`、xtask、测试夹具和脚本）、推送发布 tag（`v*`、`rutis-v*`、`loader-v*`）或手动触发时运行。内核或依赖升级同样可能影响 Windows 插件，合并这类改动前可以手动运行一次。

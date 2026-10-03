@@ -107,28 +107,6 @@ jobs:
       - name: reproducible SDK across source and target paths
         run: bash tools/test-dylib-repro.sh
 
-  dylib-windows:
-    runs-on: windows-2025
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-      - name: plugin file checks
-        run: cargo test -p rutis-dylib-meta
-      - name: dylib host child environment
-        run: cargo test -p rutis-cli --features dylib-plugins --bin rutis-cli
-      - name: plugin swap, pre-load rejection and planted DLLs
-        run: bash tools/test-dylib.sh
-      # Also checks the release rutis_sdk.dll exports at most 30000 symbols
-      # (in tools/build-dylib-bundle.sh) and that files are held while the host runs.
-      - name: launcher pre-execution verification, file locks and job object
-        run: bash tools/test-dylib-launcher.sh
-      - name: reproducible SDK across source and target paths
-        run: bash tools/test-dylib-repro.sh
-
   static-platforms:
     strategy:
       matrix:
