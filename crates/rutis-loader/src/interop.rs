@@ -7,7 +7,9 @@
 //! on its own; its `isolate` and `inject` name Cordis services, so the
 //! resolver handles them itself (`Resolved::foreign_scope`) and forwards
 //! them. Its schemastery `Config` becomes the row's JSON Schema
-//! (`meta.volatile` → `x-volatile`).
+//! (`meta.volatile` → `x-volatile`), and a volatile-only change is handed
+//! to Cordis, which commits it in place and emits `loader/volatile-update`
+//! to the plugin, as dsh's loader does.
 //!
 //! Services do not cross between the JavaScript rows and Rust plugins here;
 //! a Rust service the rows need is given as a host ([`with_hosts`]).
@@ -18,11 +20,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, PluginFactory};
 use rutis_interop::{Host, Mount, Process};
 use serde_json::{json, Value};
 
-use crate::{Loader, LoaderError, Resolved, Resolver};
+use crate::{volatile_key, Loader, LoaderError, Resolved, Resolver, VolatileUpdate};
 
 pub struct InteropResolver {
     node_package: PathBuf,
@@ -158,6 +160,15 @@ impl Plugin for JsRow {
                 .load_row(&key, &self.entry, self.config.clone(), &isolate, &inject)
                 .await
                 .map_err(|e| CordisError::PluginFailed(e.to_string().into()))?;
+            // Volatile-only changes go to Cordis, which commits them in place.
+            ctx.events().on(
+                ctx,
+                &volatile_key(ctx),
+                Forward {
+                    key: key.clone(),
+                    process: self.process.clone(),
+                },
+            )?;
             let process = self.process.clone();
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 Box::pin(async move {
@@ -167,6 +178,27 @@ impl Plugin for JsRow {
                         .map_err(|e| CordisError::PluginFailed(e.to_string().into()))
                 })
             })))
+        })
+    }
+}
+
+struct Forward {
+    key: String,
+    process: Arc<Process>,
+}
+
+impl Listener<VolatileUpdate> for Forward {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        update: &'a VolatileUpdate,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        Box::pin(async move {
+            self.process
+                .update_row(&self.key, update.config.clone())
+                .await
+                .map_err(|e| CordisError::PluginFailed(e.to_string().into()))?;
+            Ok(None)
         })
     }
 }
@@ -208,8 +240,10 @@ fn export_target(exports: &Value, subpath: &str) -> Option<String> {
 /// The module file a row name loads, or `None` when it is not a resolvable
 /// JavaScript plugin name.
 pub fn resolve_entry(anchor: &Path, name: &str) -> Option<PathBuf> {
-    if let Some(path) = name.strip_prefix("file://") {
-        return Some(PathBuf::from(path));
+    if name.starts_with("file:") {
+        // A URL: percent-decoded, query and fragment dropped, as Node's
+        // fileURLToPath; a remote host is not a local file.
+        return url::Url::parse(name).ok()?.to_file_path().ok();
     }
     if name.starts_with('/') {
         return Some(PathBuf::from(name));
@@ -286,5 +320,28 @@ mod tests {
             resolve_entry(&anchor, "/abs/p.mjs"),
             Some(PathBuf::from("/abs/p.mjs"))
         );
+    }
+
+    #[test]
+    fn file_urls_are_decoded() {
+        let cases = [
+            ("file:///abs/p.mjs", "/abs/p.mjs"),
+            ("file:///my%20plugins/p.mjs", "/my plugins/p.mjs"),
+            ("file:///%E6%8F%92%E4%BB%B6/p.mjs", "/插件/p.mjs"),
+            ("file:///a%23b/p.mjs", "/a#b/p.mjs"),
+            ("file:///100%25/p.mjs", "/100%/p.mjs"),
+            ("file:///p.mjs#fragment", "/p.mjs"),
+            ("file:///p.mjs?v=2", "/p.mjs"),
+            ("file://localhost/p.mjs", "/p.mjs"),
+        ];
+        let anchor = Path::new("/nowhere/package.json");
+        for (url, path) in cases {
+            assert_eq!(
+                resolve_entry(anchor, url),
+                Some(PathBuf::from(path)),
+                "{url}"
+            );
+        }
+        assert_eq!(resolve_entry(anchor, "file://server/share/p.mjs"), None);
     }
 }

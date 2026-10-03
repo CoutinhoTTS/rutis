@@ -419,6 +419,16 @@ impl Process {
         .map(|_| ())
     }
 
+    /// Give row `key` a new config. Cordis commits volatile values in place
+    /// (`loader/volatile-update`, as dsh's loader does); any other change
+    /// restarts the row with the config. An inactive row keeps it for its
+    /// next activation.
+    pub async fn update_row(&self, key: &str, config: Value) -> Result<(), Error> {
+        self.call_async("", "rows.update", json!([key, config]))
+            .await
+            .map(|_| ())
+    }
+
     /// Dispose row `key`.
     pub async fn unload_row(&self, key: &str) -> Result<(), Error> {
         self.call_async("", "rows.unload", json!([key]))

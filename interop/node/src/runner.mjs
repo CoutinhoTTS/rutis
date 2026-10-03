@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 
@@ -11,7 +11,9 @@ function cordisOf(entry) {
   try { return createRequire(entry).resolve('@deepseek-ai/cordis') } catch { return undefined }
 }
 const cordisPath = cordisOf(pluginPath)
-const { Context } = await import(cordisPath ? pathToFileURL(cordisPath).href : '@deepseek-ai/cordis')
+const { Context, resolveConfig } = await import(cordisPath ? pathToFileURL(cordisPath).href : '@deepseek-ai/cordis')
+// Volatile config helpers from the cosmokit that Cordis itself uses.
+const cosmokit = await import(pathToFileURL(createRequire(cordisPath ?? fileURLToPath(import.meta.resolve('@deepseek-ai/cordis'))).resolve('@deepseek-ai/cosmokit')).href).catch(() => ({}))
 let peer
 const ctx = new Context()
 let fibers
@@ -21,7 +23,7 @@ let disposing
 let version = 0
 let emits = new Set() // events the rutis side may emit here
 // Rows: plugins rutis-loader manages one by one in this Context (`rows.*`).
-const rows = new Map() // key -> fiber
+const rows = new Map() // key -> { fiber, inner, config }
 
 // Each exported service slot is projected as a sequence of object handles.
 // A handle always addresses the object it was created for; when the slot
@@ -109,7 +111,7 @@ ctx.on('internal/set', (_ctx, _name, _value, _error, next) => {
 function dispose() {
   return disposing ??= (async () => {
     for (const slot of slots.values()) await slot.exporter?.dispose()
-    for (const fiber of [...rows.values()].reverse()) await fiber.dispose()
+    for (const { fiber } of [...rows.values()].reverse()) await fiber.dispose()
     rows.clear()
     for (const fiber of [...(fibers ?? [])].reverse()) await fiber.dispose()
   })()
@@ -127,16 +129,20 @@ async function pluginOf(entry) {
 }
 
 // One row: `isolate` as [name, label] pairs (rows naming a label share its
-// scope), `inject` as extra service names gating the row.
+// scope), `inject` as extra service names gating the row. With `inject`, the
+// plugin runs inside a gate fiber (`inner`), from the row's latest config.
 async function loadRow([key, entry, config, isolate, inject]) {
   if (rows.has(key)) throw new Error(`row ${key} is already loaded`)
   const plugin = await pluginOf(entry)
   let scope = ctx
   for (const [name, label] of isolate ?? []) scope = scope.isolate(name, Symbol.for(`rutis-row:${label}`))
+  const row = { fiber: undefined, inner: undefined, config }
   const fiber = inject?.length
-    ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { gated.plugin(plugin, config) } })
+    ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { row.inner = gated.plugin(plugin, row.config) } })
     : scope.plugin(plugin, config)
-  rows.set(key, fiber)
+  row.fiber = fiber
+  if (!inject?.length) row.inner = fiber
+  rows.set(key, row)
   try {
     await fiber.await()
   } catch (error) {
@@ -145,6 +151,56 @@ async function loadRow([key, entry, config, isolate, inject]) {
     throw error
   }
   return null
+}
+
+// A new config for a row. Volatile values are committed into the running
+// plugin's references and announced with `loader/volatile-update`, as
+// cordis-plugin-loader's `_commitVolatile` does; when ordinary values changed
+// too, the row restarts. (rutis-loader sends only changes its schema calls
+// volatile; Cordis's parse of the config has the last word.)
+async function updateRow([key, config]) {
+  const row = rows.get(key)
+  if (!row) throw new Error(`row ${key} is not loaded`)
+  row.config = config
+  const fiber = row.inner
+  // Inactive (a gate waiting for its services): the next activation reads
+  // row.config.
+  if (!fiber || fiber.state !== 2) return null
+  fiber._config = config
+  if (commitVolatile(fiber, config)) return null
+  fiber.update(config, true)
+  await fiber.await()
+  return null
+}
+
+function commitVolatile(fiber, raw) {
+  const { volatileEntries, updateVolatile, deepEqual } = cosmokit
+  if (!volatileEntries || !resolveConfig) return false
+  const refs = volatileEntries(fiber.config)
+  if (!refs.length) return true
+  let candidate
+  try {
+    candidate = resolveConfig(fiber.runtime, fiber.ctx.waterfall(fiber, 'internal/config', raw, () => raw))
+  } catch (error) {
+    // Like dsh: the running references stay; the raw config is kept.
+    fiber.ctx.logger?.warn(error)
+    return true
+  }
+  if (!deepEqual(fiber.config, candidate, true)) return false
+  const paths = refs.flatMap(({ path, ref }) => {
+    const source = path.reduce((value, key) => Reflect.get(value, key), candidate)
+    if (deepEqual(ref.get(), source.get(), true)) return []
+    updateVolatile(ref, source)
+    return [path]
+  })
+  if (paths.length) {
+    const self = Object.create(fiber.ctx)
+    // Only the row's own fiber hears it. Fibers are compared by uid: the
+    // fiber a listener's context reports may be a different wrapper.
+    self[Context.filter] = owner => owner.fiber?.uid === fiber.uid
+    fiber.ctx.emit(self, 'loader/volatile-update', paths)
+  }
+  return true
 }
 
 // A rutis service seen from Cordis: bound methods call the Rust host
@@ -240,10 +296,11 @@ function dispatch(target, method, args) {
         return entry.object[property]
       }
       case 'rows.load': return loadRow(args ?? [])
+      case 'rows.update': return updateRow(args ?? [])
       case 'rows.unload': {
-        const fiber = rows.get(args?.[0])
+        const row = rows.get(args?.[0])
         rows.delete(args?.[0])
-        return fiber ? fiber.dispose().then(() => null) : null
+        return row ? row.fiber.dispose().then(() => null) : null
       }
       case 'rows.schema': return pluginOf(args?.[0]).then(plugin => {
         const schema = plugin.Config ?? plugin.schema

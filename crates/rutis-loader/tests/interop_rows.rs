@@ -195,3 +195,107 @@ async fn javascript_rows() {
 
     root.shutdown().await.unwrap();
 }
+
+/// `level` is a volatile reference, as schemastery's `meta.volatile` makes it.
+const TUNABLE: &str = r#"
+import { createVolatile } from 'COSMOKIT'
+export const name = 'tunable'
+export const inject = ['probe']
+export const Config = {
+  type: 'object', meta: {},
+  dict: {
+    tag: { type: 'string', meta: {} },
+    level: { type: 'number', meta: { default: 1, volatile: true } },
+  },
+  '~standard': { validate: value => ({ value: { ...value, level: createVolatile(value.level ?? 1) } }) },
+}
+export function apply(ctx, config) {
+  ctx.probe.record(`${config.tag}: start ${config.level.get()}`)
+  ctx.on('loader/volatile-update', paths => {
+    ctx.probe.record(`${config.tag}: ${JSON.stringify(paths)} ${config.level.get()}`)
+  })
+  ctx.effect(() => () => ctx.probe.record(`${config.tag}: bye`))
+}
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn volatile_changes_reach_cordis_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let cosmokit = node_package()
+        .join("node_modules/@deepseek-ai/cosmokit/lib/index.js")
+        .canonicalize()
+        .unwrap();
+    let tunable = dir.path().join("tunable.mjs");
+    std::fs::write(
+        &tunable,
+        TUNABLE.replace("COSMOKIT", &format!("file://{}", cosmokit.display())),
+    )
+    .unwrap();
+
+    let probe = Probe::default();
+    let resolver = InteropResolver::new(node_package(), node_package().join("package.json"))
+        .with_hosts(vec![Host {
+            name: "probe".into(),
+            methods: json!({ "record": "sync" }),
+            dispatch: Arc::new(probe.clone()),
+        }]);
+    let root = Ctx::root().unwrap();
+    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+    let layer = |level: u32| -> Vec<Layer> {
+        let rows = vec![
+            row(
+                "t",
+                &tunable,
+                json!({ "tag": "t", "level": level }),
+                json!(null),
+            ),
+            // Behind an inject gate, the plugin runs one fiber deeper.
+            row(
+                "g",
+                &tunable,
+                json!({ "tag": "g", "level": level }),
+                json!({ "inject": ["probe"] }),
+            ),
+        ];
+        let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+        vec![Layer::new("rows", patches)]
+    };
+
+    let report = loader.reconcile(layer(1), None).await.unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    probe.wait_for("t: start 1").await;
+    probe.wait_for("g: start 1").await;
+    assert_eq!(
+        loader.get("t").unwrap().schema.unwrap()["properties"]["level"]["x-volatile"],
+        true
+    );
+    let fibers = (
+        loader.get("t").unwrap().plugin,
+        loader.get("g").unwrap().plugin,
+    );
+    probe.take();
+
+    loader.reconcile(layer(5), None).await.unwrap();
+    probe.wait_for(r#"t: [["level"]] 5"#).await;
+    probe.wait_for(r#"g: [["level"]] 5"#).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let lines = probe.take();
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("bye") || l.contains("start")),
+        "{lines:?}"
+    );
+    assert_eq!(
+        (
+            loader.get("t").unwrap().plugin,
+            loader.get("g").unwrap().plugin
+        ),
+        fibers,
+        "no restart on the rutis side either"
+    );
+
+    root.shutdown().await.unwrap();
+}
