@@ -13,6 +13,7 @@ categories = ["development-tools::ffi"]
 
 [dependencies]
 rutis = { path = "../rutis", version = "0.6.0" }
+rutis-channel = { path = "../rutis-channel", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 syn = { version = "2", features = ["full", "visit"] }

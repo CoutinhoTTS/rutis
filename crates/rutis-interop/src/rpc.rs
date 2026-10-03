@@ -1,10 +1,10 @@
 //! One ordered, bidirectional connection for invocation, await and owned references.
-//! Socket readers admit frames and pin references; they never execute plugin code.
+//! It runs on any `rutis_channel::Channel`, one frame per message.
+//! Readers admit frames and pin references; they never execute plugin code.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{BufRead, BufReader, Write};
-use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc, Mutex, Weak};
@@ -12,6 +12,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread::ThreadId;
 
 use rutis::BoxFuture;
+use rutis_channel::{Channel, ChannelError, Closer, Sender};
 use serde_json::Value as Json;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::{oneshot, watch, Notify};
@@ -71,6 +72,8 @@ impl Value {
     pub fn future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
         Self::future_inner(future, true)
     }
+    // Used by the Unix-only `server`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn control_future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
         Self::future_inner(future, false)
     }
@@ -400,7 +403,7 @@ fn protected(call: impl FnOnce() -> Reply) -> Reply {
 fn panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
     match panic.downcast::<Error>() {
         Ok(error) => *error,
-        Err(panic) => crate::server::native_error(
+        Err(panic) => crate::native_error(
             panic
                 .downcast_ref::<String>()
                 .cloned()
@@ -430,7 +433,7 @@ impl Drop for PathGuard {
 }
 
 struct Import {
-    peer: Weak<Peer>,
+    peer: Weak<ConnectionState>,
     id: u64,
     kind: Kind,
     grants: Mutex<u64>,
@@ -522,7 +525,7 @@ struct Calls {
 
 /// Cancels an async call whose future is dropped before it completes.
 struct CancelOnDrop {
-    peer: Weak<Peer>,
+    peer: Weak<ConnectionState>,
     id: String,
     done: bool,
 }
@@ -551,9 +554,12 @@ impl Drop for Flight {
 pub trait Dispatch: Send + Sync + 'static {
     fn invoke(&self, peer: &Connection, target: &str, method: &str, args: Value) -> Reply;
 }
-struct Peer {
-    writer: Mutex<UnixStream>,
-    closer: UnixStream,
+/// One connection's state, shared by its handles and its reader.
+struct ConnectionState {
+    writer: Mutex<Box<dyn Sender>>,
+    closer: Arc<dyn Closer>,
+    /// Prefixed to the reason the channel gives for its end; empty for none.
+    label: String,
     calls: Mutex<Calls>,
     exports: Mutex<Exports>,
     imports: Mutex<HashMap<u64, Weak<Import>>>,
@@ -564,36 +570,59 @@ struct Peer {
     ended: watch::Sender<bool>,
     activity: Arc<Activity>,
 }
-impl Drop for Peer {
+impl Drop for ConnectionState {
     fn drop(&mut self) {
-        let _ = self.writer.get_mut().unwrap().shutdown(Shutdown::Both);
+        self.closer.close("connection dropped");
+    }
+}
+
+/// The error that ends a session whose channel ended for `reason`.
+fn channel_ended(label: &str, reason: String) -> Error {
+    if label.is_empty() {
+        Error::Transport(reason)
+    } else {
+        Error::Transport(format!("{label}: {reason}"))
     }
 }
 
 #[derive(Clone)]
-pub struct Connection(Arc<Peer>);
+pub struct Connection(Arc<ConnectionState>);
 impl Connection {
+    /// A session over a Unix stream socket, one frame per line.
+    #[cfg(unix)]
     pub fn connect(stream: UnixStream, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
-        Self::connect_with(
-            stream,
-            dispatch,
-            Box::new(|| Error::Transport("peer disconnected".into())),
-        )
+        Self::open(Channel::unix(stream).map_err(transport)?, dispatch)
     }
 
     /// Like [`Connection::connect`]; `disconnected` builds the error that
     /// ends the session when the peer goes away, for example with the exit
     /// status of its process. It runs on the reader thread and may block.
+    #[cfg(unix)]
     pub fn connect_with(
         stream: UnixStream,
         dispatch: Arc<dyn Dispatch>,
         disconnected: Box<dyn FnOnce() -> Error + Send>,
     ) -> Result<Self, Error> {
-        stream.set_nonblocking(false).map_err(transport)?;
-        let reader = stream.try_clone().map_err(transport)?;
-        let peer = Self(Arc::new(Peer {
-            closer: stream.try_clone().map_err(transport)?,
-            writer: Mutex::new(stream),
+        let channel = Channel::unix(stream)
+            .map_err(transport)?
+            .with_end_reason(move || disconnected().to_string());
+        Self::open(channel, dispatch)
+    }
+
+    /// A session over any channel, one frame per message. It ends when the
+    /// channel does, with the reason the channel gives.
+    pub fn open(channel: Channel, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
+        let Channel {
+            sender,
+            mut receiver,
+            closer,
+            info,
+        } = channel;
+        let label = info.label;
+        let peer = Self(Arc::new(ConnectionState {
+            writer: Mutex::new(sender),
+            closer,
+            label: label.clone(),
             calls: Mutex::new(Calls::default()),
             exports: Mutex::new(Exports::default()),
             imports: Mutex::new(HashMap::new()),
@@ -611,15 +640,19 @@ impl Connection {
         std::thread::Builder::new()
             .name("rutis-interop-reader".into())
             .spawn(move || {
-                let result: Result<(), Error> = (|| {
-                    for line in BufReader::new(reader).lines() {
-                        let Ok(line) = line else { break };
-                        let Some(peer) = weak.upgrade().map(Self) else {
-                            return Ok(());
-                        };
-                        peer.receive(serde_json::from_str(&line).map_err(transport)?)?;
-                    }
-                    Err(disconnected())
+                let result: Result<(), Error> = (|| loop {
+                    let message = match receiver.recv() {
+                        Ok(Some(message)) => message,
+                        Ok(None) => return Err(channel_ended(&label, "peer disconnected".into())),
+                        Err(ChannelError::Closed { reason }) => {
+                            return Err(channel_ended(&label, reason))
+                        }
+                        Err(error) => return Err(transport(error)),
+                    };
+                    let Some(peer) = weak.upgrade().map(Self) else {
+                        return Ok(());
+                    };
+                    peer.receive(serde_json::from_slice(&message).map_err(transport)?)?;
                 })();
                 if let (Err(error), Some(peer)) = (result, weak.upgrade()) {
                     Self(peer).close(error);
@@ -650,7 +683,7 @@ impl Connection {
         // Interrupt a blocked write before taking the writer lock. Serialize
         // table teardown with encoding/sending so no export can be added after
         // teardown and no partial encoding rollback races the cleared table.
-        let _ = self.0.closer.shutdown(Shutdown::Both);
+        self.0.closer.close(&error.to_string());
         let writer = self.0.writer.lock().unwrap();
         let (waiting, incoming, awaiting) = {
             let mut calls = self.0.calls.lock().unwrap();
@@ -728,20 +761,22 @@ impl Connection {
     fn write(&self, frame: Frame) -> Result<(), Error> {
         let result = {
             let mut writer = self.0.writer.lock().unwrap();
-            self.write_locked(&mut writer, frame)
+            self.write_locked(&mut **writer, frame)
         };
         if let Err(error) = &result {
             self.close(error.clone());
         }
         result
     }
-    fn write_locked(&self, writer: &mut UnixStream, frame: Frame) -> Result<(), Error> {
+    fn write_locked(&self, writer: &mut dyn Sender, frame: Frame) -> Result<(), Error> {
         if let Some(error) = &self.0.calls.lock().unwrap().closed {
             return Err(error.clone());
         }
-        let mut bytes = serde_json::to_vec(&frame).map_err(transport)?;
-        bytes.push(b'\n');
-        writer.write_all(&bytes).map_err(transport)
+        let bytes = serde_json::to_vec(&frame).map_err(transport)?;
+        writer.send(bytes).map_err(|error| match error {
+            ChannelError::Closed { reason } => channel_ended(&self.0.label, reason),
+            error => transport(error),
+        })
     }
     fn send(&self, call: Operation, mut waiting: Waiting) -> Result<String, Error> {
         let mut writer = self.0.writer.lock().unwrap();
@@ -827,7 +862,7 @@ impl Connection {
             }
             calls.waiting.insert(id.clone(), waiting);
         }
-        let result = self.write_locked(&mut writer, frame);
+        let result = self.write_locked(&mut **writer, frame);
         drop(writer);
         if let Err(error) = result {
             self.close(error.clone());
@@ -1318,7 +1353,7 @@ impl Connection {
                     error: error.clone().into(),
                 },
             };
-            self.write_locked(&mut writer, frame)
+            self.write_locked(&mut **writer, frame)
         };
         if let Err(error) = result {
             self.close(error);
@@ -1340,4 +1375,6 @@ fn transport(error: impl std::fmt::Display) -> Error {
 }
 
 #[cfg(test)]
+mod channel_tests;
+#[cfg(all(test, unix))]
 mod tests;
