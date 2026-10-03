@@ -56,7 +56,7 @@
 | Python（min_cordis） | 同范式，但现在没有用户，归入“库外、以后再说” |
 | 反方向（Cordis 宿主挂载 rutis） | 继续冻结 |
 | 中立接口描述、启动方式抽象、`node:` 前缀放宽 | 不做；这些只是给其他语言铺路 |
-| P6 | **要改**：Cordis 运行时插件化，PR #101 合并前完成，设计见 [design-cordis-runtime-plugin](design-cordis-runtime-plugin-2026-10-03.md) |
+| P6 | **要改**：Cordis 运行时插件化（#109），设计见 [design-cordis-runtime-plugin](design-cordis-runtime-plugin-2026-10-03.md) |
 | 需求文档 | §8 补充结论（已改） |
 
 ## 六、什么情况下重新考虑

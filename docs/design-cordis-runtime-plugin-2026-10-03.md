@@ -1,8 +1,8 @@
 # 把 Cordis 运行时做成 rutis 插件（2026-10-03）
 
-依据：[需求](requirements-protocol-plugins.md)（rutis 是宿主）、[loader 设计](design-rutis-loader-2026-10-02.md) P6、PR #101（`InteropResolver`，尚未合并）、[决策记录](decision-multilang-2026-10-03.md)。
+依据：[需求](requirements-protocol-plugins.md)（rutis 是宿主）、[loader 设计](design-rutis-loader-2026-10-02.md) P6、P6（`InteropResolver`，#101 / #104 已合并）、[决策记录](decision-multilang-2026-10-03.md)。
 
-状态：已决定实施，在 PR #101 合并前完成。
+状态：已实施，见 #109。
 
 ## 1. 问题
 
@@ -30,7 +30,7 @@ root
 
 **`CordisRuntime` 插件**（放在 rutis-interop，仅 Unix，不依赖 loader）：
 
-- **配置**：`node_package`、`anchor`、宿主服务列表（名字、方法清单、`TypeKey`）。
+- **配置**：`node_package`、`anchor`、宿主服务列表（名字、方法清单）。每个宿主服务由应用以 `host_key(名字)` 提供为 `dyn HostDispatch`。
 - **injects**：宿主服务的 `TypeKey`。宿主服务没就绪时，运行时停在 Pending；宿主服务撤销后，运行时按原生规则卸载并重新等待。这和静态挂载 §5 的语义一致：撤销后整个运行时重启，不做就地替换。
 - **apply 依次执行**：
   1. 用 `ctx.require_as` 取宿主服务，构造 `Host`；
@@ -53,17 +53,20 @@ root
 **Resolver**：
 
 - 名字解析（`resolve_entry`）本来就在 Rust 侧完成，不需要进程。
-- 只有 schema（`row_schema`）要问 Node。为此 Resolver 持有运行时插件提供的一个句柄（`CordisRuntime::handle()`，内部是 watch 通道），`resolve` 等运行时就绪后再取 schema。
-- 约束：运行时插件由应用在 reconcile 之前装上（它是基础设施，与 `LoaderPlugin` 同级），不能作为同一个 loader 里的一行；否则 resolve 等运行时、运行时等 reconcile，会互相等待。运行时 apply 失败时，句柄返回错误，转成 `LoaderError::Resolve`。
+- 只有 schema（`row_schema`）要问 Node。Resolver 持有运行时插件的句柄（`CordisRuntimePlugin::handle()`，内部是 watch 通道）：
+  - 运行时正在启动时，等它就绪再取 schema；
+  - 没有运行时（等宿主服务、启动失败、进程已退出）就不等，返回无 schema 的结果，在 `meta.schema` 写明原因，也不缓存，之后 `Loader::reload` 可以补上。
+  - 这样 reconcile 永远不会卡在运行时上；行本身照常解析，按依赖等待运行时。
+- 运行时插件由应用在 reconcile 之前装上（它是基础设施，与 `LoaderPlugin` 同级）。
 
 **应用侧用法**：
 
 ```rust
-let runtime = root.plugin(CordisRuntime::new(CordisRuntimeConfig {
-    node_package, anchor,
-    hosts: vec![HostSpec::of::<dyn SystemPromptHost>("systemPrompt", methods)],
-}));
-let resolver = Chain::new(builtins).then(InteropResolver::new(runtime.handle()));
+root.provide_as::<dyn HostDispatch>(host_key("systemPrompt"), Arc::new(prompts))?;
+let runtime = CordisRuntimePlugin::new(node_package, anchor)
+    .host("systemPrompt", json!({ "get": "sync" }));
+let resolver = Chain::new().with(InteropResolver::new(runtime.handle()));
+root.plugin(runtime);
 root.plugin(LoaderPlugin::new(resolver, options)).await?;
 ```
 
@@ -76,12 +79,12 @@ root.plugin(LoaderPlugin::new(resolver, options)).await?;
 
 ## 4. 验收
 
-在 PR #101 的 `crates/rutis-loader/tests/interop_rows.rs` 基础上补充：
+在 `crates/rutis-loader/tests/interop_rows.rs` 上补充（#109 已实现）：
 
 1. 运行时插件卸载时，各行先卸载，进程最后退出。
 2. 杀掉 Node 进程后：运行时撤销服务；各行回到 Pending，诊断能指出缺的是运行时；调用运行时 fiber 的 `restart` 后各行恢复。
 3. 宿主服务未提供时，运行时与各行都处于等待；提供后全部启动；撤销后全部停止。
-4. 运行时 apply 失败时，`resolve` 返回 `LoaderError::Resolve`，不会卡住。
+4. 运行时 apply 失败时，`resolve` 不会卡住，行解析成功、无 schema，并按依赖等待。
 5. P6 原有测试全部通过。
 
 ## 5. 待决
