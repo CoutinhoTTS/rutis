@@ -299,3 +299,98 @@ async fn volatile_changes_reach_cordis_in_place() {
 
     root.shutdown().await.unwrap();
 }
+
+/// Same schema, but the parsed config holds plain values: nothing to commit
+/// into, so a volatile change must take an ordinary update.
+const PLAIN: &str = r#"
+export const name = 'plain'
+export const inject = ['probe']
+export const Config = {
+  type: 'object', meta: {},
+  dict: {
+    tag: { type: 'string', meta: {} },
+    level: { type: 'number', meta: { default: 1, volatile: true } },
+  },
+  '~standard': { validate: value => ({ value }) },
+}
+export function apply(ctx, config) {
+  ctx.probe.record(`${config.tag}: start ${config.level}`)
+}
+"#;
+
+async fn interop_loader(probe: &Probe) -> (Ctx, rutis_loader::Loader) {
+    let resolver = InteropResolver::new(node_package(), node_package().join("package.json"))
+        .with_hosts(vec![Host {
+            name: "probe".into(),
+            methods: json!({ "record": "sync" }),
+            dispatch: Arc::new(probe.clone()),
+        }]);
+    let root = Ctx::root().unwrap();
+    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+    (root, loader)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn volatile_changes_are_never_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let cosmokit = node_package()
+        .join("node_modules/@deepseek-ai/cosmokit/lib/index.js")
+        .canonicalize()
+        .unwrap();
+    let write = |name: &str, text: String| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    // Waits on its own inject for `late`.
+    let waiting = write(
+        "waiting.mjs",
+        TUNABLE
+            .replace("COSMOKIT", &format!("file://{}", cosmokit.display()))
+            .replace("['probe']", "['probe', 'late']"),
+    );
+    let plain = write("plain.mjs", PLAIN.to_owned());
+    let flag = write("flag.mjs", FLAG.to_owned());
+
+    let probe = Probe::default();
+    let (root, loader) = interop_loader(&probe).await;
+    let layer = |level: u32, late: bool| -> Vec<Layer> {
+        let mut rows = vec![
+            row(
+                "w",
+                &waiting,
+                json!({ "tag": "w", "level": level }),
+                json!(null),
+            ),
+            row(
+                "p",
+                &plain,
+                json!({ "tag": "p", "level": level }),
+                json!(null),
+            ),
+        ];
+        if late {
+            rows.push(row("f", &flag, json!({}), json!(null)));
+        }
+        let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+        vec![Layer::new("rows", patches)]
+    };
+
+    let report = loader.reconcile(layer(1, false), None).await.unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    probe.wait_for("p: start 1").await;
+
+    // No volatile reference to commit into: the plain row restarts with it.
+    loader.reconcile(layer(5, false), None).await.unwrap();
+    probe.wait_for("p: start 5").await;
+    // The waiting row got the update while pending (sent before p's, on the
+    // same connection); once `late` arrives it starts from it.
+    loader.reconcile(layer(5, true), None).await.unwrap();
+    probe.wait_for("w: start 5").await;
+    let lines = probe.take();
+    assert!(!lines.contains(&"w: start 1".to_owned()), "{lines:?}");
+
+    root.shutdown().await.unwrap();
+}

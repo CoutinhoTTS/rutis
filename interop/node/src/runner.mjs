@@ -128,6 +128,11 @@ async function pluginOf(entry) {
   return typeof module.apply === 'function' ? module : (module.default ?? module)
 }
 
+// `plugin()` returns a thenable `Object.create(fiber)`; state written through
+// it (`update` sets `_config`) would land on the wrapper and never reach the
+// fiber that later activates. Rows keep the fiber itself.
+const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeOf(wrapped) : wrapped
+
 // One row: `isolate` as [name, label] pairs (rows naming a label share its
 // scope), `inject` as extra service names gating the row. With `inject`, the
 // plugin runs inside a gate fiber (`inner`), from the row's latest config.
@@ -137,9 +142,9 @@ async function loadRow([key, entry, config, isolate, inject]) {
   let scope = ctx
   for (const [name, label] of isolate ?? []) scope = scope.isolate(name, Symbol.for(`rutis-row:${label}`))
   const row = { fiber: undefined, inner: undefined, config }
-  const fiber = inject?.length
-    ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { row.inner = gated.plugin(plugin, row.config) } })
-    : scope.plugin(plugin, config)
+  const fiber = fiberOf(inject?.length
+    ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { row.inner = fiberOf(gated.plugin(plugin, row.config)) } })
+    : scope.plugin(plugin, config))
   row.fiber = fiber
   if (!inject?.length) row.inner = fiber
   rows.set(key, row)
@@ -155,38 +160,41 @@ async function loadRow([key, entry, config, isolate, inject]) {
 
 // A new config for a row. Volatile values are committed into the running
 // plugin's references and announced with `loader/volatile-update`, as
-// cordis-plugin-loader's `_commitVolatile` does; when ordinary values changed
-// too, the row restarts. (rutis-loader sends only changes its schema calls
-// volatile; Cordis's parse of the config has the last word.)
+// cordis-plugin-loader's `_commitVolatile` does. Whenever that cannot apply
+// the change — ordinary values changed too, or the parsed config holds no
+// volatile references to commit into — the row takes an ordinary update
+// (a restart), so the plugin never keeps running on the old values.
+// (rutis-loader sends only changes its schema calls volatile; Cordis's parse
+// of the config has the last word.)
 async function updateRow([key, config]) {
   const row = rows.get(key)
   if (!row) throw new Error(`row ${key} is not loaded`)
   row.config = config
   const fiber = row.inner
-  // Inactive (a gate waiting for its services): the next activation reads
-  // row.config.
-  if (!fiber || fiber.state !== 2) return null
-  fiber._config = config
+  // A gate whose plugin fiber is gone re-applies from row.config.
+  if (!fiber || fiber.uid === null) return null
+  // Not running (waiting for its own inject, or failed): store the config
+  // in the fiber, which activates from it.
+  if (fiber.state !== 2) {
+    fiber.update(config, true)
+    return null
+  }
   if (commitVolatile(fiber, config)) return null
   fiber.update(config, true)
-  await fiber.await()
+    await fiber.await()
   return null
 }
 
+// Whether the change was committed in place. Throws when the config does
+// not validate.
 function commitVolatile(fiber, raw) {
   const { volatileEntries, updateVolatile, deepEqual } = cosmokit
   if (!volatileEntries || !resolveConfig) return false
   const refs = volatileEntries(fiber.config)
-  if (!refs.length) return true
-  let candidate
-  try {
-    candidate = resolveConfig(fiber.runtime, fiber.ctx.waterfall(fiber, 'internal/config', raw, () => raw))
-  } catch (error) {
-    // Like dsh: the running references stay; the raw config is kept.
-    fiber.ctx.logger?.warn(error)
-    return true
-  }
+  if (!refs.length) return false
+  const candidate = resolveConfig(fiber.runtime, fiber.ctx.waterfall(fiber, 'internal/config', raw, () => raw))
   if (!deepEqual(fiber.config, candidate, true)) return false
+  fiber._config = raw
   const paths = refs.flatMap(({ path, ref }) => {
     const source = path.reduce((value, key) => Reflect.get(value, key), candidate)
     if (deepEqual(ref.get(), source.get(), true)) return []
@@ -195,9 +203,8 @@ function commitVolatile(fiber, raw) {
   })
   if (paths.length) {
     const self = Object.create(fiber.ctx)
-    // Only the row's own fiber hears it. Fibers are compared by uid: the
-    // fiber a listener's context reports may be a different wrapper.
-    self[Context.filter] = owner => owner.fiber?.uid === fiber.uid
+    // Only the row's own fiber hears it.
+    self[Context.filter] = owner => owner.fiber === fiber
     fiber.ctx.emit(self, 'loader/volatile-update', paths)
   }
   return true
