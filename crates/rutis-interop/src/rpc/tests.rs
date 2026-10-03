@@ -200,7 +200,7 @@ async fn handshake_and_release_count_fail_closed() {
     send(&mut remote, Frame::Hello { version: VERSION });
     peer.ready().await.unwrap();
     let reference = peer
-        .encode(&Value::callback(|_| Ok(Value::Undefined)))
+        .encode_granting(&Value::callback(|_| Ok(Value::Undefined)), &mut Vec::new())
         .unwrap();
     let WireValue::Reference { id, .. } = reference else {
         unreachable!()

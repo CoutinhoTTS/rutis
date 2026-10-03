@@ -100,3 +100,156 @@ async fn a_session_ends_with_the_reason_its_channel_gives() {
         .unwrap_err();
     assert_eq!(error.to_string(), "peer mac: the process exited");
 }
+
+/// A sender that refuses messages above `limit` bytes and stays usable.
+struct Limit {
+    inner: Box<dyn Sender>,
+    limit: usize,
+}
+impl Sender for Limit {
+    fn send(&mut self, message: Vec<u8>) -> Result<(), ChannelError> {
+        if message.len() > self.limit {
+            return Err(ChannelError::TooLarge {
+                limit: self.limit,
+                size: message.len(),
+            });
+        }
+        self.inner.send(message)
+    }
+}
+
+/// A local end that refuses messages above 256 bytes, and its far end.
+fn limited() -> (Channel, Remote) {
+    let (local, remote) = rutis_channel::pair(16);
+    let local = Channel {
+        sender: Box::new(Limit {
+            inner: local.sender,
+            limit: 256,
+        }),
+        ..local
+    };
+    (local, Remote::new(remote))
+}
+
+fn big() -> Value {
+    Value::List(vec![
+        Value::Data(json!("x".repeat(512))),
+        Value::callback(|_| Ok(Value::Undefined)),
+    ])
+}
+
+fn refused(error: &Error) -> bool {
+    matches!(error, Error::Value(message) if message.contains("exceeds the limit"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_request_fails_alone() {
+    let (local, mut remote) = limited();
+    let peer = Connection::open(local, Arc::new(Echo)).unwrap();
+    remote.handshake();
+    peer.ready().await.unwrap();
+
+    let error = peer.invoke_async("svc", "put", big()).await.unwrap_err();
+    assert!(refused(&error), "{error}");
+    let blocking = peer.clone();
+    let error = tokio::task::spawn_blocking(move || blocking.invoke("svc", "put", big()))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(refused(&error), "{error}");
+    {
+        let calls = peer.0.calls.lock().unwrap();
+        assert!(calls.closed.is_none(), "the session stays open");
+        assert!(
+            calls.waiting.is_empty(),
+            "the refused calls are not waiting"
+        );
+    }
+    assert!(
+        peer.0.exports.lock().unwrap().entries.is_empty(),
+        "the callbacks of the refused calls are not granted"
+    );
+
+    // The next request goes through; nothing of the refused ones did.
+    let remote = std::thread::spawn(move || {
+        let Frame::Invoke { id, method, .. } = remote.read() else {
+            panic!("invoke expected")
+        };
+        assert_eq!(method, "ping");
+        remote.send(Frame::Return {
+            id,
+            value: WireValue::Data(json!("pong")),
+        });
+    });
+    let reply = peer
+        .invoke_async("svc", "ping", Value::List(vec![]))
+        .await
+        .unwrap();
+    assert_eq!(reply.json().unwrap(), json!("pong"));
+    tokio::task::spawn_blocking(move || remote.join().unwrap())
+        .await
+        .unwrap();
+}
+
+/// Answers `big` with a value above the limit, anything else with its
+/// arguments.
+struct Answers;
+impl Dispatch for Answers {
+    fn invoke(&self, _: &Connection, _: &str, method: &str, args: Value) -> Reply {
+        if method == "big" {
+            Ok(big())
+        } else {
+            Ok(args)
+        }
+    }
+}
+
+// Current-thread: an answer, with the release of its grants, completes
+// before the next call runs.
+#[tokio::test(flavor = "current_thread")]
+async fn an_oversized_answer_becomes_an_error_answer() {
+    let (local, mut remote) = limited();
+    let peer = Connection::open(local, Arc::new(Answers)).unwrap();
+    remote.handshake();
+    peer.ready().await.unwrap();
+    let remote = std::thread::spawn(move || {
+        remote.send(Frame::Invoke {
+            id: "node:1".into(),
+            path: vec![],
+            target: "svc".into(),
+            method: "big".into(),
+            args: WireValue::Data(json!([])),
+        });
+        let Frame::Throw { id, error } = remote.read() else {
+            panic!("an error answer expected")
+        };
+        assert_eq!(id, "node:1");
+        assert!(
+            error.message.contains("exceeds the limit"),
+            "{}",
+            error.message
+        );
+        // The session still answers.
+        remote.send(Frame::Invoke {
+            id: "node:2".into(),
+            path: vec![],
+            target: "svc".into(),
+            method: "echo".into(),
+            args: WireValue::Data(json!([1])),
+        });
+        let Frame::Return { id, .. } = remote.read() else {
+            panic!("return expected")
+        };
+        assert_eq!(id, "node:2");
+        // Kept open until the checks below: dropping it ends the session.
+        remote
+    });
+    let _remote = tokio::task::spawn_blocking(move || remote.join().unwrap())
+        .await
+        .unwrap();
+    assert!(peer.0.calls.lock().unwrap().closed.is_none());
+    assert!(
+        peer.0.exports.lock().unwrap().entries.is_empty(),
+        "the callback of the refused answer is not granted"
+    );
+}
