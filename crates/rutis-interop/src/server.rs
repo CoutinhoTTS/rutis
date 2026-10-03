@@ -11,7 +11,13 @@ pub trait Dispatch: Send + Sync + 'static {
     fn invoke(&self, target: &str, method: &str, args: RpcValue) -> Reply;
 }
 
-pub use crate::native_error;
+pub fn native_error(error: impl std::fmt::Display) -> Error {
+    Error::Remote {
+        name: "RustError".into(),
+        message: error.to_string(),
+        graph: None,
+    }
+}
 fn transport(error: impl std::fmt::Display) -> Error {
     Error::Transport(error.to_string())
 }
