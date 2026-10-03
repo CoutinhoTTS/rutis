@@ -1,6 +1,6 @@
 {
   "name": "@arcships/rutis-interop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Node runtime and binding generator of rutis-interop: mount Cordis plugins in rutis applications",
   "license": "MIT",
   "repository": {
@@ -9,7 +9,7 @@
     "directory": "interop/node"
   },
   "homepage": "https://github.com/arcships/rutis/tree/main/crates/rutis-interop#readme",
-  "rutisProtocol": 1,
+  "rutisProtocol": 2,
   "type": "module",
   "files": [
     "src"
