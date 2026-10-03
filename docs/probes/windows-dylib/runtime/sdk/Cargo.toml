@@ -1,0 +1,13 @@
+[package]
+name = "sdk"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Only `dylib`: dependents cannot link it statically, so they also link std
+# dynamically (the same setup as crates/rutis-sdk).
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+tokio = { workspace = true }
