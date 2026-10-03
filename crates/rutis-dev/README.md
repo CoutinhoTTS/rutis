@@ -6,6 +6,8 @@
 let channel = rutis_dev::DevChannel::start(root.clone(), loader.clone(), DevOptions::new("/tmp/host.sock")).await?;
 ```
 
+请求是一行 JSON 对象：`cmd` 是命令，`req`（可选，任意 JSON）原样回到响应里用于关联；其余字段是命令参数，其中 `id` 指行 id。响应形如 `{"req": …, "ok": true, "result": …}` 或 `{"req": …, "ok": false, "error": "…"}`。
+
 | 命令 | 参数 | 作用 |
 | --- | --- | --- |
 | `hello` | | 协议版本与宿主身份（`DevOptions::hello`） |
@@ -16,7 +18,7 @@ let channel = rutis_dev::DevChannel::start(root.clone(), loader.clone(), DevOpti
 | `swap` | `id` | `Loader::reload`：全有或全无，失败时旧版本继续运行 |
 | `unload-dev` | `id` | 卸掉经通道装载的一行 |
 
-装载的行放在 overlay 层（`Loader::set_overlay`）：不持久化、不进用户配置、应用自己 reconcile 时保留。socket 以 `0600` 创建；只在开发宿主里启动。改动类命令（`load`、`swap`、`unload-dev`）都交给审计钩子，默认打到 stderr。
+装载的行放在 overlay 层（`Loader::set_overlay`）：不持久化、不进用户配置、应用自己 reconcile 时保留。socket 以 `0600` 创建；路径上已有的非 socket 文件（普通文件、符号链接）一律报错不删；只在开发宿主里启动。改动类命令（`load`、`swap`、`unload-dev`）都交给审计钩子，默认打到 stderr。
 
 命令行客户端：
 

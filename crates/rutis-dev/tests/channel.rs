@@ -157,18 +157,18 @@ async fn setup() -> Setup {
 async fn hello_status_describe() {
     let s = setup().await;
     let mut c = Client::connect(s.channel.socket()).await;
-    let hello = c.send(json!({ "id": 1, "cmd": "hello" })).await;
-    assert_eq!(hello["id"], 1);
+    let hello = c.send(json!({ "req": 1, "cmd": "hello" })).await;
+    assert_eq!(hello["req"], 1);
     assert_eq!(hello["result"]["protocol"], 1);
     assert_eq!(hello["result"]["host"], json!({ "host": "test" }));
 
-    let status = c.send(json!({ "id": 2, "cmd": "status" })).await;
+    let status = c.send(json!({ "req": 2, "cmd": "status" })).await;
     let entries = status["result"]["entries"].as_array().unwrap();
     assert_eq!(entries[0]["id"], "base");
     assert_eq!(entries[0]["state"], "Active");
     assert_eq!(entries[0]["dev"], false);
 
-    let describe = c.send(json!({ "id": 3, "cmd": "describe" })).await["result"].clone();
+    let describe = c.send(json!({ "req": 3, "cmd": "describe" })).await["result"].clone();
     assert!(describe["plugins"]
         .as_array()
         .unwrap()
@@ -181,7 +181,7 @@ async fn hello_status_describe() {
         .any(|b| b["key"] == "u32"));
     assert_eq!(describe["entries"][0]["id"], "base");
 
-    let bad = c.send(json!({ "id": 4, "cmd": "nope" })).await;
+    let bad = c.send(json!({ "req": 4, "cmd": "nope" })).await;
     assert_eq!(bad["ok"], false);
     c.write.write_all(b"not json\n").await.unwrap();
     assert_eq!(c.next().await["ok"], false);
@@ -202,7 +202,7 @@ async fn load_swap_unload_and_watch() {
     let s = setup().await;
     let mut watcher = Client::connect(s.channel.socket()).await;
     assert_eq!(
-        watcher.send(json!({ "id": "w", "cmd": "watch" })).await["ok"],
+        watcher.send(json!({ "req": "w", "cmd": "watch" })).await["ok"],
         true
     );
 
@@ -297,4 +297,88 @@ async fn a_live_socket_is_not_replaced_but_a_stale_one_is() {
         .await
         .unwrap();
     assert!(again.socket().exists());
+}
+
+#[tokio::test]
+async fn a_path_that_is_not_a_socket_is_never_removed() {
+    let s = setup().await;
+    let dir = s._dir.path();
+    let start = |path: std::path::PathBuf| {
+        DevChannel::start(s._root.clone(), s.loader.clone(), DevOptions::new(path))
+    };
+
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "keep me").unwrap();
+    let err = start(file.clone()).await.err().unwrap();
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+
+    // A symlink is refused as such, whether to a file or a stale socket.
+    let link = dir.join("link.sock");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    assert_eq!(
+        start(link.clone()).await.err().unwrap().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    let stale = dir.join("stale.sock");
+    std::os::unix::net::UnixListener::bind(&stale).unwrap();
+    let to_socket = dir.join("to-socket.sock");
+    std::os::unix::fs::symlink(&stale, &to_socket).unwrap();
+    assert_eq!(
+        start(to_socket.clone()).await.err().unwrap().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert!(std::fs::symlink_metadata(&link).is_ok());
+    assert!(std::fs::symlink_metadata(&to_socket).is_ok());
+    assert!(stale.exists());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+}
+
+/// Run the `rutis-dev` binary against the channel.
+async fn cli(socket: &std::path::Path, args: &[&str]) -> (bool, Value) {
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_rutis-dev"))
+        .arg(socket)
+        .args(args)
+        .output()
+        .await
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value = serde_json::from_str(&stdout).unwrap_or_else(|_| {
+        panic!(
+            "stdout {stdout:?}, stderr {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.success(), value)
+}
+
+#[tokio::test]
+async fn the_cli_keeps_the_row_id() {
+    let s = setup().await;
+    let socket = s.channel.socket();
+    let (ok, loaded) = cli(
+        socket,
+        &[
+            "load",
+            r#"{"name": "provider", "id": "cli-row", "config": {"value": 3, "key": "cli"}}"#,
+        ],
+    )
+    .await;
+    assert!(ok, "{loaded}");
+    assert_eq!(loaded["req"], 1);
+    assert_eq!(loaded["result"]["id"], "cli-row");
+    assert!(s.loader.get("cli-row").is_some());
+    assert!(s.loader.get("1").is_none());
+
+    let (ok, swapped) = cli(socket, &["swap", r#"{"id": "cli-row"}"#]).await;
+    assert!(ok, "{swapped}");
+    assert_eq!(swapped["result"]["id"], "cli-row");
+    let (ok, unloaded) = cli(socket, &["unload-dev", r#"{"id": "cli-row"}"#]).await;
+    assert!(ok, "{unloaded}");
+    assert!(s.loader.get("cli-row").is_none());
+
+    // A failure exits non-zero.
+    let (ok, missing) = cli(socket, &["swap", r#"{"id": "nope"}"#]).await;
+    assert!(!ok);
+    assert_eq!(missing["ok"], false);
 }

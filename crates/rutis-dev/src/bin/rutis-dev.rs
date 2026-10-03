@@ -28,7 +28,8 @@ async fn main() {
         },
     };
     request["cmd"] = serde_json::json!(command);
-    request["id"] = serde_json::json!(1);
+    // `id` is the row argument of load/swap/unload-dev; `req` correlates.
+    request["req"] = serde_json::json!(1);
     let stream = match tokio::net::UnixStream::connect(socket).await {
         Ok(stream) => stream,
         Err(error) => {

@@ -78,18 +78,31 @@ impl Drop for DevChannel {
 }
 
 impl DevChannel {
-    /// Listen on `options.socket`. A stale socket file (nobody listening)
-    /// is replaced; a live one is an error.
+    /// Listen on `options.socket`. A stale socket (nobody listening) is
+    /// replaced; a live one is an error, and so is anything at that path
+    /// that is not a socket — a mistyped path must not delete a file.
     pub async fn start(root: Ctx, loader: Loader, options: DevOptions) -> std::io::Result<Self> {
+        use std::os::unix::fs::FileTypeExt;
+
         let path = options.socket.clone();
-        if path.exists() {
-            if UnixStream::connect(&path).await.is_ok() {
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+            Ok(meta) if !meta.file_type().is_socket() => {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrInUse,
-                    format!("a dev channel already listens on {}", path.display()),
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("{} exists and is not a socket", path.display()),
                 ));
             }
-            std::fs::remove_file(&path)?;
+            Ok(_) => {
+                if UnixStream::connect(&path).await.is_ok() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!("a dev channel already listens on {}", path.display()),
+                    ));
+                }
+                std::fs::remove_file(&path)?;
+            }
         }
         let listener = UnixListener::bind(&path)?;
         restrict(&path)?;
@@ -138,11 +151,13 @@ async fn serve(shared: Arc<Shared>, stream: UnixStream) -> std::io::Result<()> {
         let request: Value = match serde_json::from_str(&line) {
             Ok(Value::Object(map)) => Value::Object(map),
             Ok(_) | Err(_) => {
-                write(&mut write_half, &json!({ "id": null, "ok": false, "error": "requests are JSON objects, one per line" })).await?;
+                write(&mut write_half, &json!({ "req": null, "ok": false, "error": "requests are JSON objects, one per line" })).await?;
                 continue;
             }
         };
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        // `req` correlates a response with its request; `id` is a row id,
+        // an argument of `load`, `swap` and `unload-dev`.
+        let req = request.get("req").cloned().unwrap_or(Value::Null);
         let command = request
             .get("cmd")
             .and_then(Value::as_str)
@@ -151,7 +166,7 @@ async fn serve(shared: Arc<Shared>, stream: UnixStream) -> std::io::Result<()> {
         if command == "watch" {
             write(
                 &mut write_half,
-                &json!({ "id": id, "ok": true, "result": { "watching": true } }),
+                &json!({ "req": req, "ok": true, "result": { "watching": true } }),
             )
             .await?;
             return watch(&shared, write_half, lines).await;
@@ -165,8 +180,8 @@ async fn serve(shared: Arc<Shared>, stream: UnixStream) -> std::io::Result<()> {
             });
         }
         let response = match result {
-            Ok(result) => json!({ "id": id, "ok": true, "result": result }),
-            Err(error) => json!({ "id": id, "ok": false, "error": error }),
+            Ok(result) => json!({ "req": req, "ok": true, "result": result }),
+            Err(error) => json!({ "req": req, "ok": false, "error": error }),
         };
         write(&mut write_half, &response).await?;
     }
