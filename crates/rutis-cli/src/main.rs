@@ -69,7 +69,9 @@ fn restore_bundle_environment() {
     const LOADER_PREFIX: &str = "DYLD_";
     #[cfg(not(target_os = "macos"))]
     const LOADER_PREFIX: &str = "LD_";
-    #[cfg(not(target_os = "macos"))]
+    // The Linux launcher sets LD_LIBRARY_PATH to the bundle. The Windows
+    // launcher changes no variable and saves none, so nothing below applies.
+    #[cfg(target_os = "linux")]
     std::env::remove_var("LD_LIBRARY_PATH");
     let originals = std::env::vars_os()
         .filter_map(|(name, value)| {

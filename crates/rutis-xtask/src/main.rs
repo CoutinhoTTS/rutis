@@ -12,10 +12,60 @@ const SHARED_CRATES: [&str; 4] = ["rutis", "tokio", "tokio-util", "serde_json"];
 const ALLOCATOR_SYMBOLS: [&str; 3] = ["__rust_alloc", "__rust_dealloc", "__rust_realloc"];
 
 fn main() {
-    if let Err(error) = run(env::args().skip(1).collect()) {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("inspect") {
+        if let Err(error) = inspect(&args[1..]) {
+            eprintln!("inspect: {error}");
+            process::exit(1);
+        }
+        return;
+    }
+    if let Err(error) = run(args) {
         eprintln!("pack-plugin: {error}");
         process::exit(1);
     }
+}
+
+/// `cargo xtask inspect imports|exports|export-count <library> [--target <triple>]`:
+/// what the test scripts would otherwise ask readelf, otool or dumpbin.
+/// The target defaults to rustc's host.
+fn inspect(args: &[String]) -> Result<(), String> {
+    let usage =
+        "usage: cargo xtask inspect imports|exports|export-count <library> [--target <triple>]";
+    let (command, file) = match args {
+        [command, file, ..] => (command.as_str(), Path::new(file)),
+        _ => return Err(usage.into()),
+    };
+    let target = match &args[2..] {
+        [] => command_output(Command::new("rustc").arg("-vV"))?
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .ok_or("rustc -vV printed no host")?
+            .to_owned(),
+        [flag, triple] if flag == "--target" => triple.clone(),
+        _ => return Err(usage.into()),
+    };
+    let bytes = fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    match command {
+        "imports" => {
+            for name in rutis_dylib_meta::needed_libraries(&bytes, &target)? {
+                println!("{name}");
+            }
+        }
+        "exports" => {
+            for name in rutis_dylib_meta::exported_symbols(&bytes, &target)? {
+                println!("{name}");
+            }
+        }
+        "export-count" => {
+            println!(
+                "{}",
+                rutis_dylib_meta::exported_symbols(&bytes, &target)?.len()
+            )
+        }
+        _ => return Err(usage.into()),
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -70,9 +120,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
 
 fn run(raw: Vec<String>) -> Result<(), String> {
     let args = parse_args(raw)?;
-    let required = |value: &Option<PathBuf>, name: &str| {
-        value.clone().ok_or(format!("{name} is required"))
-    };
+    let required =
+        |value: &Option<PathBuf>, name: &str| value.clone().ok_or(format!("{name} is required"));
     let manifest = canonical(&required(&args.manifest_path, "--manifest-path")?)?;
     let release = read_toml(&required(&args.sdk_manifest, "--sdk-manifest")?)?;
     let sdk_file = required(&args.sdk_file, "--sdk-file")?;
@@ -96,7 +145,8 @@ fn run(raw: Vec<String>) -> Result<(), String> {
                 Some(dir) => dir.clone(),
                 None => manifest.parent().unwrap().join("target"),
             };
-            fs::create_dir_all(&target_dir).map_err(|e| format!("{}: {e}", target_dir.display()))?;
+            fs::create_dir_all(&target_dir)
+                .map_err(|e| format!("{}: {e}", target_dir.display()))?;
             let target_dir = canonical(&target_dir)?;
             let repo = canonical(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))?;
             let cargo_home = match env::var_os("CARGO_HOME") {
@@ -245,7 +295,11 @@ fn build(b: &Build<'_>) -> Result<PathBuf, String> {
     match b.anchor_package {
         Some(anchor) => {
             command.args(["-p", package, "-p", anchor]);
-            selected.extend(split_list(b.features).iter().map(|f| format!("{package}/{f}")));
+            selected.extend(
+                split_list(b.features)
+                    .iter()
+                    .map(|f| format!("{package}/{f}")),
+            );
             selected.extend(b.anchor_features.iter().map(|f| format!("{anchor}/{f}")));
         }
         None => selected.extend(split_list(b.features)),
@@ -261,7 +315,10 @@ fn build(b: &Build<'_>) -> Result<PathBuf, String> {
     let sdk_file = b
         .target_dir
         .join("release")
-        .join(rutis_dylib_meta::library_file_name("rutis_sdk", b.sdk_target)?);
+        .join(rutis_dylib_meta::library_file_name(
+            "rutis_sdk",
+            b.sdk_target,
+        )?);
     run_command(&mut command)?;
     if sha256_file(&sdk_file)? != b.sdk_hash {
         return Err("independent SDK build differs from the published artifact; build the plugin in the SDK release pipeline".into());
@@ -304,7 +361,9 @@ fn check_shared_duplicates(manifest: &Path) -> Result<(), String> {
 fn check_allocator(bytes: &[u8], target: &str) -> Result<(), String> {
     for symbol in rutis_dylib_meta::exported_symbols(bytes, target)? {
         if ALLOCATOR_SYMBOLS.iter().any(|name| symbol.ends_with(name)) {
-            return Err(format!("plugin defines its own global allocator ({symbol})"));
+            return Err(format!(
+                "plugin defines its own global allocator ({symbol})"
+            ));
         }
     }
     Ok(())

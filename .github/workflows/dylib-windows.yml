@@ -1,0 +1,54 @@
+# Windows dylib plugin tests. They take about 30 minutes, so they run only
+# when a pull request touches the dylib code, when a release tag is pushed,
+# or by hand (Actions → dylib-windows → Run workflow). Other Windows builds
+# are still checked on every change by ci.yml's static-platforms job.
+#
+# Changes elsewhere (the rutis kernel, dependency updates in Cargo.lock) can
+# also break Windows dylib plugins; those are caught at release time, or run
+# this workflow by hand before merging such a change.
+
+name: dylib-windows
+
+on:
+  pull_request:
+    paths:
+      - "crates/rutis-sdk/**"
+      - "crates/rutis-dylib/**"
+      - "crates/rutis-dylib-meta/**"
+      - "crates/rutis-dylib-launcher/**"
+      - "crates/rutis-xtask/**"
+      - "crates/rutis-cli/build.rs"
+      - "tests/dylib-fixtures/**"
+      - "tools/*dylib*"
+      - "tools/lib/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/dylib-windows.yml"
+  push:
+    tags: ["v*", "rutis-v*", "loader-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dylib-windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: plugin file checks
+        run: cargo test -p rutis-dylib-meta
+      - name: dylib host child environment
+        run: cargo test -p rutis-cli --features dylib-plugins --bin rutis-cli
+      - name: plugin swap, pre-load rejection and planted DLLs
+        run: bash tools/test-dylib.sh
+      # Also checks the release rutis_sdk.dll exports at most 30000 symbols
+      # (in tools/build-dylib-bundle.sh) and that files are held while the host runs.
+      - name: launcher pre-execution verification, file locks and job object
+        run: bash tools/test-dylib-launcher.sh
+      - name: reproducible SDK across source and target paths
+        run: bash tools/test-dylib-repro.sh

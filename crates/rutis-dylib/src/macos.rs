@@ -62,11 +62,7 @@ extern "C" {
         flags: u32,
         requirement: *mut CFTypeRef,
     ) -> OSStatus;
-    fn SecStaticCodeCheckValidity(
-        code: CFTypeRef,
-        flags: u32,
-        requirement: CFTypeRef,
-    ) -> OSStatus;
+    fn SecStaticCodeCheckValidity(code: CFTypeRef, flags: u32, requirement: CFTypeRef) -> OSStatus;
 }
 
 struct Owned(CFTypeRef);
@@ -118,7 +114,9 @@ pub(crate) fn check_team_id(path: &Path, team_ids: &[String]) -> Result<(), Stri
         let status = SecStaticCodeCreateWithPath(url.0, 0, &mut code);
         let code = Owned(code);
         if status != 0 {
-            return Err(format!("reading the code signature failed (OSStatus {status})"));
+            return Err(format!(
+                "reading the code signature failed (OSStatus {status})"
+            ));
         }
         let mut requirement = std::ptr::null();
         let status = SecRequirementCreateWithString(text.0, 0, &mut requirement);

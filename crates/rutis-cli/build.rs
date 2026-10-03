@@ -8,6 +8,11 @@ fn main() {
     match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("linux") => println!("cargo:rustc-link-arg-bins=-Wl,-rpath,$ORIGIN"),
         Ok("macos") => println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@loader_path"),
+        // Windows resolves the host's imports from its own directory first;
+        // /Brepro makes the host image independent of build time.
+        Ok("windows") if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") => {
+            println!("cargo:rustc-link-arg-bins=/Brepro")
+        }
         _ => {}
     }
 }
