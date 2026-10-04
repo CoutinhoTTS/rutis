@@ -92,7 +92,11 @@ test -f "$base/init-v1"
 # The plugin links the SDK and libstd dynamically and carries no run path.
 imports="$(cargo xtask inspect imports "$base/v1/$plugin_name")"
 case "$imports" in *"$sdk_name"*) ;; *) echo "plugin does not link $sdk_name" >&2; exit 1;; esac
-case "$imports" in *"libstd-"*) ;; *) echo "plugin does not link dynamic libstd" >&2; exit 1;; esac
+# Windows names it std-<hash>.dll (no lib prefix); Linux and macOS libstd-.
+case "$imports" in
+  *libstd-*|*std-[0-9a-f][0-9a-f]*) ;;
+  *) echo "plugin does not link dynamic libstd" >&2; exit 1;;
+esac
 if test -n "$(run_paths "$base/v1/$plugin_name")"; then
   echo "external plugin carries a run path" >&2
   exit 1
