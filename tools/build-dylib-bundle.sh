@@ -63,16 +63,17 @@ if test "$dylib_os" = windows; then
 else
   env "$loader_path_var=$bundle" "$bundle/rutis-cli-host" --sdk-info > "$bundle/sdk.toml"
 fi
-# The lock and the toolchain pin are the ones this SDK was built with; the
-# sdk-bundle producer (cargo xtask pack-sdk-bundle) copies them from here
-# instead of from a possibly-changed repository checkout.
-cp "$repo_dir/Cargo.lock" "$bundle/Cargo.lock"
-cp "$repo_dir/rust-toolchain.toml" "$bundle/rust-toolchain.toml"
+# The lock and the toolchain pin must not become bundle files: the macOS
+# launcher tests codesign-verify everything in the directory. Record their
+# hashes instead; cargo xtask pack-sdk-bundle takes the files from the
+# repository checkout and refuses a mismatch.
 cat >> "$bundle/sdk.toml" <<EOF
 
 [build]
 anchor_package = "rutis-cli"
 anchor_features = ["dylib-plugins"]
+lock_sha256 = "$(sha256_of "$repo_dir/Cargo.lock")"
+toolchain_sha256 = "$(sha256_of "$repo_dir/rust-toolchain.toml")"
 EOF
 
 # The launcher must not depend on either unchecked Rust dynamic library.

@@ -920,19 +920,34 @@ fn pack_sdk_bundle(args: &[String]) -> Result<(), String> {
     }
     variants.sort();
 
-    // sdk.toml, the lock and the toolchain pin all come from the runtime
-    // bundle: they are exactly the ones its SDK was built with. Missing
-    // files mean an inconsistent bundle, not a reason to fall back to a
-    // possibly-changed repository checkout. They are copied before the
-    // shrink pass: the probe builds with the bundle's toolchain pin.
-    for name in ["sdk.toml", "Cargo.lock", "rust-toolchain.toml"] {
-        let source = bundle_dir.join(name);
-        if !source.exists() {
-            return Err(format!(
-                "the runtime bundle is missing {name}; rebuild it with tools/build-dylib-bundle.sh"
-            ));
-        }
-        fs::copy(&source, output.join(name)).map_err(|e| format!("copy {name}: {e}"))?;
+    // sdk.toml comes from the runtime bundle. The lock and the toolchain
+    // pin cannot be bundle files (the macOS launcher checks codesign-verify
+    // everything there); sdk.toml's [build] section carries their hashes,
+    // and the files are taken from the runtime bundle if present or from
+    // the repository checkout — either way the hash must match the one
+    // recorded when the SDK was built.
+    let build = release
+        .get("build")
+        .cloned()
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    fs::copy(&bundle_dir.join("sdk.toml"), output.join("sdk.toml"))
+        .map_err(|e| format!("copy sdk.toml: {e}"))?;
+    for (name, key) in [
+        ("Cargo.lock", "lock_sha256"),
+        ("rust-toolchain.toml", "toolchain_sha256"),
+    ] {
+        let expected = build
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .ok_or(format!("sdk.toml has no {key}; rebuild the runtime bundle"))?;
+        let candidates = [bundle_dir.join(name), repo.join(name)];
+        let found = candidates
+            .iter()
+            .find(|path| path.exists() && sha256_file(path).is_ok_and(|h| h == expected))
+            .ok_or(format!(
+                "no {name} matching sdk.toml's {key}; the checkout changed since the SDK was built"
+            ))?;
+        fs::copy(found, output.join(name)).map_err(|e| format!("copy {name}: {e}"))?;
     }
 
     // Shrink: one variant at a time, while the probe still builds against
