@@ -1163,18 +1163,24 @@ rutis_sdk::export_plugin! { id: "sdk-bundle-probe", factory: ProbeFactory }
 "#;
 
 fn write_cargo_config(bundle: &Path, sdk_name: &str) -> Result<(), String> {
-    let mut content = format!(
+    let sdk = read_toml(&bundle.join("sdk.toml"))?;
+    let sdk_table = table(&sdk, "sdk")?;
+    let sdk_hash = string(sdk_table, "artifact_sha256")?;
+    let content = format!(
         "# Copy this file to the plugin workspace as .cargo/config.toml and\n\
          # adjust the two paths below to where you unpacked the bundle.\n\
          # The RUSTFLAGS environment variable fully replaces these flags:\n\
          # if it is set, the injection silently stops working. Unset it.\n\
-         [build]\nrustflags = [\n  \"--extern\", \"rutis_sdk={0}\",\n  \"-L\", \"dependency={1}\",\n]\n",
-        bundle.join("lib").join(sdk_name).display(),
-        bundle.join("deps").display()
-    );
-    content.push_str(
-        "\n# macOS: keep the plugin's deployment target equal to the SDK's.\n\
+         [build]\nrustflags = [\n  \"--extern\", \"rutis_sdk={0}\",\n  \"-L\", \"dependency={1}\",\n]\n\n\
+         # export_plugin! embeds the SDK artifact hash at compile time; the\n\
+         # packer sets the real value, the template uses the recorded one so\n\
+         # cargo check/build works without the packer.\n\
+         [env]\nRUTIS_SDK_ARTIFACT_SHA256 = \"{2}\"\n\n\
+         # macOS: keep the plugin's deployment target equal to the SDK's.\n\
          # [env]\n# MACOSX_DEPLOYMENT_TARGET = \"13.0\"\n",
+        bundle.join("lib").join(sdk_name).display(),
+        bundle.join("deps").display(),
+        sdk_hash
     );
     fs::write(bundle.join("cargo-config.toml"), content).map_err(|e| e.to_string())
 }
