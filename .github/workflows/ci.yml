@@ -89,6 +89,8 @@ jobs:
         run: bash tools/test-dylib-launcher.sh
       - name: reproducible SDK across source and target paths
         run: bash tools/test-dylib-repro.sh
+      - name: external plugin build against a prebuilt SDK
+        run: bash tools/test-sdk-bundle.sh
 
   dylib-macos:
     runs-on: macos-15
@@ -106,6 +108,8 @@ jobs:
         run: bash tools/test-dylib-launcher.sh
       - name: reproducible SDK across source and target paths
         run: bash tools/test-dylib-repro.sh
+      - name: external plugin build against a prebuilt SDK
+        run: bash tools/test-sdk-bundle.sh
 
   static-platforms:
     strategy:
