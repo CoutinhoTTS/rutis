@@ -43,7 +43,8 @@ cargo xtask pack-plugin \
 
 ## 外部构建：SDK 构建包
 
-上面的流程需要宿主源码（锚点包进入同一次 Cargo 构建）。没有宿主源码的外部开发者用 **sdk-bundle**：发布流水线在构建运行发布目录后运行
+面向插件作者的完整指南（工作区搭建、代码示例、排错）见
+[外部插件开发指南](external-plugin-guide.md)；本节概要工具链视角。上面的流程需要宿主源码（锚点包进入同一次 Cargo 构建）。没有宿主源码的外部开发者用 **sdk-bundle**：发布流水线在构建运行发布目录后运行
 
 ```sh
 cargo xtask pack-sdk-bundle --bundle-dir target/dylib-bundles/<hash> --output <sdk-bundle>

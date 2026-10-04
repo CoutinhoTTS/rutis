@@ -452,9 +452,16 @@ fn pack_plugin_bundle(args: &Args) -> Result<(), String> {
     // The manifest is checked before the lock file: a blacklisted direct
     // dependency fails fast, without cargo touching the network or the graph.
     check_bundle_manifest(&manifest)?;
-    // A standalone workspace may not have a lock file yet; generate it so
-    // the duplicate check and the build can run --locked.
-    if lock_path(&manifest).is_err() {
+    // A standalone workspace may not have a lock file yet, or its lock may
+    // be stale after a Cargo.toml edit; regenerate it so the duplicate
+    // check and the build can run --locked.
+    let tree_ok = Command::new("cargo")
+        .args(["tree", "-d", "--locked", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !tree_ok {
         run_command(
             Command::new("cargo")
                 .args(["generate-lockfile", "--manifest-path"])
@@ -809,15 +816,26 @@ fn pack_sdk_bundle(args: &[String]) -> Result<(), String> {
             let entry = entry.map_err(|e| e.to_string())?;
             let file = entry.file_name();
             let file = file.to_string_lossy();
-            // lib<crate>-<hash>.<ext>: an rlib, or a proc-macro artifact
-            // (.so on Linux, .dylib on macOS, .dll on Windows). The hash
-            // part is required: the SDK dylib itself has no suffix.
+            // rlib artifacts are lib<crate>-<hash>.rlib everywhere. A
+            // proc-macro artifact is lib<crate>-<hash>.so on Linux and
+            // .dylib on macOS, but <crate>-<hash>.dll on Windows, where DLL
+            // names carry no lib prefix. The hash part is required: the SDK
+            // dylib itself has no suffix.
             let stem = format!("lib{name}-");
-            let after = file.strip_prefix(&stem).unwrap_or("");
+            let win_stem = format!("{name}-");
+            let matched_stem = if sdk_target.contains("windows") && file.starts_with(&win_stem) {
+                &win_stem
+            } else if file.starts_with(&stem) {
+                &stem
+            } else {
+                ""
+            };
+            let after = file.strip_prefix(matched_stem).unwrap_or("");
             let has_hash = after.split_once('.').is_some_and(|(hash, _)| {
                 !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit())
             });
-            let is_artifact = has_hash
+            let is_artifact = !matched_stem.is_empty()
+                && has_hash
                 && matches!(
                     file.rsplit('.').next(),
                     Some("rlib") | Some("so") | Some("dylib") | Some("dll")

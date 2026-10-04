@@ -134,4 +134,122 @@ if env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifes
 fi
 grep -Fq "the bundle is missing" "$base/e9.stdout"
 
+# E2a: a private dependency outside the SDK tree builds and the published
+# host loads the plugin.
+e2a="$base/external/e2a-plugin"
+mkdir -p "$e2a/src"
+cp rust-toolchain.toml "$e2a/rust-toolchain.toml"
+cat > "$e2a/Cargo.toml" <<'EOF'
+[package]
+name = "e2a-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+test = false
+doctest = false
+
+[features]
+export = []
+
+[dependencies]
+base64 = "0.22"
+
+[workspace]
+EOF
+cat > "$e2a/src/lib.rs" <<'EOF'
+#![cfg(feature = "export")]
+use rutis_sdk::rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory};
+use rutis_sdk::ConfigValue;
+use base64::Engine as _;
+
+struct Factory;
+struct E2a;
+impl PluginFactory<ConfigValue> for Factory {
+    fn name(&self) -> &str { "e2a" }
+    fn build(&self, _: &ConfigValue) -> Result<Box<dyn Plugin>, CordisError> {
+        Ok(Box::new(E2a))
+    }
+}
+impl Plugin for E2a {
+    fn name(&self) -> &str { "e2a" }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let encoded = base64::engine::general_purpose::STANDARD.encode("hello e2a");
+            ctx.provide(encoded)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+rutis_sdk::export_plugin! { id: "e2a", factory: Factory }
+EOF
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
+  --manifest-path "$e2a/Cargo.toml" --bundle "$base/sdk-bundle" \
+  --features export --output "$base/e2a"
+"$base/runtime/rutis-cli" --scripted --plugin "$base/e2a" --plugin-config '{}' > /dev/null
+
+# E2d: a private dependency that pulls tokio into the plugin graph collides
+# with the SDK closure; the packer must reject it readably.
+e2d="$base/external/e2d-plugin"
+mkdir -p "$e2d/src"
+cp rust-toolchain.toml "$e2d/rust-toolchain.toml"
+cat > "$e2d/Cargo.toml" <<'EOF'
+[package]
+name = "e2d-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+test = false
+doctest = false
+
+[features]
+export = []
+
+[dependencies]
+tokio-stream = "0.1"
+
+[workspace]
+EOF
+cat > "$e2d/src/lib.rs" <<'EOF'
+#![cfg(feature = "export")]
+use rutis_sdk::rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory};
+use rutis_sdk::ConfigValue;
+// Actually touching the private dependency's API loads its tokio copy's
+// metadata, which is what collides with the SDK closure; merely declaring
+// the dependency does not.
+use tokio_stream::StreamExt as _;
+
+struct Factory;
+struct E2d;
+impl PluginFactory<ConfigValue> for Factory {
+    fn name(&self) -> &str { "e2d" }
+    fn build(&self, _: &ConfigValue) -> Result<Box<dyn Plugin>, CordisError> {
+        Ok(Box::new(E2d))
+    }
+}
+impl Plugin for E2d {
+    fn name(&self) -> &str { "e2d" }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let _ = tokio_stream::iter(vec![1u8]).next();
+            ctx.provide("e2d".to_string())?;
+            Ok(Effect::Done)
+        })
+    }
+}
+rutis_sdk::export_plugin! { id: "e2d", factory: Factory }
+EOF
+if env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
+  --manifest-path "$e2d/Cargo.toml" --bundle "$base/sdk-bundle" \
+  --features export --output "$base/e2d" > "$base/e2d.stdout" 2>&1; then
+  echo "a private dependency overlapping the SDK closure was accepted" >&2
+  exit 1
+fi
+grep -Fq 'overlaps the SDK' "$base/e2d.stdout"
+
 echo "sdk-bundle external build passed"
