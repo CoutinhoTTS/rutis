@@ -74,10 +74,15 @@ done
 # with all pre-load checks).
 for item in v1 v2; do
   marker="$base/init-$item"
-  RUTIS_PLUGIN_INIT_MARKER="$marker" "$base/runtime/rutis-cli" --scripted \
-    --plugin "$base/$item" --plugin-config '{}' > /dev/null
-  test -f "$marker"
+  if ! RUTIS_PLUGIN_INIT_MARKER="$marker" "$base/runtime/rutis-cli" --scripted \
+      --plugin "$base/$item" --plugin-config '{}' > /dev/null; then
+    echo "the published host rejected $item" >&2
+    exit 1
+  fi
 done
+# Only the v1 fixture writes the initializer marker; the v2 fixture has
+# none, so v2 is covered by the exit code above.
+test -f "$base/init-v1"
 
 # The plugin links the SDK and libstd dynamically and carries no run path.
 imports="$(cargo xtask inspect imports "$base/v1/$plugin_name")"

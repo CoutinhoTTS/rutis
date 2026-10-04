@@ -809,9 +809,19 @@ fn pack_sdk_bundle(args: &[String]) -> Result<(), String> {
             let entry = entry.map_err(|e| e.to_string())?;
             let file = entry.file_name();
             let file = file.to_string_lossy();
+            // lib<crate>-<hash>.<ext>: an rlib, or a proc-macro artifact
+            // (.so on Linux, .dylib on macOS, .dll on Windows). The hash
+            // part is required: the SDK dylib itself has no suffix.
             let stem = format!("lib{name}-");
-            let is_artifact = (file.starts_with(&stem) && file.ends_with(".rlib"))
-                || (file.starts_with(&stem) && file.ends_with(".so"));
+            let after = file.strip_prefix(&stem).unwrap_or("");
+            let has_hash = after.split_once('.').is_some_and(|(hash, _)| {
+                !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit())
+            });
+            let is_artifact = has_hash
+                && matches!(
+                    file.rsplit('.').next(),
+                    Some("rlib") | Some("so") | Some("dylib") | Some("dll")
+                );
             if is_artifact {
                 fs::copy(entry.path(), output.join("deps").join(entry.file_name()))
                     .map_err(|e| format!("copy closure: {e}"))?;
