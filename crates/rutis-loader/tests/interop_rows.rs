@@ -490,7 +490,7 @@ async fn a_dead_process_stops_the_rows_until_restart() {
     })
     .await;
     assert_eq!(runtime.state().state, FiberState::Active);
-    let runtime_key = rutis::TypeKey::of::<CordisRuntimeRows>();
+    let runtime_key = CordisRuntimeRows::key("node");
     let waiting = root
         .diagnostics()
         .plugins

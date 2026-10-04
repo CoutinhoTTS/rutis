@@ -144,6 +144,7 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 - 运行时本身不依赖任何服务。逐个装载的插件用到哪个宿主服务，就由那个插件去等它、在运行期间租用它（`Process::lease_host`），宿主服务撤销时只有用到它的插件停下。
 - `.host(名字, 方法)` 只声明宿主服务的方法形状，给没有自己报出形状（`HostDispatch::methods`）的服务用；它不再让运行时等待这个服务。
 - Node 进程意外结束时，运行时撤销服务、保持 Active；依赖它的插件回到等待。之后由应用调用该 fiber 的 `restart` 重新启动。
+- 运行时有名字（`.named(名字)`，默认 `"node"`），服务键是 `CordisRuntime::key(名字)`。所以同一个应用里可以同时有多个运行时，包括不同语言的。
 
 ```rust
 root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe))?;
@@ -151,3 +152,17 @@ let runtime = CordisRuntimePlugin::new(node_package, anchor).host("probe", json!
 let handle = runtime.handle();   // 给 rutis-loader 的 InteropResolver
 let view = root.plugin(runtime);
 ```
+
+## 其他语言的运行时
+
+一种语言一个运行时插件、一个进程。它们和 Node 运行时说同一套协议和行契约（`rows.*`、`hosts.*`、服务投影），所以 rutis-loader 用同样的方式管理它们的插件。
+
+- **Python**：`CordisRuntimePlugin::python(sdk, project)`，名字为 `"py"`。`sdk` 是本仓库的 `interop/python`（Python 包 `rutis_runtime`），`project` 是插件模块所在的目录。用 `python3 -m rutis_runtime` 启动，需要 Python 3.12 或更高；`.interpreter(路径)` 换解释器（例如项目的 venv）。写法见 [interop/python/README.md](../../interop/python/README.md)。
+- 其他启动方式：`Mount::launcher` 接受任意 `Launcher { program, args, env, cwd }`，它的最后两个参数是 socket 路径和项目位置。
+
+Python 运行时只跑"叶子插件"：插件有 `apply(ctx, config)`，在里面用服务（`ctx.use`）、提供服务（`ctx.provide`），返回清理函数；依赖、启停顺序和重启都由 rutis 决定。它在 `mount` 时报告 `leaf` 特性，rutis-loader 据此让插件 `inject` 的每个名字都在 rutis 里门控。
+
+同一个进程里的插件互相使用服务时直接拿到对象本身，不走进程间通信。跨进程的调用经 Rust 转发，同步调用链会按会话改写（`rpc::rebase`），回调能回到正在等待的线程。
+
+**同步调用与可重入**：Node 运行时在同步等待期间只执行属于这条调用链的进来调用，其他调用延后。Python 运行时在同步等待期间也执行其他进来的调用：否则两个运行时同时同步调用对方的服务时，会互相等待对方先返回而卡死。所以 Python 插件的服务可能在它自己正处于一次同步调用之中时被调用，不要在调用 rutis 的服务时持有锁。两个 Node 运行时之间互相同步调用仍可能卡死，跨运行时的高频或可能交叉的调用请用异步方法。
+

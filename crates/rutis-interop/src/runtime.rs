@@ -29,6 +29,12 @@ impl CordisRuntime {
         &self.process
     }
 
+    /// The key the runtime named `name` provides this service under
+    /// ([`CordisRuntimePlugin::named`]; `"node"` by default).
+    pub fn key(name: &str) -> TypeKey {
+        TypeKey::keyed_dynamic::<CordisRuntime>(name.to_owned())
+    }
+
     /// The methods declared with [`CordisRuntimePlugin::host`] for `name`.
     pub fn host_methods(&self, name: &str) -> Option<Value> {
         self.hosts.get(name).cloned()
@@ -56,12 +62,19 @@ pub enum RuntimeState {
 /// Observes a runtime from code that is not a plugin (a loader resolver).
 #[derive(Clone)]
 pub struct RuntimeHandle {
+    name: String,
     anchor: PathBuf,
     state: watch::Receiver<RuntimeState>,
 }
 
 impl RuntimeHandle {
-    /// The `package.json` plugins and Cordis resolve from.
+    /// The runtime's name ([`CordisRuntimePlugin::named`]).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The `package.json` plugins and Cordis resolve from (for a Python
+    /// runtime, the project directory).
     pub fn anchor(&self) -> &Path {
         &self.anchor
     }
@@ -87,13 +100,21 @@ impl RuntimeHandle {
 
 /// The runtime plugin. Mount it before the plugins that load into it.
 ///
-/// When the Node process ends on its own, the plugin withdraws its service
+/// One runtime is one process of one language: the Node runtime runs a
+/// Cordis Context ([`CordisRuntimePlugin::new`]); a Python runtime runs leaf
+/// plugins ([`CordisRuntimePlugin::python`]). Both speak the same protocol
+/// and the same `rows.*` / `hosts.*` contract.
+///
+/// When the process ends on its own, the plugin withdraws its service
 /// and stays Active: dependent plugins stop and wait, as for any provider
 /// that goes away. Restarting it (`FiberView::restart`) is the
 /// application's decision.
 pub struct CordisRuntimePlugin {
+    runtime: String,
+    label: String,
     node_package: PathBuf,
     anchor: PathBuf,
+    launcher: Option<crate::Launcher>,
     hosts: Arc<HashMap<String, Value>>,
     state: Arc<watch::Sender<RuntimeState>>,
 }
@@ -104,8 +125,11 @@ impl CordisRuntimePlugin {
     /// plugins and Cordis resolve from.
     pub fn new(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
         Self {
+            runtime: "node".into(),
+            label: "cordis-runtime".into(),
             node_package: node_package.into(),
             anchor: anchor.into(),
+            launcher: None,
             hosts: Arc::default(),
             state: Arc::new(watch::channel(RuntimeState::Idle).0),
         }
@@ -120,8 +144,50 @@ impl CordisRuntimePlugin {
         self
     }
 
+    /// A Python runtime named `"py"`: `python3 -m rutis_runtime`, with the
+    /// SDK directory `sdk` (`interop/python`) on `PYTHONPATH`, importing
+    /// plugin modules from `project`. Python 3.12 or later.
+    pub fn python(sdk: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
+        let (sdk, project) = (sdk.into(), project.into());
+        let mut path = std::ffi::OsString::from(&sdk);
+        path.push(":");
+        path.push(&project);
+        let launcher = crate::Launcher::new("python3")
+            .arg("-m")
+            .arg("rutis_runtime")
+            .env("PYTHONPATH", path)
+            .env("PYTHONUNBUFFERED", "1")
+            .cwd(&project);
+        Self {
+            runtime: "py".into(),
+            label: "python-runtime".into(),
+            node_package: sdk,
+            anchor: project,
+            launcher: Some(launcher),
+            hosts: Arc::default(),
+            state: Arc::new(watch::channel(RuntimeState::Idle).0),
+        }
+    }
+
+    /// Run the Python runtime with this interpreter instead of `python3`.
+    pub fn interpreter(mut self, program: impl Into<std::ffi::OsString>) -> Self {
+        if let Some(launcher) = &mut self.launcher {
+            launcher.program = program.into();
+        }
+        self
+    }
+
+    /// Name the runtime: its service is keyed by the name
+    /// ([`CordisRuntime::key`]), so runtimes of several languages, or
+    /// several of one language, live side by side.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.runtime = name.into();
+        self
+    }
+
     pub fn handle(&self) -> RuntimeHandle {
         RuntimeHandle {
+            name: self.runtime.clone(),
             anchor: self.anchor.clone(),
             state: self.state.subscribe(),
         }
@@ -130,7 +196,7 @@ impl CordisRuntimePlugin {
 
 impl Plugin for CordisRuntimePlugin {
     fn name(&self) -> &str {
-        "cordis-runtime"
+        &self.label
     }
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
@@ -144,6 +210,7 @@ impl Plugin for CordisRuntimePlugin {
                     &self.node_package,
                     Mount {
                         anchor: Some(&self.anchor),
+                        launcher: self.launcher.as_ref(),
                         ..Mount::default()
                     },
                 ) => Some(mounted),
@@ -198,10 +265,13 @@ impl Plugin for CordisRuntimePlugin {
                     false => Err(error),
                 };
             }
-            let disposer = ctx.provide(CordisRuntime {
-                process: process.clone(),
-                hosts: self.hosts.clone(),
-            })?;
+            let disposer = ctx.provide_as(
+                CordisRuntime::key(&self.runtime),
+                Arc::new(CordisRuntime {
+                    process: process.clone(),
+                    hosts: self.hosts.clone(),
+                }),
+            )?;
             *service.lock().unwrap() = Some(disposer);
             // The watcher starts last, so every failure above leaves no task
             // holding the process. A process that already ended is seen at

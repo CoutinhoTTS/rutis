@@ -83,6 +83,48 @@ pub struct Mount<'a> {
     /// this file (a `package.json`), and load plugins later one by one with
     /// [`Process::load_row`].
     pub anchor: Option<&'a Path>,
+    /// How to start the runtime process; `None` runs the Node runtime in
+    /// the npm package (`node --import tsx <package>/src/runner.mjs`).
+    pub launcher: Option<&'a Launcher>,
+}
+
+/// The command that starts a runtime process. It receives the socket path
+/// and then the first plugin (or the anchor) as its last two arguments.
+#[derive(Debug, Clone, Default)]
+pub struct Launcher {
+    pub program: std::ffi::OsString,
+    pub args: Vec<std::ffi::OsString>,
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// The working directory; the runtime package by default.
+    pub cwd: Option<std::path::PathBuf>,
+}
+
+impl Launcher {
+    pub fn new(program: impl Into<std::ffi::OsString>) -> Self {
+        Self {
+            program: program.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn arg(mut self, arg: impl Into<std::ffi::OsString>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn env(
+        mut self,
+        name: impl Into<std::ffi::OsString>,
+        value: impl Into<std::ffi::OsString>,
+    ) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn cwd(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
 }
 impl Imports {
     fn update(&self, name: String, handle: Option<String>, version: u64) {
@@ -370,6 +412,7 @@ impl Process {
                 events: None,
                 emits: Vec::new(),
                 anchor: None,
+                launcher: None,
             },
         )
         .await
@@ -385,6 +428,7 @@ impl Process {
             events: forwarded,
             emits,
             anchor,
+            launcher,
         } = mount;
         let (forwarded_names, forwarded) = match forwarded {
             Some((names, sink)) => (names, Some(sink)),
@@ -424,13 +468,28 @@ impl Process {
         let socket = directory.path().join("peer.sock");
         let listener = tokio::net::UnixListener::bind(&socket)
             .map_err(|error| Error::Transport(error.to_string()))?;
-        let mut child = tokio::process::Command::new("node")
-            .arg("--import")
-            .arg("tsx")
-            .arg(node_package.join("src/runner.mjs"))
+        let mut command = match launcher {
+            Some(launcher) => {
+                let mut command = tokio::process::Command::new(&launcher.program);
+                command
+                    .args(&launcher.args)
+                    .envs(launcher.env.iter().map(|(name, value)| (name, value)))
+                    .current_dir(launcher.cwd.as_deref().unwrap_or(node_package));
+                command
+            }
+            None => {
+                let mut command = tokio::process::Command::new("node");
+                command
+                    .arg("--import")
+                    .arg("tsx")
+                    .arg(node_package.join("src/runner.mjs"))
+                    .current_dir(node_package);
+                command
+            }
+        };
+        let mut child = command
             .arg(&socket)
             .arg(plugin)
-            .current_dir(node_package)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

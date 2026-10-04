@@ -60,3 +60,30 @@ root.plugin(RuntimeRowsPlugin::new(resolver));
 ```
 
 `RuntimeRowsPlugin` 在运行时启动后先重新解析运行时启动前解析的行（以及包版本变了的行），拿到插件声明的依赖，然后才提供 `CordisRuntimeRows`，所以行启动时依赖声明是完整的。
+
+其他语言的插件也是行。Python 运行时（`CordisRuntimePlugin::python`）的行名是 `py:<模块名>`，用 `InteropResolver::modules(运行时句柄)` 解析，同样配一个 `RuntimeRowsPlugin`。Python 插件 `inject` 的每个名字都在 rutis 里门控（Python 那边没有自己的依赖解析），不需要 `register_shared`；但 Rust 插件或 JavaScript 插件要用 Python 插件提供的服务时，那个名字仍要登记为共享。
+
+```rust
+let python = CordisRuntimePlugin::python("interop/python", "plugins/py");
+let python_rows = Arc::new(InteropResolver::modules(python.handle()).with_catalog(&catalog));
+root.plugin(python);
+// Chain 里同时放 Node 和 Python 两个 resolver，各配一个 RuntimeRowsPlugin。
+```
+
+JavaScript/TypeScript 也可以写成和 Python 一样的叶子插件，不用接触 Cordis：
+
+```ts
+import { definePlugin } from '@arcships/rutis-interop/plugin'
+export default definePlugin({
+  inject: ['llm'],
+  provides: { weather: { today: 'async' } },
+  apply(ctx, config) {
+    ctx.provide('weather', new Weather(ctx.use('llm'), config.city))
+    return () => {}
+  },
+})
+```
+
+它装进 Node 运行时的 Cordis Context，和 Cordis 插件在同一个进程里，互相用服务不走进程间通信。
+
+行卸载时，先撤销它投到 rutis 的服务、等用到这些服务的插件都停下，再卸载插件本身，所以提供者总是比它的使用者后停。

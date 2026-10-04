@@ -1,6 +1,6 @@
 # rutis-interop 0.2 → 0.3：服务按名字跨语言共享
 
-这一版是多语言插件 M1（设计见 [多语言插件 M1](design-multilang-m1-2026-10-04.md)）：用 rutis-loader 动态加载的 JavaScript 插件，可以和 rutis 按名字共享服务。内核 `rutis` 不变，协议版本仍是 2。
+这一版是多语言插件 M1 和 M2（设计见 [多语言插件 M1](design-multilang-m1-2026-10-04.md)、[M2 实施记录](design-multilang-m2-2026-10-04.md)）：用 rutis-loader 动态加载的 JavaScript 插件可以和 rutis 按名字共享服务；新增 Python 运行时，以及不依赖 Cordis 的 JavaScript/TypeScript 叶子插件。内核 `rutis` 不变，协议版本仍是 2。
 
 | 包 | 版本 | 要不要改代码 |
 | --- | --- | --- |
@@ -43,6 +43,14 @@ rutis-interop = "0.3"
 
 `.host(名字, 方法)` 仍然保留，只用来声明方法形状。宿主服务的实现也可以自己报出形状（`HostDispatch::methods`），这时不需要 `.host`。
 
+## 运行时有了名字
+
+运行时的服务按名字区分，同一个应用里可以有多个运行时：
+
+- `CordisRuntime` 的键从 `TypeKey::of::<CordisRuntime>()` 改为 `CordisRuntime::key(名字)`，Node 运行时默认名字是 `"node"`。直接 `ctx.require::<CordisRuntime>()` 的代码改为 `ctx.require_as::<CordisRuntime>(CordisRuntime::key("node"))`。
+- `CordisRuntimeRows` 同理：`CordisRuntimeRows::key("node")`。
+- `Mount` 新增字段 `launcher`。用 `..Mount::default()` 构造的代码不用改；逐字段构造的要补 `launcher: None`。
+
 ## 新增
 
 - `Process::describe_row`（替代 `row_schema`）：插件的配置 Schema、`inject` 的服务名，以及包 `package.json` 里 `rutis.provides` 声明的服务。
@@ -51,3 +59,10 @@ rutis-interop = "0.3"
 - `HostDispatch::methods`、`HostDispatch::origin`：都有默认实现，现有实现不用改。
 - `Projection::service_keyed`：投影到任意键。
 - rutis-loader：`ServiceCatalog::register_shared` / `is_shared`、`InteropResolver::with_catalog`、`Chain::with_shared`、`RuntimeRowsPlugin`、`CordisRuntimeRows`。
+- `Launcher`、`Mount::launcher`：运行时进程的启动命令可配置。
+- `CordisRuntimePlugin::python`、`.interpreter`、`.named`；`RuntimeHandle::name`。
+- `InteropResolver::modules`：按模块名加载的运行时（Python）的行，行名 `py:<模块名>`。
+- `Projection::withdraw`：撤销全部投影的服务并等使用者停下。
+- `rpc::caller`：当前正在分发的 `invoke` 来自哪个会话。
+- npm 包新增 `@arcships/rutis-interop/plugin`（`definePlugin`）；Python 包 `rutis_runtime`（本仓库 `interop/python`）。
+

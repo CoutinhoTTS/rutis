@@ -47,6 +47,9 @@ use rutis_interop::CordisRuntimePlugin;
 
 pub struct InteropResolver {
     runtime: RuntimeHandle,
+    /// Row names are `<prefix><module>` (a Python runtime's `py:`); none
+    /// for the Node runtime, whose rows are npm names and files.
+    prefix: Option<String>,
     catalog: ServiceCatalog,
     resolved: Mutex<HashMap<String, Arc<Resolved>>>,
     /// Names resolved while the runtime was not running, without the
@@ -59,9 +62,37 @@ impl InteropResolver {
     pub fn new(runtime: RuntimeHandle) -> Self {
         Self {
             runtime,
+            prefix: None,
             catalog: ServiceCatalog::default(),
             resolved: Mutex::new(HashMap::new()),
             offline: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Rows of a runtime that loads plugins by module name, such as a
+    /// Python runtime ([`CordisRuntimePlugin::python`]): a row named
+    /// `<runtime name>:<module>` (`py:weather.plugin`) loads `<module>`.
+    pub fn modules(runtime: RuntimeHandle) -> Self {
+        let prefix = format!("{}:", runtime.name());
+        Self {
+            prefix: Some(prefix),
+            ..Self::new(runtime)
+        }
+    }
+
+    pub(crate) fn runtime_name(&self) -> &str {
+        self.runtime.name()
+    }
+
+    /// The module a row name loads, or `None` when it is not this
+    /// resolver's.
+    fn entry(&self, name: &str) -> Option<PathBuf> {
+        match &self.prefix {
+            Some(prefix) => name
+                .strip_prefix(prefix.as_str())
+                .filter(|module| !module.is_empty())
+                .map(PathBuf::from),
+            None => resolve_entry(self.runtime.anchor(), name),
         }
     }
 
@@ -93,7 +124,7 @@ impl InteropResolver {
 impl Resolver for InteropResolver {
     fn resolve<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Arc<Resolved>, LoaderError>> {
         Box::pin(async move {
-            let Some(entry) = resolve_entry(self.runtime.anchor(), name) else {
+            let Some(entry) = self.entry(name) else {
                 return Err(LoaderError::NotFound {
                     name: name.to_owned(),
                 });
@@ -109,7 +140,13 @@ impl Resolver for InteropResolver {
             let Some(process) = self.runtime.ready().await else {
                 self.offline.lock().unwrap().insert(name.to_owned());
                 return Ok(Arc::new(Resolved {
-                    factory: Arc::new(JsFactory::new(name, entry.clone(), Vec::new(), Map::new())),
+                    factory: Arc::new(JsFactory::new(
+                        name,
+                        self.runtime.name(),
+                        entry.clone(),
+                        Vec::new(),
+                        Map::new(),
+                    )),
                     schema: None,
                     meta: json!({
                         "source": "interop",
@@ -127,15 +164,20 @@ impl Resolver for InteropResolver {
                         name: name.to_owned(),
                         message: e.to_string(),
                     })?;
+            // A leaf runtime has no dependency resolution of its own: every
+            // service its plugins inject waits in rutis. In Cordis, only the
+            // shared names do; the others resolve natively.
+            let leaf = process.supports("leaf");
             let gated: Vec<String> = described
                 .inject
                 .iter()
-                .filter(|name| self.catalog.is_shared(name))
+                .filter(|name| leaf || self.catalog.is_shared(name))
                 .cloned()
                 .collect();
             let resolved = Arc::new(Resolved {
                 factory: Arc::new(JsFactory::new(
                     name,
+                    self.runtime.name(),
                     entry.clone(),
                     gated,
                     described.provides.clone(),
@@ -161,6 +203,7 @@ impl Resolver for InteropResolver {
 
 struct JsFactory {
     name: String,
+    runtime: String,
     entry: PathBuf,
     /// The injected services that gate the row in rutis.
     gated: Vec<String>,
@@ -169,12 +212,19 @@ struct JsFactory {
 }
 
 impl JsFactory {
-    fn new(name: &str, entry: PathBuf, gated: Vec<String>, provides: Map<String, Value>) -> Self {
-        let injects = std::iter::once(TypeKey::of::<CordisRuntimeRows>())
+    fn new(
+        name: &str,
+        runtime: &str,
+        entry: PathBuf,
+        gated: Vec<String>,
+        provides: Map<String, Value>,
+    ) -> Self {
+        let injects = std::iter::once(CordisRuntimeRows::key(runtime))
             .chain(gated.iter().map(|name| host_key(name)))
             .collect();
         Self {
             name: name.to_owned(),
+            runtime: runtime.to_owned(),
             entry,
             gated,
             provides,
@@ -195,6 +245,7 @@ impl PluginFactory<Value> for JsFactory {
     fn build(&self, config: &Value) -> Result<Box<dyn Plugin>, CordisError> {
         Ok(Box::new(JsRow {
             name: self.name.clone(),
+            runtime: self.runtime.clone(),
             entry: self.entry.clone(),
             config: config.clone(),
             gated: self.gated.clone(),
@@ -207,6 +258,7 @@ impl PluginFactory<Value> for JsFactory {
 /// One generation of a JavaScript row: loaded on apply, disposed on cleanup.
 struct JsRow {
     name: String,
+    runtime: String,
     entry: PathBuf,
     config: Value,
     gated: Vec<String>,
@@ -229,7 +281,10 @@ impl Plugin for JsRow {
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let runtime = ctx.require::<CordisRuntimeRows>()?.runtime().clone();
+            let runtime = ctx
+                .require_as::<CordisRuntimeRows>(CordisRuntimeRows::key(&self.runtime))?
+                .runtime()
+                .clone();
             let process = runtime.process().clone();
             // The shared services the plugin injects, registered in Cordis
             // for as long as the row runs. One served by a row of this same
@@ -286,8 +341,10 @@ impl Plugin for JsRow {
             )?;
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 Box::pin(async move {
+                    // The row's services go first, and their users stop,
+                    // before the plugin that provides them is unloaded.
+                    projection.withdraw().await;
                     let unloaded = process.unload_row(&key).await;
-                    projection.close();
                     // After the unload: the plugin never sees a service it
                     // injects go away before it does.
                     for lease in leases {
@@ -326,8 +383,12 @@ impl Listener<VolatileUpdate> for Forward {
 }
 
 /// The `version` of the package a plugin file belongs to (the nearest
-/// `package.json` above it), if it has one.
+/// `package.json` above it), if it has one. A module name (a relative path)
+/// has none.
 fn package_version(entry: &Path) -> Option<Value> {
+    if entry.is_relative() {
+        return None;
+    }
     let manifest = entry
         .ancestors()
         .skip(1)

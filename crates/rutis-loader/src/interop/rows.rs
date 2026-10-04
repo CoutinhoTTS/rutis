@@ -24,6 +24,11 @@ pub struct CordisRuntimeRows {
 }
 
 impl CordisRuntimeRows {
+    /// The key for the rows of the runtime named `name`.
+    pub fn key(name: &str) -> TypeKey {
+        TypeKey::keyed_dynamic::<CordisRuntimeRows>(name.to_owned())
+    }
+
     pub fn runtime(&self) -> &Arc<CordisRuntime> {
         &self.runtime
     }
@@ -32,15 +37,18 @@ impl CordisRuntimeRows {
 /// Mount it after the runtime and the loader, with the resolver the loader
 /// uses (`Chain::with_shared`).
 pub struct RuntimeRowsPlugin {
+    name: String,
     resolver: Arc<InteropResolver>,
     injects: [TypeKey; 2],
 }
 
 impl RuntimeRowsPlugin {
     pub fn new(resolver: Arc<InteropResolver>) -> Self {
+        let name = resolver.runtime_name().to_owned();
         Self {
+            injects: [CordisRuntime::key(&name), TypeKey::of::<Loader>()],
+            name,
             resolver,
-            injects: [TypeKey::of::<CordisRuntime>(), TypeKey::of::<Loader>()],
         }
     }
 }
@@ -56,7 +64,8 @@ impl Plugin for RuntimeRowsPlugin {
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let runtime = ctx.require::<CordisRuntime>()?;
+            let runtime = ctx.require_as::<CordisRuntime>(CordisRuntime::key(&self.name))?;
+            let key = CordisRuntimeRows::key(&self.name);
             let loader = ctx.require::<Loader>()?;
             let stale = self.resolver.take_stale();
             let rows: Vec<String> = loader
@@ -80,7 +89,7 @@ impl Plugin for RuntimeRowsPlugin {
                         eprintln!("rutis-loader: cannot resolve row {id} again: {error}");
                     }
                 }
-                if let Err(error) = owner.provide(CordisRuntimeRows { runtime }) {
+                if let Err(error) = owner.provide_as(key, Arc::new(CordisRuntimeRows { runtime })) {
                     // Disposed meanwhile: nothing to provide to.
                     if !owner.cancellation_token().is_cancelled() {
                         eprintln!("rutis-loader: cannot release the rows: {error}");
