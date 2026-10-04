@@ -354,14 +354,21 @@ impl Plugin for JsRow {
                 return Err(failed(error));
             }
             // Volatile-only changes go to Cordis, which commits them in place.
-            ctx.events().on(
+            let listening = ctx.events().on(
                 ctx,
                 &volatile_key(ctx),
                 Forward {
                     key: key.clone(),
                     process: process.clone(),
                 },
-            )?;
+            );
+            if let Err(error) = listening {
+                // The plugin is loaded, but no cleanup will be registered for
+                // it: undo the load here. The leases go with this frame.
+                let _ = process.unload_row(&key).await;
+                projection.close();
+                return Err(error);
+            }
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 Box::pin(async move {
                     // The row's services go first, and their users stop,

@@ -838,3 +838,62 @@ async fn row_services_are_shared_by_name() {
 
     root.shutdown().await.unwrap();
 }
+
+// ── A row removed while it loads ────────────────────────────────
+
+const SLOW: &str = r#"
+export const name = 'slow'
+export const inject = ['probe']
+export async function apply(ctx) {
+  await new Promise(resolve => setTimeout(resolve, 300))
+  ctx.probe.record('slow: start')
+  ctx.effect(() => () => ctx.probe.record('slow: bye'))
+}
+"#;
+
+/// The row restarts while its plugin is still starting in Node: once the
+/// old generation's load returns, that plugin is unloaded there too, not
+/// left running next to the new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_restarted_while_loading_is_unloaded_in_the_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let slow = dir.path().join("slow.mjs");
+    std::fs::write(&slow, SLOW).unwrap();
+    let probe = Probe::default();
+    let (root, loader, _runtime) = interop_loader(&probe).await;
+    let adding = {
+        let loader = loader.clone();
+        let slow = slow.clone();
+        tokio::spawn(async move {
+            loader
+                .reconcile(rows(vec![row("s", &slow, json!({}), json!(null))]), None)
+                .await
+        })
+    };
+    until("the row to start loading", || {
+        row_state(&loader, "s") == Some(FiberState::Loading)
+    })
+    .await;
+    // Restarted while its apply still waits for Node: that generation's
+    // plugin must not stay loaded once its load returns.
+    let view = loader.get("s").unwrap().view.unwrap();
+    view.restart().await.unwrap();
+    let _ = adding.await;
+    until("the new generation to run", || {
+        row_state(&loader, "s") == Some(FiberState::Active)
+    })
+    .await;
+    loader.reconcile(rows(Vec::new()), None).await.unwrap();
+    until("both generations to be unloaded", || {
+        probe
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| *l == "slow: bye")
+            .count()
+            == 2
+    })
+    .await;
+    root.shutdown().await.unwrap();
+}
