@@ -59,6 +59,15 @@ jobs:
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
 
+      # Each language runtime builds on its own: an application compiles only
+      # the languages it enables.
+      - name: cargo check (one language at a time)
+        run: |
+          cargo check -p rutis-interop --no-default-features --all-targets
+          cargo check -p rutis-interop --no-default-features --features python --all-targets
+          cargo check -p rutis-loader --features node --all-targets
+          cargo check -p rutis-loader --features python --all-targets
+
   # rutis 相对 crates.io 最新版的公开 API 变化：发现破坏性变更时给出警告，
   # 并在 job 摘要中列出，提示发布时需要提升的版本；不使 CI 失败（0.x 允许在
   # minor 版本中破坏）。真正的拦截在 publish-rutis.yml：版本号不允许的破坏性

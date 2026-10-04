@@ -139,25 +139,34 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 
 `Mount { anchor: Some(package_json), .. }` 不带插件时启动一个空的 Cordis Context，之后用 `Process::load_row` / `unload_row` 逐个装载、卸载插件，`describe_row` 读取插件声明的内容：schemastery `Config` 转成的 JSON Schema、`inject` 的服务名，以及包的 `package.json` 里 `rutis.provides` 声明的、要提供给 rutis 的服务和方法形状。`load_row_exporting` 装载时把这些服务投到 rutis（`row_projection`，键为 `host_key(name)`）；`lease_host` 按行向 Cordis 注册宿主服务，最后一个使用者释放后撤销。rutis-loader 的 `InteropResolver` 就是这样把 JavaScript 插件作为行来管理的。
 
-要按 rutis 的生命周期管理这个 Context，挂载 `CordisRuntimePlugin`。它是一个普通插件：apply 时启动 Node 进程，提供 `CordisRuntime` 服务；清理时先撤销服务，再关闭进程。
+要按 rutis 的生命周期管理这个 Context，挂载 `RuntimePlugin`。它是一个普通插件：apply 时启动 Node 进程，提供 `Runtime` 服务；清理时先撤销服务，再关闭进程。
 
 - 运行时本身不依赖任何服务。逐个装载的插件用到哪个宿主服务，就由那个插件去等它、在运行期间租用它（`Process::lease_host`），宿主服务撤销时只有用到它的插件停下。
 - `.host(名字, 方法)` 只声明宿主服务的方法形状，给没有自己报出形状（`HostDispatch::methods`）的服务用；它不再让运行时等待这个服务。
 - Node 进程意外结束时，运行时撤销服务、保持 Active；依赖它的插件回到等待。之后由应用调用该 fiber 的 `restart` 重新启动。
-- 运行时有名字（`.named(名字)`，默认 `"node"`），服务键是 `CordisRuntime::key(名字)`。所以同一个应用里可以同时有多个运行时，包括不同语言的。
+- 运行时有名字（`.named(名字)`，默认 `"node"`），服务键是 `Runtime::key(名字)`。所以同一个应用里可以同时有多个运行时，包括不同语言的。
 
 ```rust
 root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe))?;
-let runtime = CordisRuntimePlugin::new(node_package, anchor).host("probe", json!({ "record": "sync" }));
+let runtime = RuntimePlugin::node(node_package, anchor).host("probe", json!({ "record": "sync" }));
 let handle = runtime.handle();   // 给 rutis-loader 的 InteropResolver
 let view = root.plugin(runtime);
 ```
 
 ## 其他语言的运行时
 
+每种语言是一个 Cargo feature，应用只编译它启用的语言：
+
+| feature | 内容 | 默认 |
+| --- | --- | --- |
+| `node` | Node 运行时（`RuntimePlugin::node`）、构建期代码生成（`build`，静态挂载用）及其依赖 syn、quote、toml | 开 |
+| `python` | Python 运行时（`RuntimePlugin::python`） | 关 |
+
+协议、进程管理、服务投影（`Process`、`Projection`、`RuntimePlugin` 本身、`Launcher`）不属于任何一种语言，总是可用。只用 Python 的应用写 `rutis-interop = { version = "0.3", default-features = false, features = ["python"] }`；不挂运行时插件，就不会启动任何进程。
+
 一种语言一个运行时插件、一个进程。它们和 Node 运行时说同一套协议和行契约（`rows.*`、`hosts.*`、服务投影），所以 rutis-loader 用同样的方式管理它们的插件。
 
-- **Python**：`CordisRuntimePlugin::python(sdk, project)`，名字为 `"py"`。`sdk` 是本仓库的 `interop/python`（Python 包 `rutis_runtime`），`project` 是插件模块所在的目录。用 `python3 -m rutis_runtime` 启动，需要 Python 3.12 或更高；`.interpreter(路径)` 换解释器（例如项目的 venv）。写法见 [interop/python/README.md](../../interop/python/README.md)。
+- **Python**：`RuntimePlugin::python(sdk, project)`，名字为 `"py"`。`sdk` 是本仓库的 `interop/python`（Python 包 `rutis_runtime`），`project` 是插件模块所在的目录。用 `python3 -m rutis_runtime` 启动，需要 Python 3.12 或更高；`.interpreter(路径)` 换解释器（例如项目的 venv）。写法见 [interop/python/README.md](../../interop/python/README.md)。
 - 其他启动方式：`Mount::launcher` 接受任意 `Launcher { program, args, env, cwd }`，它的最后两个参数是 socket 路径和项目位置。
 
 Python 运行时只跑"叶子插件"：插件有 `apply(ctx, config)`，在里面用服务（`ctx.use`）、提供服务（`ctx.provide`），返回清理函数；依赖、启停顺序和重启都由 rutis 决定。它在 `mount` 时报告 `leaf` 特性，rutis-loader 据此让插件 `inject` 的每个名字都在 rutis 里门控。

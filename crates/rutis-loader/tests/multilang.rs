@@ -2,7 +2,7 @@
 //! JavaScript (`definePlugin`, in the Node runtime) and in Python (in the
 //! Python runtime) behave the same under rutis-loader, and use each other's
 //! services across the two processes.
-#![cfg(all(unix, feature = "interop"))]
+#![cfg(all(unix, feature = "node", feature = "python"))]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rutis::{Ctx, FiberState, FiberView};
 use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, CordisRuntimePlugin, HostDispatch};
+use rutis_interop::{host_key, HostDispatch, RuntimePlugin};
 use rutis_loader::{
     Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderOptions, LoaderPlugin, Patch,
     RuntimeRowsPlugin, ServiceCatalog,
@@ -241,10 +241,9 @@ async fn fixture() -> Fixture {
     for name in ["probe", "llm", "py_weather", "js_weather"] {
         catalog.register_shared(name);
     }
-    let node =
-        CordisRuntimePlugin::new(interop().join("node"), interop().join("node/package.json"));
-    let python = CordisRuntimePlugin::python(interop().join("python"), &py);
-    let node_rows = Arc::new(InteropResolver::new(node.handle()).with_catalog(&catalog));
+    let node = RuntimePlugin::node(interop().join("node"), interop().join("node/package.json"));
+    let python = RuntimePlugin::python(interop().join("python"), &py);
+    let node_rows = Arc::new(InteropResolver::node(node.handle()).with_catalog(&catalog));
     let python_rows = Arc::new(InteropResolver::modules(python.handle()).with_catalog(&catalog));
     let node = root.plugin(node);
     let python = root.plugin(python);

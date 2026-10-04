@@ -5,31 +5,31 @@
 //! the dependencies its plugin declares, since only the runtime can read
 //! them. Were rows to start as soon as the runtime does, such a row could
 //! run before a service it injects is there. So the runtime provides
-//! `CordisRuntime` first; this plugin then resolves those rows again and
-//! only afterwards provides [`CordisRuntimeRows`], which every row depends
+//! `Runtime` first; this plugin then resolves those rows again and
+//! only afterwards provides [`RuntimeRows`], which every row depends
 //! on. Rows waiting for it do not start while they are reloaded.
 
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
-use rutis_interop::CordisRuntime;
+use rutis_interop::Runtime;
 
 use super::InteropResolver;
 use crate::Loader;
 
-/// The service rows of a Cordis runtime depend on: the runtime, once the
+/// The service rows of a runtime depend on: the runtime, once the
 /// rows' declarations are complete.
-pub struct CordisRuntimeRows {
-    runtime: Arc<CordisRuntime>,
+pub struct RuntimeRows {
+    runtime: Arc<Runtime>,
 }
 
-impl CordisRuntimeRows {
+impl RuntimeRows {
     /// The key for the rows of the runtime named `name`.
     pub fn key(name: &str) -> TypeKey {
-        TypeKey::keyed_dynamic::<CordisRuntimeRows>(name.to_owned())
+        TypeKey::keyed_dynamic::<RuntimeRows>(name.to_owned())
     }
 
-    pub fn runtime(&self) -> &Arc<CordisRuntime> {
+    pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
     }
 }
@@ -46,7 +46,7 @@ impl RuntimeRowsPlugin {
     pub fn new(resolver: Arc<InteropResolver>) -> Self {
         let name = resolver.runtime_name().to_owned();
         Self {
-            injects: [CordisRuntime::key(&name), TypeKey::of::<Loader>()],
+            injects: [Runtime::key(&name), TypeKey::of::<Loader>()],
             name,
             resolver,
         }
@@ -55,7 +55,7 @@ impl RuntimeRowsPlugin {
 
 impl Plugin for RuntimeRowsPlugin {
     fn name(&self) -> &str {
-        "cordis-runtime-rows"
+        "runtime-rows"
     }
 
     fn injects(&self) -> &[TypeKey] {
@@ -64,8 +64,8 @@ impl Plugin for RuntimeRowsPlugin {
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let runtime = ctx.require_as::<CordisRuntime>(CordisRuntime::key(&self.name))?;
-            let key = CordisRuntimeRows::key(&self.name);
+            let runtime = ctx.require_as::<Runtime>(Runtime::key(&self.name))?;
+            let key = RuntimeRows::key(&self.name);
             let loader = ctx.require::<Loader>()?;
             let stale = self.resolver.take_stale();
             let rows: Vec<String> = loader
@@ -89,7 +89,7 @@ impl Plugin for RuntimeRowsPlugin {
                         eprintln!("rutis-loader: cannot resolve row {id} again: {error}");
                     }
                 }
-                if let Err(error) = owner.provide_as(key, Arc::new(CordisRuntimeRows { runtime })) {
+                if let Err(error) = owner.provide_as(key, Arc::new(RuntimeRows { runtime })) {
                     // Disposed meanwhile: nothing to provide to.
                     if !owner.cancellation_token().is_cancelled() {
                         eprintln!("rutis-loader: cannot release the rows: {error}");
@@ -109,3 +109,7 @@ impl Plugin for RuntimeRowsPlugin {
         })
     }
 }
+
+/// The former name of [`RuntimeRows`].
+#[deprecated(since = "0.3.0", note = "renamed to RuntimeRows")]
+pub type CordisRuntimeRows = RuntimeRows;

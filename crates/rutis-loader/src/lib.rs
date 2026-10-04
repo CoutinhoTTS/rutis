@@ -8,7 +8,7 @@
 mod catalog;
 mod edit;
 mod error;
-#[cfg(all(unix, feature = "interop"))]
+#[cfg(all(unix, feature = "runtimes"))]
 mod interop;
 mod loader;
 mod patch;
@@ -19,8 +19,11 @@ mod volatile;
 pub use catalog::{ExprScope, Expressions, ServiceCatalog};
 pub use edit::{apply_edit, Edit};
 pub use error::{Failure, LoaderError, PersistError};
-#[cfg(all(unix, feature = "interop"))]
-pub use interop::{resolve_entry, CordisRuntimeRows, InteropResolver, RuntimeRowsPlugin};
+#[cfg(all(unix, feature = "node"))]
+pub use interop::resolve_entry;
+#[cfg(all(unix, feature = "runtimes"))]
+#[allow(deprecated)]
+pub use interop::{CordisRuntimeRows, InteropResolver, RuntimeRows, RuntimeRowsPlugin};
 pub use loader::{
     Editable, EntryInfo, EntryStatus, Isolate, Loader, LoaderChanged, LoaderOptions, LoaderPlugin,
     NewEntry, PendingEditDropped, ReconcileReport, RowInfo,

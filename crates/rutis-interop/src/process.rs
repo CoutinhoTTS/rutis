@@ -84,7 +84,8 @@ pub struct Mount<'a> {
     /// [`Process::load_row`].
     pub anchor: Option<&'a Path>,
     /// How to start the runtime process; `None` runs the Node runtime in
-    /// the npm package (`node --import tsx <package>/src/runner.mjs`).
+    /// the npm package (`node --import tsx <package>/src/runner.mjs`, feature
+    /// `node`).
     pub launcher: Option<&'a Launcher>,
 }
 
@@ -477,6 +478,13 @@ impl Process {
                     .current_dir(launcher.cwd.as_deref().unwrap_or(node_package));
                 command
             }
+            #[cfg(not(feature = "node"))]
+            None => {
+                return Err(Error::Value(
+                    "no launcher given, and the Node runtime needs the `node` feature".into(),
+                ))
+            }
+            #[cfg(feature = "node")]
             None => {
                 let mut command = tokio::process::Command::new("node");
                 command

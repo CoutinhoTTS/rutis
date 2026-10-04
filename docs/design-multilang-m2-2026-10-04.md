@@ -7,9 +7,9 @@
 
 | 部分 | 内容 |
 | --- | --- |
-| 运行时有名字 | `CordisRuntimePlugin::named`，服务键 `CordisRuntime::key(名字)`、`CordisRuntimeRows::key(名字)`。Node 默认 `"node"`，Python 默认 `"py"`。一个应用里可以同时有多个运行时 |
+| 运行时有名字 | `RuntimePlugin::named`，服务键 `Runtime::key(名字)`、`RuntimeRows::key(名字)`。Node 默认 `"node"`，Python 默认 `"py"`。一个应用里可以同时有多个运行时 |
 | 启动命令可配置 | `Mount::launcher` / `Launcher { program, args, env, cwd }`，最后两个参数仍是 socket 路径和项目位置 |
-| Python 运行时 | `interop/python/rutis_runtime`：协议层 `peer.py`（`peer.mjs` 的移植）、叶子插件的 runner、插件 SDK。`CordisRuntimePlugin::python(sdk, project)` 启动它 |
+| Python 运行时 | `interop/python/rutis_runtime`：协议层 `peer.py`（`peer.mjs` 的移植）、叶子插件的 runner、插件 SDK。`RuntimePlugin::python(sdk, project)` 启动它 |
 | Python 行 | `InteropResolver::modules`：行名 `py:<模块名>` |
 | JS/TS 叶子插件 | `@arcships/rutis-interop/plugin` 的 `definePlugin`；runner 认出标记后包成 Cordis 插件，装进现有 Node 进程 |
 | 跨语言转发 | `RowService` 用调用方的会话（`rpc::caller`）做 `Connection::forward`，跨会话的同步调用链被改写 |
@@ -24,6 +24,8 @@
 **提供者比使用者后停。** 行卸载时先撤销它投到 rutis 的服务（`Projection::withdraw`，内核会先停下使用者），再让运行时卸载插件本身。之前是先卸载插件、异步撤销服务，一致性测试抓到了提供者的清理先于使用者执行。
 
 **Python 插件配置变化即重启。** 叶子插件没有 volatile 字段，`rows.update` 等同于卸载后重新装载。
+
+**语言之间解耦。** 每种语言是一个 Cargo feature（rutis-interop 的 `node`、`python`；rutis-loader 的 `node`、`python`，`interop` 等于两者），应用只编译它启用的语言；不挂运行时插件就不会有进程。共用的部分（协议、进程管理、服务投影、`RuntimePlugin`、`Launcher`）和语言无关。类型改成和语言无关的名字（`RuntimePlugin`、`Runtime`、`RuntimeRows`），旧的 `Cordis*` 名字保留为弃用别名。CI 分别检查只开一种语言时能否编译。
 
 ## 三、一致性测试覆盖的行为
 
