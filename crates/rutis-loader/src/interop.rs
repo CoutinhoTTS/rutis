@@ -365,8 +365,8 @@ impl Plugin for JsRow {
             if let Err(error) = listening {
                 // The plugin is loaded, but no cleanup will be registered for
                 // it: undo the load here. The leases go with this frame.
+                projection.withdraw().await;
                 let _ = process.unload_row(&key).await;
-                projection.close();
                 return Err(error);
             }
             Ok(Effect::AsyncDisposer(Box::new(move || {
