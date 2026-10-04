@@ -49,8 +49,11 @@ pub struct InteropResolver {
     runtime: RuntimeHandle,
     catalog: ServiceCatalog,
     resolved: Mutex<HashMap<String, Arc<Resolved>>>,
-    /// Names resolved while the runtime was not running, without the
-    /// plugin's declarations: [`RuntimeRowsPlugin`] resolves them again.
+    /// Names whose resolution lacks the plugin's current declarations
+    /// (resolved while the runtime was not running, or their package
+    /// changed): [`RuntimeRowsPlugin`] resolves them again. A name leaves
+    /// the set only once it is resolved with the runtime, so a refresh that
+    /// is cut short is redone by the next one.
     offline: Mutex<HashSet<String>>,
 }
 
@@ -73,20 +76,20 @@ impl InteropResolver {
     }
 
     /// Names whose resolution is out of date: resolved without the runtime,
-    /// or whose package version changed since. Forgets them, so the next
-    /// resolution asks the runtime again.
+    /// or whose package version changed since. Their cached resolution is
+    /// dropped, so the next resolution asks the runtime again.
     pub(crate) fn take_stale(&self) -> HashSet<String> {
-        let mut stale = std::mem::take(&mut *self.offline.lock().unwrap());
-        let mut resolved = self.resolved.lock().unwrap();
-        resolved.retain(|name, found| {
+        let mut stale = self.offline.lock().unwrap();
+        self.resolved.lock().unwrap().retain(|name, found| {
             let current = Path::new(found.meta["entry"].as_str().unwrap_or_default());
-            let fresh = package_version(current) == found.meta.get("version").cloned();
+            let recorded = found.meta.get("version").filter(|v| !v.is_null()).cloned();
+            let fresh = package_version(current) == recorded;
             if !fresh {
                 stale.insert(name.clone());
             }
             fresh
         });
-        stale
+        stale.clone()
     }
 }
 
@@ -133,6 +136,7 @@ impl Resolver for InteropResolver {
                 .filter(|name| self.catalog.is_shared(name))
                 .cloned()
                 .collect();
+            self.offline.lock().unwrap().remove(name);
             let resolved = Arc::new(Resolved {
                 factory: Arc::new(JsFactory::new(
                     name,
@@ -454,6 +458,53 @@ mod tests {
             resolve_entry(&anchor, "/abs/p.mjs"),
             Some(PathBuf::from("/abs/p.mjs"))
         );
+    }
+
+    fn cached(entry: &Path, version: Option<Value>) -> Arc<Resolved> {
+        Arc::new(Resolved {
+            factory: Arc::new(JsFactory::new(
+                "x",
+                entry.to_owned(),
+                Vec::new(),
+                Map::new(),
+            )),
+            schema: None,
+            meta: json!({ "entry": entry, "version": version }),
+            foreign_scope: true,
+        })
+    }
+
+    #[test]
+    fn stale_rows_are_those_without_current_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        let versioned = dir.path().join("pkg/index.mjs");
+        std::fs::create_dir_all(versioned.parent().unwrap()).unwrap();
+        std::fs::write(
+            dir.path().join("pkg/package.json"),
+            r#"{ "version": "2.0.0" }"#,
+        )
+        .unwrap();
+        let loose = Path::new("/nowhere/loose.mjs");
+        let resolver = InteropResolver::new(
+            rutis_interop::CordisRuntimePlugin::new(dir.path(), dir.path().join("package.json"))
+                .handle(),
+        );
+        {
+            let mut resolved = resolver.resolved.lock().unwrap();
+            // No package version, recorded as null: unchanged.
+            resolved.insert("loose".into(), cached(loose, None));
+            resolved.insert("same".into(), cached(&versioned, Some(json!("2.0.0"))));
+            resolved.insert("older".into(), cached(&versioned, Some(json!("1.0.0"))));
+        }
+        resolver.offline.lock().unwrap().insert("offline".into());
+        let stale = resolver.take_stale();
+        assert_eq!(
+            stale,
+            HashSet::from(["older".to_owned(), "offline".to_owned()])
+        );
+        assert!(!resolver.resolved.lock().unwrap().contains_key("older"));
+        // A refresh that never finished leaves them stale for the next one.
+        assert_eq!(resolver.take_stale(), stale);
     }
 
     #[test]
