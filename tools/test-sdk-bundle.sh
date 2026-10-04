@@ -168,10 +168,11 @@ fi
 # install names (macOS) carry nothing outside the SDK, the dynamic libstd
 # and the declared native_deps.
 if test "$dylib_os" = windows; then
-  # Only .dll names, lowercased, in the import table.
+  # The import table itself (plus delay-load imports): SDK, dynamic libstd,
+  # the Windows system DLLs and the VC++ runtime the MSVC toolchain links.
   imports="$(cargo xtask inspect imports "$base/v1/$plugin_name" | tr 'A-Z' 'a-z')"
   case "$imports" in *rutis_sdk.dll*) ;; *) echo "plugin does not link rutis_sdk.dll" >&2; exit 1;; esac
-  if printf '%s\n' "$imports" | grep -vqE 'rutis_sdk\.dll|std-[0-9a-f]+\.dll|kernel32\.dll|ntdll\.dll|api-ms-|userenv\.dll|ws2_32\.dll|bcryptprimitives\.dll'; then
+  if printf '%s\n' "$imports" | grep -vqE 'rutis_sdk\.dll|std-[0-9a-f]+\.dll|kernel32\.dll|ntdll\.dll|api-ms-|userenv\.dll|ws2_32\.dll|bcryptprimitives\.dll|vcruntime[0-9]+\.dll|ucrtbase\.dll|msvcrt\.dll'; then
     echo "plugin imports unexpected DLLs" >&2
     exit 1
   fi
@@ -364,8 +365,11 @@ grep -Eq 'tokio_stream|tokio-stream|pin_project' "$base/e2d.stdout" || {
 
 # E7: a non-pinned toolchain is refused before anything is built, with the
 # bundle's pin named — never the misleading E0514 from metadata loading.
-# The test only runs when the runner has a second toolchain installed.
-other_toolchain="$(rustup toolchain list 2>/dev/null | grep -v '^1\.98\.1 ' | head -1 | awk '{print $1}')"
+# The test only runs when the runner has a *different-version* toolchain
+# installed; matching the pinned version is the expected happy path, not
+# the failure we assert.
+pinned_version="$(grep '^channel' "$base/sdk-bundle/rust-toolchain.toml" | sed 's/.*= *"//;s/"//')"
+other_toolchain="$(rustup toolchain list 2>/dev/null | grep -v "^${pinned_version} " | head -1 | awk '{print $1}')"
 if test -n "$other_toolchain"; then
   echo "[sdk-bundle-test] E7: non-pinned toolchain is refused first"
   if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS RUSTUP_TOOLCHAIN="$other_toolchain" \
