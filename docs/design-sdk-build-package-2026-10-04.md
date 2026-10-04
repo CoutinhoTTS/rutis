@@ -51,14 +51,23 @@ sdk-bundle-<target>-<sdk-version>/
   sdk.toml           SDK 身份与构建诊断
   lib/               librutis_sdk.so / .dylib / rutis_sdk.dll
                      Windows：rutis_sdk.dll.lib 与 .dll 同目录同名
-  deps/*.rlib        SDK 依赖闭包的 rlib（--extern 解析 SDK 元数据后，
-                     rustc 递归要求的最小集合，E0 确定；不含 proc-macro
-                     宿主产物；std 元数据来自固定工具链 sysroot，不进包）
+  deps/              SDK 依赖闭包的编译期产物（E0 实测见 §六：rlib 与
+                     proc-macro 的 .so 都要——rustc 递归加载闭包 crate 的
+                     完整 rmeta 依赖链，闭包 crate 依赖的 proc-macro 也在内；
+                     std 元数据来自固定工具链 sysroot，不进包）
   Cargo.lock         SDK 构建的锁文件（诊断与复核 packages 用）
   rust-toolchain.toml 固定 1.98.1
   cargo-config.toml  .cargo/config.toml 注入模板
   GUIDE.md           插件作者指南
 ```
+
+**闭包收集与收缩（E0 定案）**：收集器按 `sdk.toml` 的 `packages` 包名，从锚点构建的
+`target/release/deps` 拷贝每个包的**全部同名变体**（`.rlib` 与 proc-macro 的 `.so`；
+多变体共存时 rustc 按 crate disambiguator 自动挑选，不冲突），随后用**收缩轮**去重：
+逐个变体移走重试构建，能通过即删除。发布产物只留被选中的变体（E0 实测收缩后
+41 个文件、60.1 MB，其中 4 个是 proc-macro 的 .so）。收缩轮在发布流水线内执行，
+约两三百次增量编译，分钟级。
+
 
 **`bundle.toml`（包级清单）**：`format_version`（构建包格式自身版本）、关联的 SDK
 `version/L1/L2`、**每个文件（含闭包 rlib、导入库、模板）的 sha256**。完整性靠这份清单
@@ -157,6 +166,25 @@ unresolved——如实测量并记录（E8c），不作为验收承诺。
 | # | 内容 | 判定 |
 | --- | --- | --- |
 | E0 | **最小闭包与注入形式（三平台）**：以发布 SDK 实测 rustc 递归要求的 rlib 集合（按元数据依赖图）；`.rmeta` 是否够（build 模式预期不够）；sysroot std 元数据可用性；Windows `--extern` 指向 `.dll` + 同目录 `.dll.lib` 的链接；闭包体积数据 | 每项结论记入本稿；闭包集合成为收集器规格 |
+
+**E0 记录（2026-10-04，Linux x64，SDK 0.5.0 / L2 `a1064b9e…`）**：
+
+- 注入形式成立：`--extern rutis_sdk=<发布 dylib>` + `-L dependency=<deps/>`，插件
+  Cargo.toml 不声明 rutis-sdk 依赖，独立工作区编译链接通过；产物 `DT_NEEDED` 只含
+  `librutis_sdk.so`、`libstd-<hash>.so` 与系统库，无 run path，引导节 L1/L2 与
+  `sdk.toml` 一致。
+- **闭包按 rmeta 依赖链完整递归，proc-macro 的 .so 必须随包**：只带 rlib 时 E0463
+  （`futures_macro`、`tokio_macros`、`thiserror_impl` 等被 rustc 打开）。缺任何一项的
+  报错都只有误导性的 `can't find crate for rutis_sdk`，无 note；闭包完整性必须由打包器
+  按 `bundle.toml` 清单自查（对应 E9 的可读错误）。
+- 同名多变体共存不冲突：rustc 按 disambiguator 挑选。收缩后最小集 **41 个产物
+  （37 rlib + 4 个 proc-macro .so）、60.1 MB**（见 §三收集与收缩）。
+- sysroot std 元数据满足 SDK dylib 的 std 依赖（固定工具链即可，std 不进包）。
+- rustc 版本先于一切：1.97.1 工具链下最先报 `E0514`，先于任何 E0463。
+- E1 等价链路通过：收缩集构建的插件被发布宿主（`rutis-cli --plugin`）加载，L1/L2/boot
+  校验通过，初始化与 apply（含 `rutis_sdk::tokio::spawn` 在宿主运行时）执行。
+- 待平台补测：macOS（E4）、Windows（E5，`.dll.lib` 与 `--extern` 指向形式）。
+
 | E1 | Linux：独立工作区（无宿主源码、不在仓库内），构建包 + `--bundle` 构建 greeter 等价插件；发布宿主加载，v1→v2 换代、消费者重载；§四第 5 步链接产物核验 | 与 `test-dylib.sh` 同口径 |
 | E2 | 私有依赖矩阵：SDK 树外 crate（`base64`）→ 正常；直接依赖 `serde_json` → 前置拒绝；间接引入同版本不同 feature → 行为记录；间接引入 feature 全同 → 预期拒绝/警告，行为记录 | 每格结论记入 §五 |
 | E3 | 前置检查：声明 `rutis-sdk`（含声明未引用）、传递引入 SDK 源码、直接依赖共享 crate → 构建前失败，信息含包名与引入路径 | 拒绝发生在调用 rustc 前 |
