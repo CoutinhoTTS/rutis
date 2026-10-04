@@ -17,7 +17,7 @@ M1 做完后应当成立的事（即总体稿 §十一 的验收）：
 3. 先解析一个依赖 `llm` 的行、后启动运行时，这一行等到 `llm` 出现才启动，`llm` 撤销后停下；
 4. 现有测试全部通过。
 
-M1 不做：Python 运行时（M2）、两个运行时同时冷启动的验收（M1/M2 交界，需要第二个运行时才能测，但 M1 的会话层改动要为它留好位置，§七）。
+M1 不做：Python 运行时（M2）、JS/TS 叶子插件（和 M2 一起做，设计见 §十一）、两个运行时同时冷启动的验收（M1/M2 交界，需要第二个运行时才能测，但 M1 的会话层改动要为它留好位置，§七）。
 
 ## 二、读代码后对总体稿的修正
 
@@ -285,7 +285,70 @@ rebase(path, from, to):
 
 M1a 不在 M1c 的路径上：M1 只有一个运行时，跨会话转发要到 M2 才真正用到。先做它是因为它风险最大，越早有测试越好。
 
-## 十一、待定
+## 十一、JS/TS 叶子插件（和 M2 一起做）
+
+M1 之后，JS 插件仍然都是 Cordis 插件。但很多 JS/TS 插件只需要"用几个服务、提供一个服务、退出时清理"，用不到 Cordis 的子插件、事件和本地依赖图。这类插件可以用和 Python 一样的叶子写法，作者不需要了解 Cordis。
+
+### 11.1 写法
+
+```ts
+import { definePlugin } from '@arcships/rutis-interop/plugin'
+
+export default definePlugin({
+  inject: ['llm'],
+  provides: { weather: { today: 'async', unit: 'sync' } },
+  config: { type: 'object', properties: { city: { type: 'string' } } },  // JSON Schema
+  apply(ctx, config) {
+    const llm = ctx.use('llm')
+    ctx.provide('weather', new Weather(llm, config.city))
+    return () => { /* 清理 */ }
+  },
+})
+```
+
+- `definePlugin` 只是给对象打一个标记（一个 `Symbol`），不做别的。必须显式标记：Cordis 的函数插件也是 `apply(ctx, config)` 加 `inject` 的形状，只看形状分不出来；
+- `apply` 可以是 async；返回的清理函数也可以是 async，也可以不返回；
+- `provides` 写在代码里，不需要 `package.json` 的 `rutis.provides` 字段（那是给没法改代码的现成 Cordis 插件用的）；
+- `config` 直接是 JSON Schema，不用 schemastery；
+- TS 文件照常加载：runner 本来就以 `node --import tsx` 启动。
+
+### 11.2 实现：装进现有的 Node 运行时
+
+不另开进程。runner 加载模块时，看到叶子标记，就把它包成一个 Cordis 插件再装载：
+
+```text
+Cordis 插件 {
+  name, inject（同名照搬）,
+  apply(cordisCtx, config) {
+    ctx = { use: name => cordisCtx.get(name), provide: (name, value) => cordisCtx.provide(name, value) }
+    cleanup = await leaf.apply(ctx, config)
+    cordisCtx.effect(() => cleanup)
+  }
+}
+```
+
+- `ctx` 只有 `use` 和 `provide`，插件拿不到 Cordis 的 Context；
+- `use` 拿到的是同进程的原生对象（另一个 JS 插件提供的），或者 M1 注册进 Cordis 的宿主服务代理（Rust 或其他运行时提供的），插件分不出来，也不需要分；
+- `provide` 注册在这个插件自己的 fiber 上，插件卸载时自动撤销；
+- 配置变化一律重启插件，叶子插件没有 volatile 字段；
+- `rows.schema` 遇到叶子插件时，直接从 `definePlugin` 的对象里读 `inject`、`provides` 和 `config`。
+
+所以叶子插件和现有的 Cordis 插件在同一个进程里，互相使用服务不走进程间通信，rutis 侧不用为它改任何东西。
+
+### 11.3 和 Python 共用一致性测试
+
+M2 的运行时一致性测试本来就是"同一组插件行为，在每个运行时上各跑一遍"。JS 叶子插件和 Python 插件写法一样，所以这组测试同时覆盖两者：
+
+- 用服务、提供服务、清理顺序；
+- 声明的依赖参与 rutis 的启停；
+- 跨语言互相使用服务（JS 叶子 ↔ Python）；
+- 同进程调用不走进程间通信（JS 叶子 ↔ Cordis 插件）。
+
+### 11.4 不选另开一个纯 JS 运行时
+
+另一种做法是像 Python 一样，单独开一个不含 Cordis 的 Node 进程跑叶子插件。它更干净，但多一个进程，而且叶子插件和 Cordis 插件互相调用要走进程间通信。真有需要隔离的时候，按总体稿"隔离按需多开"的规则再开一个运行时实例即可，不需要为此另做一种运行时。
+
+## 十二、待定
 
 - **共享名字的来源**：本文用 catalog 显式登记（§4.2）。备选是"任何运行时的行在 `provides` 里声明过的名字都算共享"。它省掉登记，但一个行是否由 rutis 门控会取决于提供者行有没有先被解析，结果和配置顺序有关，所以不选。如果显式登记在实际使用中太繁琐，再考虑让 loader 在一次 reconcile 里先解析完所有行、再定依赖。
 - **可选依赖**：M1 不为它重启行（§5.2）。如果有插件需要"可选服务出现后重新 apply"，再加。
