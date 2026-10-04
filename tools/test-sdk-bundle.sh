@@ -23,12 +23,14 @@ plugin_name="$(lib_name greeter)"
 base="$(native_path "$(mktemp -d /tmp/rutis-sdk-bundle.XXXXXX)")"
 
 # The runtime bundle (host, SDK, libstd, launcher) the sdk-bundle belongs to.
+echo "[sdk-bundle-test] building the runtime bundle"
 bash tools/build-dylib-bundle.sh "$base/runtime"
 sdk_sha="$(sed -n 's/^artifact_sha256 = "\(.*\)"/\1/p' "$base/runtime/sdk.toml")"
 test "$(sha256_of "$base/runtime/$sdk_name")" = "$sdk_sha"
 
 # The sdk-bundle: prebuilt SDK, closure rlibs (shrunk by the probe), manifest.
-cargo xtask pack-sdk-bundle --bundle-dir "$base/runtime" --output "$base/sdk-bundle"
+echo "[sdk-bundle-test] packing the sdk-bundle"
+with_timeout 2400 cargo xtask pack-sdk-bundle --bundle-dir "$base/runtime" --output "$base/sdk-bundle"
 test "$(sha256_of "$base/sdk-bundle/lib/$sdk_name")" = "$sdk_sha"
 test -f "$base/sdk-bundle/bundle.toml"
 test -f "$base/sdk-bundle/GUIDE.md"
@@ -38,6 +40,7 @@ test -f "$base/sdk-bundle/cargo-config.toml"
 # fixture sources work unchanged: `use rutis_sdk::` resolves through the
 # injected --extern.
 for item in v1 v2; do
+  echo "[sdk-bundle-test] packaging external plugin $item"
   workspace="$base/external/plugin-$item"
   mkdir -p "$workspace/src"
   cp "tests/dylib-fixtures/greeter-$item/src/lib.rs" "$workspace/src/lib.rs"
@@ -59,7 +62,7 @@ export = []
 
 [workspace]
 EOF
-  env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
+  with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
     --manifest-path "$workspace/Cargo.toml" \
     --bundle "$base/sdk-bundle" \
     --features export \
@@ -74,9 +77,11 @@ done
 # with all pre-load checks).
 for item in v1 v2; do
   marker="$base/init-$item"
-  if ! RUTIS_PLUGIN_INIT_MARKER="$marker" "$base/runtime/rutis-cli" --scripted \
+  echo "[sdk-bundle-test] loading $item on the published host"
+  if ! with_timeout 600 env RUTIS_PLUGIN_INIT_MARKER="$marker" \
+      "$base/runtime/rutis-cli" --scripted \
       --plugin "$base/$item" --plugin-config '{}' > /dev/null; then
-    echo "the published host rejected $item" >&2
+    echo "the published host rejected or hung on $item" >&2
     exit 1
   fi
 done
@@ -105,7 +110,7 @@ edition = "2021"
 [dependencies]
 rutis-sdk = "0.5"
 EOF
-if env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifest-path "$base/bad-manifest/Cargo.toml" \
+if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifest-path "$base/bad-manifest/Cargo.toml" \
   --bundle "$base/sdk-bundle" --output "$base/bad-out" > "$base/e3.stdout" 2>&1; then
   echo "a direct rutis-sdk dependency was accepted" >&2
   exit 1
@@ -116,7 +121,7 @@ grep -Fq 'rutis-sdk (dependencies)' "$base/e3.stdout"
 cp -a "$base/sdk-bundle" "$base/tampered"
 first_rlib="$(ls "$base/tampered/deps"/*.rlib | head -1)"
 printf 'x' >> "$first_rlib"
-if env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifest-path "$base/external/plugin-v1/Cargo.toml" \
+if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifest-path "$base/external/plugin-v1/Cargo.toml" \
   --bundle "$base/tampered" --features export --output "$base/bad-out" \
   > "$base/e6.stdout" 2>&1; then
   echo "a modified bundle file was accepted" >&2
@@ -126,7 +131,7 @@ grep -Fq 'differs from the bundle manifest' "$base/e6.stdout"
 
 # E9: a missing closure file names the file.
 rm -f "$first_rlib"
-if env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifest-path "$base/external/plugin-v1/Cargo.toml" \
+if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifest-path "$base/external/plugin-v1/Cargo.toml" \
   --bundle "$base/tampered" --features export --output "$base/bad-out" \
   > "$base/e9.stdout" 2>&1; then
   echo "a missing bundle file was accepted" >&2
@@ -185,10 +190,11 @@ impl Plugin for E2a {
 }
 rutis_sdk::export_plugin! { id: "e2a", factory: Factory }
 EOF
-env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
+echo "[sdk-bundle-test] E2a: private dependency outside the SDK tree"
+with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
   --manifest-path "$e2a/Cargo.toml" --bundle "$base/sdk-bundle" \
   --features export --output "$base/e2a"
-"$base/runtime/rutis-cli" --scripted --plugin "$base/e2a" --plugin-config '{}' > /dev/null
+with_timeout 600 "$base/runtime/rutis-cli" --scripted --plugin "$base/e2a" --plugin-config '{}' > /dev/null
 
 # E2d: a private dependency that pulls tokio into the plugin graph collides
 # with the SDK closure; the packer must reject it readably.
@@ -244,7 +250,8 @@ impl Plugin for E2d {
 }
 rutis_sdk::export_plugin! { id: "e2d", factory: Factory }
 EOF
-if env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
+echo "[sdk-bundle-test] E2d: private dependency overlapping the closure"
+if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
   --manifest-path "$e2d/Cargo.toml" --bundle "$base/sdk-bundle" \
   --features export --output "$base/e2d" > "$base/e2d.stdout" 2>&1; then
   echo "a private dependency overlapping the SDK closure was accepted" >&2
