@@ -79,7 +79,7 @@ for item in v1 v2; do
   marker="$base/init-$item"
   echo "[sdk-bundle-test] loading $item on the published host"
   if ! with_timeout 600 env RUTIS_PLUGIN_INIT_MARKER="$marker" \
-      "$base/runtime/rutis-cli" --scripted \
+      "$base/runtime/rutis-cli" --scripted --load-only \
       --plugin "$base/$item" --plugin-config '{}' > /dev/null; then
     echo "the published host rejected or hung on $item" >&2
     exit 1
@@ -194,7 +194,7 @@ echo "[sdk-bundle-test] E2a: private dependency outside the SDK tree"
 with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
   --manifest-path "$e2a/Cargo.toml" --bundle "$base/sdk-bundle" \
   --features export --output "$base/e2a"
-with_timeout 600 "$base/runtime/rutis-cli" --scripted --plugin "$base/e2a" --plugin-config '{}' > /dev/null
+with_timeout 600 "$base/runtime/rutis-cli" --scripted --load-only --plugin "$base/e2a" --plugin-config '{}' > /dev/null
 
 # E2d: a private dependency that pulls tokio into the plugin graph collides
 # with the SDK closure; the packer must reject it readably.

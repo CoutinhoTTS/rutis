@@ -118,10 +118,10 @@ cargo xtask pack-plugin --bundle <sdk-bundle 目录> \
 本地验证（用宿主方给的运行发布目录）：
 
 ```sh
-<运行目录>/rutis-cli --scripted --plugin <分发目录> --plugin-config '{}'
+<运行目录>/rutis-cli --scripted --load-only --plugin <分发目录> --plugin-config '{}'
 ```
 
-退出码 0 且无报错即加载成功。
+`--load-only` 加载插件、跑完 apply 即退出，不启动终端界面（无控制台的环境也安全）。退出码 0 即加载成功。
 
 ## 排错
 
