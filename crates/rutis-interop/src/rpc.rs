@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 use std::thread::ThreadId;
@@ -288,6 +289,10 @@ struct Object {
 enum Body {
     Function(Arc<Callback>),
     Future(AsyncResult),
+    /// Stands in for a reference imported on another session: calls, reads
+    /// and awaits are forwarded to it. Holding the import keeps the original
+    /// alive; dropping the relay releases it on its own session.
+    Relay(Arc<Import>),
 }
 struct AsyncResult {
     future: Mutex<FutureState>,
@@ -310,9 +315,10 @@ fn poll_future(future: &mut BoxFuture<'static, Reply>, cx: &mut Context<'_>) -> 
 }
 impl Object {
     fn kind(&self) -> Kind {
-        match self.body {
+        match &self.body {
             Body::Function(_) => Kind::Function,
             Body::Future(_) => Kind::Future,
+            Body::Relay(import) => import.kind,
         }
     }
     fn call(&self, args: Value) -> Reply {
@@ -428,6 +434,37 @@ impl Drop for PathGuard {
         SYNC_PATH.with(|p| p.replace(self.0.take()));
     }
 }
+/// Poll `future` with `path` as the current invocation chain. The path is
+/// entered on every poll, so it wins over whatever chain the polling thread
+/// or task carries.
+async fn with_path<F: Future>(path: Vec<String>, future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        let _path = PathGuard::enter(path.clone());
+        future.as_mut().poll(cx)
+    })
+    .await
+}
+
+/// Rewrite an invocation chain from session `from` for a call sent to
+/// session `to` (both are [`Connection::tag`]s). Call ids are unique only
+/// within a session, so entries of other sessions carry their session's tag
+/// (`"s1/node:3"`): untagged entries belong to `from` and get its tag;
+/// entries tagged `to` return to their original ids, so `to` recognises the
+/// calls it is synchronously waiting for; entries of third sessions pass
+/// through. A tagged entry never equals a native `node:`/`rust:` id, so no
+/// session mistakes it for one of its own calls.
+pub fn rebase(path: &[String], from: &str, to: &str) -> Vec<String> {
+    let home = format!("{to}/");
+    path.iter()
+        .map(|entry| match entry.strip_prefix(&home) {
+            Some(native) => native.to_owned(),
+            None if entry.contains('/') => entry.clone(),
+            None => format!("{from}/{entry}"),
+        })
+        .collect()
+}
+static NEXT_TAG: AtomicU64 = AtomicU64::new(1);
 
 struct Import {
     peer: Weak<Peer>,
@@ -472,6 +509,20 @@ struct Exports {
     next: u64,
     entries: HashMap<u64, Export>,
     identities: HashMap<usize, u64>,
+    /// Relays by the import they forward to, so forwarding one import twice
+    /// grants the same reference again.
+    relays: HashMap<usize, u64>,
+}
+impl Exports {
+    fn remove(&mut self, id: u64) -> Option<Export> {
+        let entry = self.entries.remove(&id)?;
+        self.identities
+            .remove(&(Arc::as_ptr(&entry.object) as usize));
+        if let Body::Relay(import) = &entry.object.body {
+            self.relays.remove(&(Arc::as_ptr(import) as usize));
+        }
+        Some(entry)
+    }
 }
 enum Waiting {
     Sync {
@@ -494,6 +545,15 @@ enum Accepted {
     Invoke(String, String, Value),
     Call(Arc<Object>, Value),
     Await(Arc<Object>),
+    /// Method calls and property reads reach relays of remote objects only.
+    Method(Arc<Object>, String, Value),
+    Get(Arc<Object>, String),
+}
+/// A call forwarded through a relay.
+enum Relayed {
+    Call(Option<String>, Value),
+    Get(String),
+    Await,
 }
 struct Awaiting {
     object: Arc<Object>,
@@ -552,6 +612,9 @@ pub trait Dispatch: Send + Sync + 'static {
     fn invoke(&self, peer: &Connection, target: &str, method: &str, args: Value) -> Reply;
 }
 struct Peer {
+    /// Process-unique; marks this session's call ids in chains forwarded
+    /// to other sessions (see [`rebase`]).
+    tag: String,
     writer: Mutex<UnixStream>,
     closer: UnixStream,
     calls: Mutex<Calls>,
@@ -592,6 +655,7 @@ impl Connection {
         stream.set_nonblocking(false).map_err(transport)?;
         let reader = stream.try_clone().map_err(transport)?;
         let peer = Self(Arc::new(Peer {
+            tag: format!("s{}", NEXT_TAG.fetch_add(1, Ordering::Relaxed)),
             closer: stream.try_clone().map_err(transport)?,
             writer: Mutex::new(stream),
             calls: Mutex::new(Calls::default()),
@@ -695,6 +759,13 @@ impl Connection {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Reply> + Send + 'static,
     {
+        Ok(Value::future_on(
+            async move { factory().await },
+            true,
+            self.background()?,
+        ))
+    }
+    fn background(&self) -> Result<Executor, Error> {
         let mut background = self.0.background.lock().unwrap();
         if let Some(error) = &self.0.calls.lock().unwrap().closed {
             return Err(error.clone());
@@ -702,12 +773,28 @@ impl Connection {
         if background.is_none() {
             *background = Some(Background::start()?);
         }
-        let executor = background.as_ref().unwrap().executor.clone();
-        Ok(Value::future_on(
-            async move { factory().await },
-            true,
-            executor,
-        ))
+        Ok(background.as_ref().unwrap().executor.clone())
+    }
+    /// This session's tag, unique in the process (`"s3"`).
+    pub fn tag(&self) -> &str {
+        &self.0.tag
+    }
+    /// Run `call`, which calls into this session on behalf of a call that
+    /// arrived on `source`, with the current invocation chain rebased from
+    /// `source` to this session. Without it the ids of the two sessions mix,
+    /// and a reverse call can be routed to the wrong waiting thread.
+    pub fn forward<R>(&self, source: &Connection, call: impl FnOnce() -> R) -> R {
+        let _path = PathGuard::enter(rebase(&current_path(), source.tag(), self.tag()));
+        call()
+    }
+    /// The async form of [`Connection::forward`]: the chain is taken when
+    /// this is called and is current whenever `future` is polled.
+    pub fn forward_async<F: Future>(
+        &self,
+        source: &Connection,
+        future: F,
+    ) -> impl Future<Output = F::Output> {
+        with_path(rebase(&current_path(), source.tag(), self.tag()), future)
     }
     pub fn invoke(&self, target: &str, method: &str, args: Value) -> Reply {
         self.request_sync(Operation::Invoke(target.into(), method.into(), args))
@@ -802,7 +889,10 @@ impl Connection {
             let mut calls = self.0.calls.lock().unwrap();
             if let Waiting::Sync { sender, origins } = &waiting {
                 for (id, awaiting) in &calls.awaiting {
-                    if awaiting.object.executor.blocked_here()
+                    // Forwarded relay calls run on the background executor
+                    // and never wait on this one.
+                    if matches!(awaiting.object.body, Body::Future(_))
+                        && awaiting.object.executor.blocked_here()
                         && origins.iter().any(|origin| awaiting.path.contains(origin))
                     {
                         blocked.push((id.clone(), awaiting.object.clone()));
@@ -898,10 +988,9 @@ impl Connection {
                 };
                 entry.grants -= 1;
                 if entry.grants == 0 {
-                    let entry = exports.entries.remove(&id).unwrap();
-                    exports
-                        .identities
-                        .remove(&(Arc::as_ptr(&entry.object) as usize));
+                    // The value being encoded still holds the import of a
+                    // dropped relay, so no release is written under the lock.
+                    exports.remove(id);
                 }
             }
         }
@@ -925,55 +1014,84 @@ impl Connection {
             ),
             Value::Signal => WireValue::Signal,
             Value::Reference(Reference(ReferenceInner::Remote(import))) => {
-                if !Weak::ptr_eq(&import.peer, &Arc::downgrade(&self.0)) {
-                    return Err(Error::Value(
-                        "cross-session reference forwarding is not implemented".into(),
-                    ));
-                }
-                WireValue::Reference {
-                    id: import.id,
-                    kind: import.kind,
-                    home: true,
-                    origin: import.origin.clone(),
-                }
+                self.encode_import(import, grants)?
             }
-            Value::Reference(Reference(ReferenceInner::Local(object))) => {
-                let mut exports = self.0.exports.lock().unwrap();
-                let identity = Arc::as_ptr(object) as usize;
-                let id = match exports.identities.get(&identity) {
-                    Some(id) => *id,
-                    None => {
-                        exports.next = exports
-                            .next
-                            .checked_add(1)
-                            .filter(|n| *n <= 9_007_199_254_740_991)
-                            .ok_or_else(|| transport("reference identifiers exhausted"))?;
-                        let id = exports.next;
-                        exports.entries.insert(
-                            id,
-                            Export {
-                                object: object.clone(),
-                                grants: 0,
-                            },
-                        );
-                        exports.identities.insert(identity, id);
-                        id
-                    }
-                };
-                let export = exports.entries.get_mut(&id).unwrap();
-                export.grants = export
-                    .grants
-                    .checked_add(1)
-                    .ok_or_else(|| transport("reference grant overflow"))?;
-                grants.push(id);
-                WireValue::Reference {
-                    id,
-                    kind: object.kind(),
-                    home: false,
-                    origin: object.origin.clone(),
-                }
-            }
+            // Decoding unwraps relays, so Rust code should never hold one;
+            // if it does, forward from the innermost import all the same.
+            Value::Reference(Reference(ReferenceInner::Local(object))) => match &object.body {
+                Body::Relay(import) => self.encode_import(import, grants)?,
+                _ => self.encode_local(object, grants)?,
+            },
         })
+    }
+    fn encode_local(
+        &self,
+        object: &Arc<Object>,
+        grants: &mut Vec<u64>,
+    ) -> Result<WireValue, Error> {
+        let identity = Arc::as_ptr(object) as usize;
+        let mut exports = self.0.exports.lock().unwrap();
+        let id = match exports.identities.get(&identity) {
+            Some(id) => *id,
+            None => {
+                let id = allocate(&mut exports, object.clone())?;
+                exports.identities.insert(identity, id);
+                id
+            }
+        };
+        grant(&mut exports, id, grants)
+    }
+    /// An import goes back to its own session as a home reference; to any
+    /// other session as a relay of the same kind exported here. One relay
+    /// per import, so the peer sees one identity however often it is sent.
+    fn encode_import(
+        &self,
+        import: &Arc<Import>,
+        grants: &mut Vec<u64>,
+    ) -> Result<WireValue, Error> {
+        if Weak::ptr_eq(&import.peer, &Arc::downgrade(&self.0)) {
+            return Ok(WireValue::Reference {
+                id: import.id,
+                kind: import.kind,
+                home: true,
+                origin: import.origin.clone(),
+            });
+        }
+        let identity = Arc::as_ptr(import) as usize;
+        {
+            let mut exports = self.0.exports.lock().unwrap();
+            if let Some(id) = exports.relays.get(&identity).copied() {
+                return grant(&mut exports, id, grants);
+            }
+        }
+        let source = import.connection()?;
+        // Forwarded calls run on the background executor: they only wait for
+        // the other session, and must progress while this connection's own
+        // runtime is blocked by a synchronous call.
+        let executor = self.background()?;
+        // Peers accept only their own native ids in an origin. The source
+        // session's entries are added back when an await is forwarded.
+        let origin = rebase(&import.origin, source.tag(), self.tag())
+            .into_iter()
+            .filter(|entry| !entry.contains('/'))
+            .collect();
+        let relay = Arc::new(Object {
+            executor,
+            business: true,
+            origin,
+            body: Body::Relay(import.clone()),
+        });
+        let mut exports = self.0.exports.lock().unwrap();
+        // Another thread may have created the relay meanwhile.
+        let id = match exports.relays.get(&identity) {
+            Some(id) => *id,
+            None => {
+                let id = allocate(&mut exports, relay)?;
+                exports.relays.insert(identity, id);
+                id
+            }
+        };
+        grant(&mut exports, id, grants)
     }
     fn decode(&self, value: WireValue) -> Reply {
         Ok(match value {
@@ -1002,7 +1120,14 @@ impl Connection {
                 if object.kind() != kind {
                     return Err(transport("reference kind mismatch"));
                 }
-                Value::Reference(Reference(ReferenceInner::Local(object)))
+                // A relay coming home is the reference it forwards to, so
+                // Rust code compares it equal to the import it sent.
+                match &object.body {
+                    Body::Relay(import) => {
+                        Value::Reference(Reference(ReferenceInner::Remote(import.clone())))
+                    }
+                    _ => Value::Reference(Reference(ReferenceInner::Local(object))),
+                }
             }
             WireValue::Reference {
                 id,
@@ -1053,6 +1178,15 @@ impl Connection {
             return Ok(None);
         }
         Err(transport("response for unknown call"))
+    }
+    fn export_object(&self, id: u64) -> Result<Arc<Object>, Error> {
+        let object = self.export(id)?;
+        if object.kind() != Kind::Object {
+            return Err(transport(
+                "method call or property read on a non-object reference",
+            ));
+        }
+        Ok(object)
     }
     fn export(&self, id: u64) -> Result<Arc<Object>, Error> {
         self.0
@@ -1116,15 +1250,13 @@ impl Connection {
                     }
                     entry.grants -= count;
                     if entry.grants == 0 {
-                        let entry = exports.entries.remove(&reference).unwrap();
-                        exports
-                            .identities
-                            .remove(&(Arc::as_ptr(&entry.object) as usize));
-                        Some(entry)
+                        exports.remove(reference)
                     } else {
                         None
                     }
                 };
+                // Outside the lock: a dropped relay may release its import,
+                // which writes to the other session.
                 drop(removed);
                 return Ok(());
             }
@@ -1139,11 +1271,28 @@ impl Connection {
                 path,
                 Accepted::Invoke(target, method, self.decode(args)?),
             ),
-            // Rust exports functions and async results only, never objects.
+            // Rust exports objects only as relays of other sessions' objects.
             Frame::Call {
-                method: Some(_), ..
-            }
-            | Frame::Get { .. } => return Err(transport("Rust does not export object references")),
+                id,
+                path,
+                reference,
+                method: Some(method),
+                args,
+            } => (
+                id,
+                path,
+                Accepted::Method(self.export_object(reference)?, method, self.decode(args)?),
+            ),
+            Frame::Get {
+                id,
+                path,
+                reference,
+                property,
+            } => (
+                id,
+                path,
+                Accepted::Get(self.export_object(reference)?, property),
+            ),
             Frame::Call {
                 id,
                 path,
@@ -1168,7 +1317,10 @@ impl Connection {
         path.push(id.clone());
         let business = match &call {
             Accepted::Invoke(target, _, _) => !target.is_empty(),
-            Accepted::Call(object, _) | Accepted::Await(object) => object.business,
+            Accepted::Call(object, _)
+            | Accepted::Await(object)
+            | Accepted::Method(object, _, _)
+            | Accepted::Get(object, _) => object.business,
         };
         let flight = business.then(|| {
             *self.0.activity.count.lock().unwrap() += 1;
@@ -1181,8 +1333,11 @@ impl Connection {
             _flight: flight,
         };
         let handle = match &incoming.call {
-            Accepted::Call(object, _) | Accepted::Await(object) => object.executor.handle.clone(),
-            _ => self.0.executor.clone(),
+            Accepted::Call(object, _)
+            | Accepted::Await(object)
+            | Accepted::Method(object, _, _)
+            | Accepted::Get(object, _) => object.executor.handle.clone(),
+            Accepted::Invoke(..) => self.0.executor.clone(),
         };
         let delivery = {
             let mut calls = self.0.calls.lock().unwrap();
@@ -1248,7 +1403,30 @@ impl Connection {
             _flight,
         } = incoming;
         let _path = PathGuard::enter(path.clone());
+        let call = match call {
+            Accepted::Call(object, args) if matches!(object.body, Body::Relay(_)) => {
+                return self.relay(id, path, object, Relayed::Call(None, args), sync, _flight);
+            }
+            Accepted::Await(object) if matches!(object.body, Body::Relay(_)) => {
+                return self.relay(id, path, object, Relayed::Await, sync, _flight);
+            }
+            Accepted::Method(object, method, args) => {
+                return self.relay(
+                    id,
+                    path,
+                    object,
+                    Relayed::Call(Some(method), args),
+                    sync,
+                    _flight,
+                );
+            }
+            Accepted::Get(object, property) => {
+                return self.relay(id, path, object, Relayed::Get(property), sync, _flight);
+            }
+            call => call,
+        };
         match call {
+            Accepted::Method(..) | Accepted::Get(..) => unreachable!("objects are relays"),
             Accepted::Await(object) => {
                 // Check on the pumping thread before handing the async waiter
                 // to the executor that might itself be blocked by this stack.
@@ -1296,6 +1474,78 @@ impl Connection {
             }
         }
     }
+    /// Forward a call on a relay to the reference it stands in for, with the
+    /// chain rebased to that reference's session. A call pumped by a
+    /// synchronous waiter is forwarded synchronously on the same thread, so
+    /// reverse calls keep reaching that waiter. Any other call is forwarded
+    /// asynchronously and cancelled with the incoming call.
+    fn relay(
+        &self,
+        id: String,
+        path: Vec<String>,
+        object: Arc<Object>,
+        call: Relayed,
+        sync: bool,
+        flight: Option<Flight>,
+    ) {
+        let Body::Relay(import) = &object.body else {
+            unreachable!("relayed calls target relays")
+        };
+        let expected = match &call {
+            Relayed::Call(None, _) => Kind::Function,
+            Relayed::Call(Some(_), _) | Relayed::Get(_) => Kind::Object,
+            Relayed::Await => Kind::Future,
+        };
+        if import.kind != expected {
+            // The owner would fail its whole session on a mismatched kind.
+            return self.respond(id, Err(Error::Value("reference kind mismatch".into())));
+        }
+        let target = match import.connection() {
+            Ok(target) => target,
+            Err(error) => return self.respond(id, Err(error)),
+        };
+        let operation = match call {
+            Relayed::Call(method, args) => Operation::Call(import.id, method, args),
+            Relayed::Get(property) => Operation::Get(import.id, property),
+            Relayed::Await => Operation::Await(import.id, import.origin.clone()),
+        };
+        let forwarded = rebase(&path, self.tag(), target.tag());
+        if sync {
+            let result = {
+                let _path = PathGuard::enter(forwarded);
+                target.request_sync(operation)
+            };
+            self.respond(id, result);
+            drop(flight);
+            return;
+        }
+        let (cancel, cancelled) = oneshot::channel();
+        {
+            let mut calls = self.0.calls.lock().unwrap();
+            if calls.closed.is_some() {
+                return;
+            }
+            calls.awaiting.insert(
+                id.clone(),
+                Awaiting {
+                    object: object.clone(),
+                    path,
+                    _cancel: cancel,
+                },
+            );
+        }
+        let peer = self.clone();
+        object.executor.handle.spawn(async move {
+            tokio::select! {
+                // Dropping the forwarded request cancels it on the target.
+                result = with_path(forwarded, target.request_async(operation)) => {
+                    peer.finish_await(id, result)
+                }
+                _ = cancelled => {},
+            }
+            drop(flight);
+        });
+    }
     fn finish_await(&self, id: String, result: Reply) {
         let awaiting = self.0.calls.lock().unwrap().awaiting.remove(&id);
         if awaiting.is_some() {
@@ -1324,6 +1574,30 @@ impl Connection {
             self.close(error);
         }
     }
+}
+fn allocate(exports: &mut Exports, object: Arc<Object>) -> Result<u64, Error> {
+    exports.next = exports
+        .next
+        .checked_add(1)
+        .filter(|n| *n <= 9_007_199_254_740_991)
+        .ok_or_else(|| transport("reference identifiers exhausted"))?;
+    let id = exports.next;
+    exports.entries.insert(id, Export { object, grants: 0 });
+    Ok(id)
+}
+fn grant(exports: &mut Exports, id: u64, grants: &mut Vec<u64>) -> Result<WireValue, Error> {
+    let export = exports.entries.get_mut(&id).unwrap();
+    export.grants = export
+        .grants
+        .checked_add(1)
+        .ok_or_else(|| transport("reference grant overflow"))?;
+    grants.push(id);
+    Ok(WireValue::Reference {
+        id,
+        kind: export.object.kind(),
+        home: false,
+        origin: export.object.origin.clone(),
+    })
 }
 fn finish(waiting: Waiting, result: Reply) {
     match waiting {

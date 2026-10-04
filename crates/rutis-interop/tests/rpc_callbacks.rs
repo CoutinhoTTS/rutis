@@ -376,3 +376,95 @@ async fn close_cancels_shared_executor_even_with_a_retained_reference() {
         .unwrap();
     assert!(future.wait_async().await.is_err());
 }
+
+/// Two Node runtimes. A calls the host service `bridge` synchronously with a
+/// JS function; Rust forwards the call and the function to B; B, inside its
+/// own synchronous host call, calls the function back. The call reaches A
+/// through a relay while A is still blocked in `bridge.run`, so A must run
+/// it on its waiting thread; a misrouted or queued callback deadlocks.
+#[tokio::test(flavor = "current_thread")]
+async fn a_function_forwarded_between_two_node_runtimes_calls_back_its_waiting_owner() {
+    use rutis_interop::rpc::{Connection, Reply};
+    use rutis_interop::{Host, HostDispatch};
+    use std::sync::OnceLock;
+    const OWNER: &str = r#"
+      export const inject = ['bridge']
+      export function apply(ctx) {
+        ctx.provide('caller', {
+          go(n) { return ctx.bridge.run(x => x * 10, n) },
+        })
+      }
+    "#;
+    const USER: &str = r#"
+      export const inject = ['inner']
+      export function apply(ctx) {
+        ctx.provide('callbacks', {
+          apply(fn, n) { return ctx.inner.run(() => fn(n)) + 1 },
+        })
+      }
+    "#;
+    // Runs a closure from B synchronously, so B waits too.
+    struct Inner;
+    impl HostDispatch for Inner {
+        fn invoke(&self, _: &str, args: Value) -> Reply {
+            args.list()?
+                .remove(0)
+                .reference()?
+                .call(Value::List(vec![]))
+        }
+    }
+    // Forwards A's call, function included, to B.
+    struct Bridge {
+        source: OnceLock<Connection>,
+        target: Connection,
+    }
+    impl HostDispatch for Bridge {
+        fn invoke(&self, _: &str, args: Value) -> Reply {
+            let source = self.source.get().unwrap();
+            let target = &self.target;
+            target.forward(source, || target.invoke("callbacks", "apply", args))
+        }
+    }
+    let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/node");
+    let plugin = |source: &str| {
+        let mut file = tempfile::Builder::new().suffix(".mjs").tempfile().unwrap();
+        file.write_all(source.as_bytes()).unwrap();
+        file
+    };
+    let (owner, user) = (plugin(OWNER), plugin(USER));
+    let host = |name: &str, dispatch: Arc<dyn HostDispatch>| Host {
+        name: name.into(),
+        methods: json!({ "run": "sync" }),
+        dispatch,
+    };
+    let b = Process::launch_mount(
+        &package,
+        &[(user.path(), json!({}))],
+        json!({ "callbacks": ["apply"] }),
+        None,
+        vec![host("inner", Arc::new(Inner))],
+    )
+    .await
+    .unwrap();
+    let bridge = Arc::new(Bridge {
+        source: OnceLock::new(),
+        target: b.connection().clone(),
+    });
+    let a = Process::launch_mount(
+        &package,
+        &[(owner.path(), json!({}))],
+        json!({ "caller": ["go"] }),
+        None,
+        vec![host("bridge", bridge.clone())],
+    )
+    .await
+    .unwrap();
+    bridge.source.set(a.connection().clone()).ok().unwrap();
+    assert_eq!(a.call("caller", "go", json!([3])).unwrap(), json!(31));
+    assert_eq!(
+        a.call_async("caller", "go", json!([4])).await.unwrap(),
+        json!(41)
+    );
+    a.dispose().await.unwrap();
+    b.dispose().await.unwrap();
+}
