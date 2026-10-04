@@ -96,7 +96,7 @@ pub struct Launcher {
     pub program: std::ffi::OsString,
     pub args: Vec<std::ffi::OsString>,
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
-    /// The working directory; the runtime package by default.
+    /// The working directory; the application's by default.
     pub cwd: Option<std::path::PathBuf>,
 }
 
@@ -474,12 +474,17 @@ impl Process {
                 let mut command = tokio::process::Command::new(&launcher.program);
                 command
                     .args(&launcher.args)
-                    .envs(launcher.env.iter().map(|(name, value)| (name, value)))
-                    .current_dir(launcher.cwd.as_deref().unwrap_or(node_package));
+                    .envs(launcher.env.iter().map(|(name, value)| (name, value)));
+                // Without a directory of its own, it runs where the
+                // application does.
+                if let Some(cwd) = &launcher.cwd {
+                    command.current_dir(cwd);
+                }
                 command
             }
             #[cfg(not(feature = "node"))]
             None => {
+                let _ = node_package;
                 return Err(Error::Value(
                     "no launcher given, and the Node runtime needs the `node` feature".into(),
                 ))

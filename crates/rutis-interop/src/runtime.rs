@@ -162,9 +162,14 @@ impl RuntimePlugin {
     #[cfg(feature = "python")]
     pub fn python(sdk: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
         let (sdk, project) = (sdk.into(), project.into());
+        // Ahead of whatever the application already puts on the path.
         let mut path = std::ffi::OsString::from(&sdk);
         path.push(":");
         path.push(&project);
+        if let Some(inherited) = std::env::var_os("PYTHONPATH").filter(|p| !p.is_empty()) {
+            path.push(":");
+            path.push(inherited);
+        }
         let launcher = crate::Launcher::new("python3")
             .arg("-m")
             .arg("rutis_runtime")

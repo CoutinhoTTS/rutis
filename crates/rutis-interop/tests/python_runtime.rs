@@ -69,8 +69,8 @@ async fn python(project: &Path) -> Arc<Process> {
     let launcher = Launcher::new("python3")
         .arg("-m")
         .arg("rutis_runtime")
-        .env("PYTHONPATH", path)
-        .cwd(project);
+        // No working directory of its own: it runs where the test does.
+        .env("PYTHONPATH", path);
     Process::mount(
         &sdk(),
         Mount {

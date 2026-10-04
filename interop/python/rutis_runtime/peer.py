@@ -427,12 +427,9 @@ class Peer:
         return {"type": "data", "value": _data(value)}
 
     def _future_done(self, entry: _Export, done: asyncio.Future) -> None:
-        if done.cancelled():
-            entry.result = (False, RemoteError("CancelledError", "the call was cancelled"))
-        elif done.exception() is not None:
-            entry.result = (False, done.exception())
-        else:
-            entry.result = (True, done.result())
+        # Recorded early when an await needed it first (see _execute).
+        if entry.result is None:
+            entry.result = _outcome(done)
         if entry.business:
             self._finish()
 
@@ -750,6 +747,10 @@ class Peer:
         token = self._context.set(path)
         try:
             if frame["op"] == "await":
+                if entry.result is None and entry.value.done():
+                    # Done, but its done-callback has not run yet: asyncio
+                    # schedules it, and a synchronous call may hold the loop.
+                    entry.result = _outcome(entry.value)
                 if entry.result is not None:
                     self._respond(call, entry.result, business)
                 elif self._waiting and self._related(job):
@@ -826,6 +827,14 @@ class Peer:
         finally:
             if business:
                 self._finish()
+
+
+def _outcome(done: asyncio.Future) -> tuple:
+    if done.cancelled():
+        return (False, RemoteError("CancelledError", "the call was cancelled"))
+    if done.exception() is not None:
+        return (False, done.exception())
+    return (True, done.result())
 
 
 def _apply(function: Callable, args: Any) -> Any:
