@@ -79,12 +79,13 @@ impl Resolver for InteropResolver {
                 }));
             };
             let schema = process
-                .row_schema(&entry)
+                .describe_row(&entry)
                 .await
                 .map_err(|e| LoaderError::Resolve {
                     name: name.to_owned(),
                     message: e.to_string(),
-                })?;
+                })?
+                .config;
             let resolved = Arc::new(Resolved {
                 factory,
                 schema,
