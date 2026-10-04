@@ -1,6 +1,6 @@
 # 多语言插件 M1：在 Node 运行时上补齐运行时契约（实施设计稿）
 
-状态：设计稿，未实现。日期：2026-10-04。
+状态：已实现，见 #129（M1a）、#128（M1b）、#130（M1c）；实现与本文的出入见 §十三。日期：2026-10-04。
 依据：[多语言插件：每种语言一个运行时插件](design-multilang-runtimes-2026-10-03.md)（#121，下称"总体稿"）、[Cordis 运行时插件化](design-cordis-runtime-plugin-2026-10-03.md)（#109）、[rutis-loader 设计](design-rutis-loader-2026-10-02.md)。
 基准：`main` `4da1f7a`。
 
@@ -354,3 +354,18 @@ M2 的运行时一致性测试本来就是"同一组插件行为，在每个运�
 - **可选依赖**：M1 不为它重启行（§5.2）。如果有插件需要"可选服务出现后重新 apply"，再加。
 - **同名服务冲突**：M1 只报诊断（§5.3），不决定谁生效。
 - **调用号前缀**：沿用 `node:`，与总体稿 §九 相同。
+
+## 十三、实现时的调整
+
+| 本文原来的说法 | 实现 | 原因 |
+| --- | --- | --- |
+| `rows.schema` 的 `inject` 区分 `required` 和可选（§5.1、§5.2） | `inject` 是服务名列表，全部按必需处理 | Cordis 4 的 `inject` 没有可选依赖（`Inject.resolve` 只产出名字到拦截配置的表） |
+| 两行声明同名服务时只报诊断（§5.3） | 后装载的那一行直接失败，错误里写明已被哪一行导出 | 失败本身就是诊断，而且避免 rutis 里出现两个提供者 |
+| `RuntimeRowsPlugin` 从 `meta.schema` 判断哪些行要刷新（§6.2） | resolver 记下运行时不在时解析的名字，加上 `package.json` 版本变了的名字（`take_stale`） | 不依赖 meta 里的文字 |
+| `CordisRuntimePlugin::host` 只登记形状（§4.1） | 同上；形状经 `CordisRuntime::host_methods` 交给行 | — |
+| §7 的转发接口 | `Connection::tag`、`Connection::forward`、`Connection::forward_async`、`rpc::rebase` | — |
+
+留到 M2 的两件事：
+
+- `RowService::invoke` 现在直接在提供方的会话上发起调用，没有经过 `Connection::forward`。调用方是 Rust 时这样就对；调用方是另一个运行时（M2 的 Python ↔ JS）时，要改成用调用方的会话做 `forward`，调用链才会被改写。这要求 `HostDispatch::invoke` 能拿到调用方的会话，M2 再定接口。
+- 对象引用（带方法和属性的对象）经中继转给 Node 侧时，Node 侧的 `peer.mjs` 还不接受 Rust 导出的对象引用。函数和 Future 可以转交。
