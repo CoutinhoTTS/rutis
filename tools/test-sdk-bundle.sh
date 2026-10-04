@@ -263,10 +263,16 @@ if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack
 fi
 # rustc's failure shape for the overlap is not stable: colliding
 # StableCrateId when the crate-id clashes, or a misleading E0463 naming the
-# private crate. Either way the build must fail.
+# private crate. Either way the build must fail, and the error must point
+# at the overlapping crates, not at an unrelated plugin bug.
 grep -Eq 'colliding StableCrateId|E0463|E0277' "$base/e2d.stdout" || {
   cat "$base/e2d.stdout" >&2
   echo "unexpected failure mode for the closure overlap" >&2
+  exit 1
+}
+grep -Eq 'tokio_stream|tokio-stream|pin_project' "$base/e2d.stdout" || {
+  cat "$base/e2d.stdout" >&2
+  echo "the overlap failure does not name the overlapping crates" >&2
   exit 1
 }
 

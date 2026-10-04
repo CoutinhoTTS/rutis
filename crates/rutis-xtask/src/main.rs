@@ -426,21 +426,21 @@ fn check_bundle_manifest(manifest: &Path) -> Result<(), String> {
 /// Even without a direct dependency, a private dependency can pull
 /// rutis-sdk into the resolved graph; the source build would then die in
 /// its build.rs classifying the injected --extern as an unknown RUSTFLAGS
-/// argument. The full tree names the path that introduced it.
+/// argument. `cargo tree -i` prints the reverse dependency path that
+/// introduced it; a non-zero exit means the crate is not in the graph.
 fn check_bundle_manifest_tree(manifest: &Path, workspace: &Path) -> Result<(), String> {
-    let output = command_output(
-        Command::new("cargo")
-            .args(["tree", "--locked", "--manifest-path"])
-            .arg(manifest)
-            .current_dir(workspace),
-    )?;
-    for line in output.lines() {
-        if line.contains("rutis-sdk v") {
-            return Err(format!(
-                "rutis-sdk is in the plugin graph through a private dependency:\n{line}\n\
+    let output = Command::new("cargo")
+        .args(["tree", "-i", "rutis-sdk", "--locked", "--manifest-path"])
+        .arg(manifest)
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "rutis-sdk entered the plugin graph through a private dependency (the reverse path below shows who introduced it):\n{path}\
                  remove that dependency; with --bundle the SDK comes from the bundle, not from source"
-            ));
-        }
+        ));
     }
     Ok(())
 }
@@ -515,9 +515,10 @@ fn pack_plugin_bundle(args: &Args) -> Result<(), String> {
         .map(|o| o.status.success())
         .unwrap_or(false)
     {
-        return Err(format!(
+        return Err(
             "the plugin workspace's Cargo.lock is out of date with its Cargo.toml (or cargo is offline); run `cargo update --workspace` there and retry"
-        ));
+                .into(),
+        );
     }
     check_bundle_manifest_tree(&manifest, &workspace)?;
     check_shared_duplicates(&manifest)?;
@@ -930,7 +931,7 @@ fn pack_sdk_bundle(args: &[String]) -> Result<(), String> {
         .get("build")
         .cloned()
         .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-    fs::copy(&bundle_dir.join("sdk.toml"), output.join("sdk.toml"))
+    fs::copy(bundle_dir.join("sdk.toml"), output.join("sdk.toml"))
         .map_err(|e| format!("copy sdk.toml: {e}"))?;
     for (name, key) in [
         ("Cargo.lock", "lock_sha256"),

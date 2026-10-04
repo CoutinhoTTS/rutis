@@ -129,7 +129,7 @@ cargo xtask pack-plugin --bundle <sdk-bundle 目录> \
 | --- | --- |
 | `E0463: can't find crate for rutis_sdk`（且没动过配置） | 环境里有 `RUSTFLAGS`，覆盖了 `.cargo/config.toml`；清掉再试。若刚改过 sdk-bundle 位置，检查 config 里的两个路径 |
 | `E0514: found crate rutis_sdk compiled by an incompatible version of rustc` | 工具链不是构建包固定的那个；把包里的 `rust-toolchain.toml` 放进工作区（rustup 会自动切换） |
-| 打包失败，提到 `colliding StableCrateId` 或"overlaps the SDK's dependency closure" | 某个私有依赖把 `tokio`/`serde` 系拉进了你的图，而且你的代码用到了它。去掉该依赖，或改用 `rutis_sdk::` 的再导出 |
+| 打包失败，提到 `colliding StableCrateId`、"overlaps the SDK's dependency closure"，或报 `E0463`/`E0277` 且指向 `tokio`/`serde` 系 crate | 某个私有依赖把共享 crate 拉进了你的图，而且你的代码用到了它。`colliding` 形态带打包器的解释；`E0463` 形态（报找不到私有 crate 本身）没有注解，含义相同。去掉该依赖，或改用 `rutis_sdk::` 的再导出 |
 | 打包失败，"declares … as a direct dependency" | `Cargo.toml` 里直接写了共享 crate；换成 `rutis_sdk::` 再导出 |
 | 打包失败，"bundle is missing …" / "differs from the bundle manifest" | 构建包缺件或被改动；重新下载 |
 | E0277：私有类型的 trait 不满足（比如 `Serialize`） | 跨副本 trait 不互通；数据走 `json!`/`ConfigValue`（见上文） |

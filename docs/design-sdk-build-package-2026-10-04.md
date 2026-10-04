@@ -210,12 +210,13 @@ CI：三个 dylib 作业各加一步 `tools/test-sdk-bundle.sh`（产出构建�
 | 私有依赖在 SDK 树外（`base64`） | 编译、打包、发布宿主加载全部通过 |
 | 私有 `serde`（derive），副本与闭包共存 | 编译加载通过；**跨副本 trait 不可混用**——私有类型的 `serde::Serialize` 不是闭包内 serde_json 要求的 trait，编译期 E0277 拒绝（§五规则的实证：跨界数据走 `json!`/`ConfigValue`，私有类型不出现在 SDK API 边界） |
 | 私有 `serde`（无 derive） | 正常；SDK 闭包实际只含 `serde_core`/`serde_json`，与插件侧 `serde` 零重叠 |
-| 私有依赖间接拉 `tokio`（`tokio-stream`）且**代码引用其 API** | 编译期 `colliding StableCrateId`（先撞 `pin_project_lite`：传递依赖 feature 全同 → 同 disambiguator），打包器转发为可读解释 |
+| 私有依赖间接拉 `tokio`（`tokio-stream`）且**代码引用其 API** | 编译期失败。**错误形态不稳定**：`colliding StableCrateId`（先撞 `pin_project_lite`：传递依赖 feature 全同 → 同 disambiguator，此时打包器附加指明出路的解释）或无注解的 `E0463`（报找不到私有 crate 本身），两种形态含义相同 |
 | 同上，仅声明依赖不引用 API | 不加载副本元数据，不触发冲突，正常通过——冲突检测以实际引用为准 |
 
-结论：§五的共存规则与拒绝语义全部按设计工作；间接重叠的拒绝点是 rustc 的编译期冲突，
-打包器负责把 `colliding StableCrateId` 转成指明出路的错误（E2a/E2d 已进
-`tools/test-sdk-bundle.sh`，B/C 场景的行为记录于此）。
+结论：§五的共存规则与拒绝语义全部按设计工作；间接重叠的拒绝点是 rustc 的编译期冲突。
+`colliding StableCrateId` 形态由打包器附加指明出路的解释；`E0463` 形态无法可靠区分于
+其他缺 crate 场景，不加注解（E2a/E2d 断言两种形态并要求错误点名重叠的 crate；B/C
+场景的行为记录于此）。
 
 ## 七、实施步骤
 
