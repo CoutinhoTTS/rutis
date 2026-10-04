@@ -93,6 +93,23 @@ impl ServiceCatalog {
         self
     }
 
+    /// Name a service shared across languages: a `dyn HostDispatch` at
+    /// `host_key(name)`, provided by Rust or by a row of any runtime. Rows
+    /// that inject a shared name wait for it in rutis; other names a
+    /// JavaScript row injects are left to Cordis.
+    #[cfg(all(unix, feature = "interop"))]
+    pub fn register_shared(&mut self, name: impl Into<String>) -> &mut Self {
+        let name = name.into();
+        let key = rutis_interop::host_key(&name);
+        self.register_keyed::<dyn rutis_interop::HostDispatch>(name, key)
+    }
+
+    /// Whether `name` was registered with [`ServiceCatalog::register_shared`].
+    #[cfg(all(unix, feature = "interop"))]
+    pub fn is_shared(&self, name: &str) -> bool {
+        self.key(name) == Some(&rutis_interop::host_key(name))
+    }
+
     /// The key of a named service.
     pub fn key(&self, name: &str) -> Option<&TypeKey> {
         self.services.get(name).map(|s| &s.key)

@@ -138,6 +138,13 @@ impl Chain {
         self.resolvers.push(Arc::new(resolver));
         self
     }
+
+    /// Add a resolver that something else holds too, such as an
+    /// `InteropResolver` shared with its `RuntimeRowsPlugin`.
+    pub fn with_shared(mut self, resolver: Arc<dyn Resolver>) -> Self {
+        self.resolvers.push(resolver);
+        self
+    }
 }
 
 impl Resolver for Chain {

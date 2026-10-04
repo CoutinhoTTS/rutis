@@ -20,7 +20,7 @@ pub use catalog::{ExprScope, Expressions, ServiceCatalog};
 pub use edit::{apply_edit, Edit};
 pub use error::{Failure, LoaderError, PersistError};
 #[cfg(all(unix, feature = "interop"))]
-pub use interop::{resolve_entry, InteropResolver};
+pub use interop::{resolve_entry, CordisRuntimeRows, InteropResolver, RuntimeRowsPlugin};
 pub use loader::{
     Editable, EntryInfo, EntryStatus, Isolate, Loader, LoaderChanged, LoaderOptions, LoaderPlugin,
     NewEntry, PendingEditDropped, ReconcileReport, RowInfo,
