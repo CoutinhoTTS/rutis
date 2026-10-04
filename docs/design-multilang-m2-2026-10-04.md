@@ -25,6 +25,8 @@
 
 **Python 插件配置变化即重启。** 叶子插件没有 volatile 字段，`rows.update` 等同于卸载后重新装载。
 
+**Python 插件改了代码可以重新加载。** 按模块名加载的运行时没有包版本可比，所以 resolver 不缓存它的解析结果，每次都问运行时；运行时发现模块文件的修改时间或大小变了就重新导入它。`Loader::reload` 因此会拿到新代码和新的声明。只重新导入插件模块本身。
+
 **语言之间解耦。** 每种语言是一个 Cargo feature（rutis-interop 的 `node`、`python`；rutis-loader 的 `node`、`python`，`interop` 等于两者），应用只编译它启用的语言；不挂运行时插件就不会有进程。共用的部分（协议、进程管理、服务投影、`RuntimePlugin`、`Launcher`）和语言无关。类型改成和语言无关的名字（`RuntimePlugin`、`Runtime`、`RuntimeRows`），旧的 `Cordis*` 名字保留为弃用别名。CI 分别检查只开一种语言时能否编译。
 
 ## 三、一致性测试覆盖的行为
@@ -41,3 +43,4 @@
 - Swift（M3）、Go（M4），按总体稿等具体需求。
 - 对象引用（带方法和属性的对象）转给 Node 侧：`peer.mjs` 仍不接受 Rust 导出的对象引用；Python 侧同样不接受。函数和异步结果可以转交。
 - Python 插件没有配置的就地更新，也没有从类型注解生成配置 Schema（调研 `python.md` §五 的约定），目前 `Config` 直接写 JSON Schema。
+- 重新加载只重新导入插件模块本身，不包括它导入的模块。

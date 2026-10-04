@@ -151,8 +151,13 @@ impl Resolver for InteropResolver {
                     name: name.to_owned(),
                 });
             };
-            if let Some(found) = self.resolved.lock().unwrap().get(name) {
-                return Ok(found.clone());
+            // A runtime that loads by module name is asked every time: a
+            // reload must see the module's current declarations, and there
+            // is no package version to tell that it changed.
+            if self.prefix.is_none() {
+                if let Some(found) = self.resolved.lock().unwrap().get(name) {
+                    return Ok(found.clone());
+                }
             }
             // The declarations need Node. Without a running runtime the row
             // still resolves (it waits for the runtime like any dependency),
@@ -215,10 +220,12 @@ impl Resolver for InteropResolver {
                 }),
                 foreign_scope: true,
             });
-            self.resolved
-                .lock()
-                .unwrap()
-                .insert(name.to_owned(), resolved.clone());
+            if self.prefix.is_none() {
+                self.resolved
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_owned(), resolved.clone());
+            }
             Ok(resolved)
         })
     }

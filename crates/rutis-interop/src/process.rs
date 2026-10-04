@@ -487,7 +487,7 @@ impl Process {
                 let _ = node_package;
                 return Err(Error::Value(
                     "no launcher given, and the Node runtime needs the `node` feature".into(),
-                ))
+                ));
             }
             #[cfg(feature = "node")]
             None => {

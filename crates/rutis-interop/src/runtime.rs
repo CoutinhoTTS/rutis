@@ -175,6 +175,9 @@ impl RuntimePlugin {
             .arg("rutis_runtime")
             .env("PYTHONPATH", path)
             .env("PYTHONUNBUFFERED", "1")
+            // A plugin imported again after an edit must not come from a
+            // bytecode file written in the same second as the old source.
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .cwd(&project);
         Self {
             runtime: "py".into(),

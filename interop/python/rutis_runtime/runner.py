@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import os
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -109,6 +111,8 @@ class Runtime:
         self.handles: dict[str, dict] = {}
         self.version = 0
         self.closing = False
+        # The source file of each plugin module when it was imported.
+        self.stamps: dict[str, tuple | None] = {}
 
     # ── Services ─────────────────────────────────────────────────
 
@@ -175,7 +179,7 @@ class Runtime:
                 raise ValueError(f"service name {name} cannot be projected")
             if name in self.slots:
                 raise ValueError(f"service {name} is already exported by row {self.slots[name].row}")
-        plugin = sdk.load(importlib.import_module(module))
+        plugin = sdk.load(self.module(module))
         row = Row(key, module, config, exports)
         self.rows[key] = row
         for name, methods in exports.items():
@@ -223,8 +227,21 @@ class Runtime:
         await self.unload(key)
         await self.load(key, row.module, config, row.exports)
 
+    def module(self, name: str):
+        """The plugin module, imported again when its source file changed
+        since (rutis-loader's reload asks for the new code). Only the plugin
+        module itself is imported again, not the modules it imports."""
+        module = sys.modules.get(name)
+        if module is None:
+            module = importlib.import_module(name)
+        elif name in self.stamps and _stamp(module) != self.stamps[name]:
+            importlib.invalidate_caches()
+            module = importlib.reload(module)
+        self.stamps[name] = _stamp(module)
+        return module
+
     def describe(self, module: str) -> dict:
-        plugin = sdk.load(importlib.import_module(module))
+        plugin = sdk.load(self.module(module))
         return {"config": plugin.config, "inject": plugin.inject, "provides": plugin.provides}
 
     async def dispose(self) -> None:
@@ -294,6 +311,15 @@ class Runtime:
     async def _dispose_and_drain(self) -> None:
         await self.dispose()
         await self.peer.drain()
+
+
+def _stamp(module) -> tuple | None:
+    path = getattr(module, "__file__", None)
+    try:
+        stat = os.stat(path)
+    except (OSError, TypeError):
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 async def _settle(value: Any) -> Any:
