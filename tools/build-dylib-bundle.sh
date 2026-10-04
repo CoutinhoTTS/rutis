@@ -63,6 +63,11 @@ if test "$dylib_os" = windows; then
 else
   env "$loader_path_var=$bundle" "$bundle/rutis-cli-host" --sdk-info > "$bundle/sdk.toml"
 fi
+# The lock and the toolchain pin are the ones this SDK was built with; the
+# sdk-bundle producer (cargo xtask pack-sdk-bundle) copies them from here
+# instead of from a possibly-changed repository checkout.
+cp "$repo_dir/Cargo.lock" "$bundle/Cargo.lock"
+cp "$repo_dir/rust-toolchain.toml" "$bundle/rust-toolchain.toml"
 cat >> "$bundle/sdk.toml" <<EOF
 
 [build]

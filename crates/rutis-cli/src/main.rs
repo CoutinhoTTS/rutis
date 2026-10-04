@@ -103,7 +103,11 @@ mod bundle_env_tests {
 
     #[test]
     fn child_environment_recovers_callers_loader_values() {
-        let p = if cfg!(target_os = "macos") { "DYLD_" } else { "LD_" };
+        let p = if cfg!(target_os = "macos") {
+            "DYLD_"
+        } else {
+            "LD_"
+        };
         let library_path = format!("{p}LIBRARY_PATH");
         let other = format!("{p}PRELOAD");
         let saved_library_path = format!("RUTIS_ORIG_{library_path}");
@@ -203,6 +207,11 @@ async fn cli_main() {
             }
         }
     };
+    #[cfg(feature = "dylib-plugins")]
+    if load_only && plugin.is_none() {
+        eprintln!("--load-only needs --plugin <DIR> (there is nothing to load)");
+        std::process::exit(2);
+    }
     let model_id = if scripted {
         "scripted".to_string()
     } else {

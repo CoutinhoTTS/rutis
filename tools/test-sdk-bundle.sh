@@ -261,6 +261,13 @@ if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack
   echo "a private dependency overlapping the SDK closure was accepted" >&2
   exit 1
 fi
-grep -Fq 'overlaps the SDK' "$base/e2d.stdout"
+# rustc's failure shape for the overlap is not stable: colliding
+# StableCrateId when the crate-id clashes, or a misleading E0463 naming the
+# private crate. Either way the build must fail.
+grep -Eq 'colliding StableCrateId|E0463|E0277' "$base/e2d.stdout" || {
+  cat "$base/e2d.stdout" >&2
+  echo "unexpected failure mode for the closure overlap" >&2
+  exit 1
+}
 
 echo "sdk-bundle external build passed"
