@@ -7,7 +7,7 @@ use rutis_channel::{Channel, ChannelInfo, Closer, ConnectError};
 
 use crate::lines;
 
-struct Shut(UnixStream);
+pub(crate) struct Shut(pub(crate) UnixStream);
 impl Closer for Shut {
     fn close(&self, _reason: &str) {
         let _ = self.0.shutdown(Shutdown::Both);

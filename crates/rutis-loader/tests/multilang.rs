@@ -15,7 +15,7 @@ use rutis_loader::{
     Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderOptions, LoaderPlugin, Patch,
     RuntimeRowsPlugin, ServiceCatalog,
 };
-use rutis_transport_local::LocalRuntime;
+use rutis_runtime_local::LocalRuntime;
 use serde_json::{json, Value};
 
 // ── The plugins, once per language ──────────────────────────────

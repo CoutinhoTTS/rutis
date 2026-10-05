@@ -62,7 +62,7 @@ mod runtime;
 #[cfg(unix)]
 pub mod server;
 #[cfg(unix)]
-pub mod spawn;
+mod spawn;
 #[cfg(unix)]
 mod unix;
 

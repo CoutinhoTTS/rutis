@@ -55,7 +55,8 @@
 - `rutis-channel`：Channel、连接器契约、连接元信息与结构化错误；不依赖 rutis、bridge 或 interop，不包含具体承载实现。
 - `rutis-interop`：Session、codec、运行时契约及 RuntimePlugin；通过通用会话入口接入，不依赖 bridge 的 Peer 类型或具体承载。
 - `rutis-bridge`：Transport 服务及注册接口、identity、link、节点功能插件、Peer 到运行时的 Adapter；不依赖任何具体 transport crate。
-- `rutis-transport-local`：LocalPlugin（Unix socket 拨号；登记拉起配置后，`spawn:<名字>` 以继承 fd 拉起并接入进程，通道拥有进程）与 `LocalRuntime`（本机运行时组合：承载、兼容模式 link、运行时接入、`RuntimePlugin::session`）；不按内部机制继续拆 crate。拉起与退出监控的实现作为公开工具在 `rutis_interop::spawn`：`Process` 外观与本机承载共用这一份，interop 不能反向依赖承载 crate。
+- `rutis-transport-local`：LocalPlugin（Unix socket 拨号；登记拉起配置 `Spawn` 后，`spawn:<名字>` 以继承 fd 或回拨 socket 拉起并接入进程，通道拥有进程，通道的结束原因说明进程怎样结束，关闭通道后宽限 2 秒再结束进程）。它只依赖 rutis、rutis-channel、rutis-bridge，不认识进程里跑的是什么；不按内部机制继续拆 crate。
+- `rutis-runtime-local`：本机语言运行时组合 `LocalRuntime`（承载、兼容模式 link、运行时接入、`RuntimePlugin::session`）。语言怎样启动（程序、参数、通道交接方式）由 interop 的 `Launcher`（`Launcher::node` / `Launcher::python`）给出，组合 crate 把它转成承载的 `Spawn`。它不能放进 interop（interop → 承载 → bridge → interop 成环），也不属于 loader。`Process` 兼容外观保留自己的一份拉起代码，随外观一起移除。
 - `rutis-transport-websocket`：WebSocketPlugin，内部实现拨号、监听、TLS 接入、心跳与关闭处理。
 - `rutis-transport-memory`：MemoryPlugin，内部实现有界内存通道，支持测试与进程内互联。
 - `rutis-loader`：两类行集成、解析器及其组合。应用装配层选择具体承载，loader 不固定绑定承载清单。
@@ -76,7 +77,7 @@
 - bridge 的运行时接入 Adapter 与节点功能插件依赖 Peer，登记各自控制操作；RuntimePlugin 使用 interop 定义的通用会话入口，不直接依赖 Peer 类型。处理器随所属插件卸载注销。
 - Peer 提供端点 ID、Session、操作注册及对端功能宣告观察接口。会话仅归 link 所有。
 - 同一链接明确选择运行时或节点接入契约；不得对同一插件实例同时启用两套管理归属。
-- 本机运行时的会话来源：RuntimePlugin 的本机来源为 `local` 承载 + link（身份由拉起方指定），与远程来源走同一入口（`RuntimeSession#<名字>`）。link 的本机兼容模式（`LinkConfig::local_runtime`）说协议 2、不校验契约、不发 `link.offers`、会话结束后不重连；进程结束时 link 停止，运行时状态为 `Down(原因)`，`LocalRuntime` 的 `restart` 拉起新进程。`LocalRuntime` 的 apply 等到运行时就绪或 link 停止，启动期间可 dispose / restart，启动失败即失败。`RuntimePlugin::node` / `python` / `launcher` 自行拉起进程的路径保留为兼容层并标为弃用；`Process` 外观仅为生成代码和既有调用方保留，内部与之共用同一 Session 与拉起实现。
+- 本机运行时的会话来源：RuntimePlugin 的本机来源为 `local` 承载 + link（身份由拉起方指定），与远程来源走同一入口（`RuntimeSession#<名字>`）。link 的本机兼容模式（`LinkConfig::local_runtime`）说协议 2、不校验契约、不发 `link.offers`、会话结束后不重连；进程结束时 link 停止，运行时状态为 `Down(原因)`，`LocalRuntime` 的 `restart` 拉起新进程。`LocalRuntime` 的 apply 等到运行时就绪或 link 停止，启动期间可 dispose / restart，启动失败即失败。`RuntimePlugin::node` / `python` / `launcher` 自行拉起进程的路径保留为兼容层并标为弃用；`Process` 外观仅为生成代码和既有调用方保留，与之共用同一 Session 实现。
 
 ### Session 共享与资源归属
 

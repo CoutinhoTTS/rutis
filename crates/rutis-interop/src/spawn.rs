@@ -1,12 +1,11 @@
-//! Starting runtime processes: a runtime process is started and connected,
-//! either on an inherited socket (fd 3) or, for runtimes that cannot take
-//! one, on a Unix socket in a private directory that the process dials
-//! back; how it ends is watched and reported as the channel's end.
+//! How the `Process` compatibility facade starts its runtime process: on an
+//! inherited socket (fd 3) or, for runtimes that cannot take one, on a Unix
+//! socket in a private directory that the process dials back; how it ends
+//! is watched and reported as the session's end.
 //!
-//! The `Process` facade starts its processes with it, and so does the local
-//! transport (`rutis-transport-local`), through [`start`], for runtimes that
-//! get their sessions through a link. One implementation serves both: the
-//! local transport depends on this crate, not the reverse.
+//! Runtimes that get their sessions through a link are started by the local
+//! transport (`rutis-transport-local`), which has its own spawner; this copy
+//! goes with the facade.
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -20,11 +19,11 @@ use tokio::sync::{oneshot, watch};
 use crate::Error;
 
 /// The fd a runtime process finds its channel on (`fd:3`).
-pub const CHANNEL_FD: i32 = 3;
+const CHANNEL_FD: i32 = 3;
 
 /// How the process gets its channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Connect {
+pub(crate) enum Connect {
     /// One end of a socket pair, as fd 3: `fd:3 <first>`.
     Inherit,
     /// A socket path the process dials: `<path> <first>`.
@@ -152,104 +151,49 @@ fn traced(channel: Channel) -> Channel {
 /// The command a runtime process starts with: `launcher`, or the Node
 /// runtime of the npm package `node_package` (feature `node`), and how it
 /// takes its channel.
-pub fn command(
+pub(crate) fn command(
     launcher: Option<&crate::Launcher>,
     node_package: &Path,
 ) -> Result<(tokio::process::Command, Connect), Error> {
-    match launcher {
-        Some(launcher) => {
-            let mut command = tokio::process::Command::new(&launcher.program);
-            command
-                .args(&launcher.args)
-                .envs(launcher.env.iter().map(|(name, value)| (name, value)));
-            // Without a directory of its own, it runs where the application
-            // does.
-            if let Some(cwd) = &launcher.cwd {
-                command.current_dir(cwd);
-            }
-            let connect = match launcher.inherit_fd {
-                true => Connect::Inherit,
-                false => Connect::DialBack,
-            };
-            Ok((command, connect))
-        }
+    #[cfg(feature = "node")]
+    let node = crate::Launcher::node(node_package);
+    let launcher = match launcher {
+        Some(launcher) => launcher,
+        #[cfg(feature = "node")]
+        None => &node,
         #[cfg(not(feature = "node"))]
         None => {
             let _ = node_package;
-            Err(Error::Value(
+            return Err(Error::Value(
                 "no launcher given, and the Node runtime needs the `node` feature".into(),
-            ))
+            ));
         }
-        #[cfg(feature = "node")]
-        None => {
-            let mut command = tokio::process::Command::new("node");
-            command
-                .arg("--import")
-                .arg("tsx")
-                .arg(node_package.join("src/runner.mjs"))
-                .current_dir(node_package);
-            Ok((command, node_connect(node_package)))
-        }
+    };
+    let mut command = tokio::process::Command::new(&launcher.program);
+    command
+        .args(&launcher.args)
+        .envs(launcher.env.iter().map(|(name, value)| (name, value)));
+    // Without a directory of its own, it runs where the application does.
+    if let Some(cwd) = &launcher.cwd {
+        command.current_dir(cwd);
     }
-}
-
-/// Start a runtime process (see [`command`]) with `first` (its first plugin,
-/// or its anchor) and return its channel, which owns the process: closing
-/// it, or dropping all of it, ends the process, and its end says how the
-/// process ended (`Cordis process exited with …`).
-pub async fn start(
-    launcher: Option<&crate::Launcher>,
-    node_package: &Path,
-    first: &Path,
-) -> Result<Channel, Error> {
-    let (command, connect) = command(launcher, node_package)?;
-    let spawned = spawn(command, first, connect).await?;
-    let Channel {
-        sender,
-        receiver,
-        closer,
-        info,
-    } = spawned.channel;
-    Ok(Channel {
-        sender,
-        receiver,
-        closer: Arc::new(Owning {
-            closer,
-            _child: spawned.child,
-            _directory: spawned.directory,
-        }),
-        info,
-    })
-}
-
-/// A channel's closer that owns its process: dropped, it ends the process.
-struct Owning {
-    closer: Arc<dyn rutis_channel::Closer>,
-    _child: Child,
-    _directory: Option<tempfile::TempDir>,
-}
-
-impl rutis_channel::Closer for Owning {
-    fn close(&self, reason: &str) {
-        self.closer.close(reason);
-    }
+    let connect = match launcher.inherit_fd {
+        true => Connect::Inherit,
+        false => Connect::DialBack,
+    };
+    Ok((command, connect))
 }
 
 /// Whether the Node runtime package at `package` takes an inherited channel:
 /// its `package.json` lists `"fd"` in `rutisChannels`. Older packages do
 /// not, and dial back.
 #[cfg(feature = "node")]
-pub(crate) fn node_connect(package: &Path) -> Connect {
+pub(crate) fn node_inherits(package: &Path) -> bool {
     let channels = std::fs::read(package.join("package.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|manifest| manifest.get("rutisChannels").cloned());
-    match channels {
-        Some(serde_json::Value::Array(channels)) if channels.iter().any(|c| c == "fd") => {
-            Connect::Inherit
-        }
-        _ => Connect::DialBack,
-    }
+    matches!(channels, Some(serde_json::Value::Array(channels)) if channels.iter().any(|c| c == "fd"))
 }
 
 /// The Node process, owned by a task that records how it ended. Dropping

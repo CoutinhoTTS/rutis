@@ -1,7 +1,8 @@
-//! A local language runtime: a process this machine starts, a link to it,
+//! Local language runtimes: a process this machine starts, a link to it,
 //! and the runtime plugin running its rows, composed. Its session comes the
 //! way a remote runtime's does (`RuntimeSession#<name>` from a link), only
-//! started here: the local transport spawns it on an inherited socket, the
+//! started here: the local transport (`rutis-transport-local`) spawns it on
+//! an inherited socket, the
 //! link speaks the compat protocol with it and does not reconnect, since a
 //! local runtime process is not restarted.
 //!
@@ -9,7 +10,12 @@
 //! plugin go, and the runtime's state says how it ended. Restarting the
 //! composition (`FiberView::restart`) starts a new process: that is the
 //! application's decision.
+//!
+//! What a language's process is (its program, arguments, how it takes its
+//! channel) comes from `rutis-interop` ([`Launcher`]); the transport only
+//! starts it.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,7 +28,11 @@ use rutis_channel::PeerId;
 use rutis_interop::{Launcher, RuntimeHandle, RuntimePlugin, RuntimeState};
 use serde_json::Value;
 
-use crate::{LocalTransport, Spawner};
+use rutis_transport_local::{Handover, LocalTransport, Spawn};
+
+/// Set to report every message crossing a runtime channel (direction and
+/// length, never content) on stderr, as for runtimes `Process` starts.
+const TRACE_VARIABLE: &str = "RUTIS_INTEROP_TRACE";
 
 /// A local runtime: mount it before the plugins (and the loader rows) that
 /// load into it. It provides what [`RuntimePlugin`] does (`Runtime#<name>`).
@@ -30,7 +40,8 @@ pub struct LocalRuntime {
     label: String,
     /// The runtime's name (`Runtime#<name>`).
     runtime_name: String,
-    spawner: Spawner,
+    launcher: Launcher,
+    anchor: PathBuf,
     runtime: RuntimePlugin,
 }
 
@@ -40,8 +51,8 @@ impl LocalRuntime {
     /// `anchor`: the `package.json` plugins and Cordis resolve from.
     #[cfg(feature = "node")]
     pub fn node(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
-        let (node_package, anchor) = (node_package.into(), anchor.into());
-        Self::with("node", None, node_package, anchor)
+        let launcher = Launcher::node(&node_package.into());
+        Self::with("node", launcher, anchor.into())
     }
 
     /// A Python runtime named `"py"`: `python3 -m rutis_runtime`, with the
@@ -51,7 +62,7 @@ impl LocalRuntime {
     pub fn python(sdk: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
         let (sdk, project) = (sdk.into(), project.into());
         let launcher = Launcher::python(&sdk, &project);
-        Self::with("py", Some(launcher), sdk, project)
+        Self::with("py", launcher, project)
     }
 
     /// A runtime started with `launcher`; it receives its channel and the
@@ -61,27 +72,34 @@ impl LocalRuntime {
         launcher: Launcher,
         anchor: impl Into<PathBuf>,
     ) -> Self {
-        let node_package = launcher.cwd.clone().unwrap_or_default();
-        Self::with(&name.into(), Some(launcher), node_package, anchor.into())
+        Self::with(&name.into(), launcher, anchor.into())
     }
 
-    fn with(
-        name: &str,
-        launcher: Option<Launcher>,
-        node_package: PathBuf,
-        anchor: PathBuf,
-    ) -> Self {
+    fn with(name: &str, launcher: Launcher, anchor: PathBuf) -> Self {
         Self {
             label: format!("{name}-runtime (local)"),
             runtime_name: name.to_owned(),
-            spawner: Spawner {
-                launcher,
-                node_package,
-                first: anchor.clone(),
-                peer: PeerId::new(name).unwrap_or_else(|_| PeerId::new("runtime").unwrap()),
-            },
-            runtime: RuntimePlugin::session(name, anchor),
+            launcher,
+            runtime: RuntimePlugin::session(name, anchor.clone()),
+            anchor,
         }
+    }
+
+    /// The process to start: the launcher, given its channel and the
+    /// anchor as its last two arguments; the endpoint is the runtime's name.
+    fn spawn(&self) -> Spawn {
+        let peer = PeerId::new(self.runtime_name.clone())
+            .unwrap_or_else(|_| PeerId::new("runtime").expect("a valid id"));
+        let mut spawn = Spawn::new(self.launcher.program.clone(), peer);
+        spawn.args = self.launcher.args.clone();
+        spawn.env = self.launcher.env.clone();
+        spawn.cwd = self.launcher.cwd.clone();
+        spawn.handover = match self.launcher.inherit_fd {
+            true => Handover::Inherit,
+            false => Handover::DialBack,
+        };
+        spawn.trailing = vec![OsString::from(&self.anchor)];
+        spawn
     }
 
     /// Declare the methods of the rutis service at `host_key(name)`, as
@@ -96,18 +114,13 @@ impl LocalRuntime {
         let name: String = name.into();
         self.runtime = self.runtime.named(name.clone());
         self.label = format!("{name}-runtime (local)");
-        if let Ok(peer) = PeerId::new(name.clone()) {
-            self.spawner.peer = peer;
-        }
         self.runtime_name = name;
         self
     }
 
     /// Run the Python runtime with this interpreter instead of `python3`.
-    pub fn interpreter(mut self, program: impl Into<std::ffi::OsString>) -> Self {
-        if let Some(launcher) = &mut self.spawner.launcher {
-            launcher.program = program.into();
-        }
+    pub fn interpreter(mut self, program: impl Into<OsString>) -> Self {
+        self.launcher.program = program.into();
         self
     }
 
@@ -128,12 +141,13 @@ impl Plugin for LocalRuntime {
             // child: what the link waits for must come from a provider that
             // is running, and this one is still starting.
             let kind = format!("local:{}", self.runtime_name);
+            let spawn = self.spawn();
+            let peer = spawn.peer.clone();
             ctx.plugin(Carrier {
                 label: format!("{kind} carrier"),
                 kind: kind.clone(),
-                spawner: self.spawner.clone(),
+                spawn,
             });
-            let peer = self.spawner.peer.clone();
             let link = LinkPlugin::new(
                 LinkConfig::dial(peer.clone(), &kind, &kind, "spawn:runtime").local_runtime(),
             );
@@ -177,7 +191,7 @@ impl Plugin for LocalRuntime {
 struct Carrier {
     label: String,
     kind: String,
-    spawner: Spawner,
+    spawn: Spawn,
 }
 
 impl Plugin for Carrier {
@@ -188,7 +202,12 @@ impl Plugin for Carrier {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let transport = Arc::new(LocalTransport::default());
-            transport.spawner("runtime", self.spawner.clone());
+            transport.spawner("runtime", self.spawn.clone());
+            if std::env::var_os(TRACE_VARIABLE).is_some() {
+                transport.trace(Arc::new(|line: &str| {
+                    eprintln!("rutis-interop trace: {line}")
+                }));
+            }
             let closing = transport.clone();
             ctx.effect(move || {
                 Effect::Disposer(Box::new(move || {

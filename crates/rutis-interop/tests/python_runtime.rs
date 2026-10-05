@@ -189,7 +189,7 @@ async fn a_runtime_without_the_row_contract_fails_to_start() {
              runpy.run_module('rutis_runtime', run_name='__main__')",
         )
         .env("PYTHONPATH", path);
-    let runtime = rutis_transport_local::LocalRuntime::launcher("old", launcher, dir.path());
+    let runtime = rutis_runtime_local::LocalRuntime::launcher("old", launcher, dir.path());
     let handle = runtime.handle();
     let ctx = Ctx::root().unwrap();
     let view = ctx.plugin(runtime);

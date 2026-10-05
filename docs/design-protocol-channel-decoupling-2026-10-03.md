@@ -226,7 +226,7 @@ pub enum ConnectError {
 
 - `Session` 以 `Connection` 提供会话机制，按端点契约接入操作封装，可建立在任意 `Channel` 上；不要求叶子运行时具备节点桥操作。
 - `Process` = `spawn` 产出的子进程句柄 + `Session`；D1 保留全部已有构造函数和方法，生成代码及 `CordisRuntimePlugin` 继续使用该外观。
-- `rutis-bridge/local` 可拉起完整框架节点或叶子语言运行时（登记拉起配置，拨号 `spawn:<名字>`）；本机语言运行时由 `rutis_transport_local::LocalRuntime` 组合承载、link 与运行时接入。生成代码迁至对应接入插件并完成兼容验收后，才可移除 `Process` 外观，运行时接入不以节点桥功能落地为前提。
+- `rutis-bridge/local` 可拉起完整框架节点或叶子语言运行时（登记拉起配置，拨号 `spawn:<名字>`）；本机语言运行时由 `rutis-runtime-local` 的 `LocalRuntime` 组合承载、link 与运行时接入，承载本身不认识语言。生成代码迁至对应接入插件并完成兼容验收后，才可移除 `Process` 外观，运行时接入不以节点桥功能落地为前提。
 - 启动参数：`<程序> <通道> <插件或 project>`；通道为 `fd:3`、`unix:/path` 或裸路径。N1 起新会话格式需要端点 id 时追加 `--id <id>`，由启动方指定；兼容会话不传。
 - 是否用继承 fd 由启动方决定：Node 运行时包声明 `rutisChannels` 含 `fd` 时使用；Python 运行时由 `RuntimePlugin::python` 启用；自定义 `Launcher` 以 `inherit_fd()` 声明，未声明的沿用路径方式。
 - 继承 fd：Rust 用 `UnixStream::pair()`，在 `pre_exec` 中 `dup2` 到 fd 3；只允许该 fd 作为通道被继承，其余 fd 保持 `CLOEXEC`，标准流按原有用途保留。stdout 不承载协议帧，可供插件输出。

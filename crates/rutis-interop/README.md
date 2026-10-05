@@ -139,7 +139,7 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 
 `Mount { anchor: Some(package_json), .. }` 不带插件时启动一个空的 Cordis Context，之后用 `Process::load_row` / `unload_row` 逐个装载、卸载插件，`describe_row` 读取插件声明的内容：schemastery `Config` 转成的 JSON Schema、`inject` 的服务名，以及包的 `package.json` 里 `rutis.provides` 声明的、要提供给 rutis 的服务和方法形状。`load_row_exporting` 装载时把这些服务投到 rutis（`row_projection`，键为 `host_key(name)`）；`lease_host` 按行向 Cordis 注册宿主服务，最后一个使用者释放后撤销。rutis-loader 的 `InteropResolver` 就是这样把 JavaScript 插件作为行来管理的。
 
-要按 rutis 的生命周期管理这个 Context，挂载运行时插件。本机运行时用 [`rutis-transport-local`](../rutis-transport-local) 的 `LocalRuntime`：本机承载以继承 fd 拉起进程，link 以兼容协议（2）接入，`RuntimePlugin` 在这条会话上提供 `Runtime` 服务；清理时先撤销服务，再关闭进程。远程运行时用 `RuntimePlugin::remote(名字)`，会话来自到它的 link（见 rutis-bridge 的 `RuntimeAccessPlugin`）。两种运行时的行完全一样。（`RuntimePlugin::node` / `python` / `launcher` 自己拉起进程，是保留的兼容路径，已标为弃用。）
+要按 rutis 的生命周期管理这个 Context，挂载运行时插件。本机运行时用 [`rutis-runtime-local`](../rutis-runtime-local) 的 `LocalRuntime`：本机承载（`rutis-transport-local`）以继承 fd 拉起进程，link 以兼容协议（2）接入，`RuntimePlugin` 在这条会话上提供 `Runtime` 服务；清理时先撤销服务，再关闭进程。远程运行时用 `RuntimePlugin::remote(名字)`，会话来自到它的 link（见 rutis-bridge 的 `RuntimeAccessPlugin`）。两种运行时的行完全一样。（`RuntimePlugin::node` / `python` / `launcher` 自己拉起进程，是保留的兼容路径，已标为弃用。）
 
 - 运行时本身不依赖任何服务。逐个装载的插件用到哪个宿主服务，就由那个插件去等它、在运行期间租用它（`Process::lease_host`），宿主服务撤销时只有用到它的插件停下。
 - `.host(名字, 方法)` 只声明宿主服务的方法形状，给没有自己报出形状（`HostDispatch::methods`）的服务用；它不再让运行时等待这个服务。
@@ -162,7 +162,7 @@ let view = root.plugin(runtime);
 | `node` | Node 运行时、构建期代码生成（`build`，静态挂载用）及其依赖 syn、quote、toml | 开 |
 | `python` | Python 运行时 | 关 |
 
-`LocalRuntime::node` / `python` 在 `rutis-transport-local` 里，用同名 feature 打开。
+`LocalRuntime::node` / `python` 在 `rutis-runtime-local` 里，用同名 feature 打开；语言怎样启动由这里的 `Launcher::node` / `Launcher::python` 给出。
 
 协议、进程管理、服务投影（`Process`、`Projection`、`RuntimePlugin` 本身、`Launcher`）不属于任何一种语言，总是可用。只用 Python 的应用写 `rutis-interop = { version = "0.3", default-features = false, features = ["python"] }`；不挂运行时插件，就不会启动任何进程。
 

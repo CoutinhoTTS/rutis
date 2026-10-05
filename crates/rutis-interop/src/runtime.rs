@@ -173,7 +173,7 @@ impl RuntimePlugin {
     #[cfg(feature = "node")]
     #[deprecated(
         since = "0.4.0",
-        note = "a local runtime is rutis_transport_local::LocalRuntime: its process started by the local transport, its session over a link"
+        note = "a local runtime is rutis_runtime_local::LocalRuntime: its process started by the local transport, its session over a link"
     )]
     pub fn node(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
         Self {
@@ -213,7 +213,7 @@ impl RuntimePlugin {
     #[cfg(feature = "python")]
     #[deprecated(
         since = "0.4.0",
-        note = "a local runtime is rutis_transport_local::LocalRuntime: its process started by the local transport, its session over a link"
+        note = "a local runtime is rutis_runtime_local::LocalRuntime: its process started by the local transport, its session over a link"
     )]
     pub fn python(sdk: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
         let (sdk, project) = (sdk.into(), project.into());
@@ -247,7 +247,7 @@ impl RuntimePlugin {
     /// The compatibility path: this plugin starts the process itself.
     #[deprecated(
         since = "0.4.0",
-        note = "a local runtime is rutis_transport_local::LocalRuntime: its process started by the local transport, its session over a link"
+        note = "a local runtime is rutis_runtime_local::LocalRuntime: its process started by the local transport, its session over a link"
     )]
     pub fn launcher(
         name: impl Into<String>,
@@ -292,7 +292,7 @@ impl RuntimePlugin {
 
     /// A runtime on this machine whose session something else provides
     /// (`RuntimeSession#<name>`): a link to the process the local transport
-    /// starts, as `rutis_transport_local::LocalRuntime` composes it. Its
+    /// starts, as `rutis_runtime_local::LocalRuntime` composes it. Its
     /// plugins resolve from `anchor`, as for a runtime this plugin starts.
     pub fn session(name: impl Into<String>, anchor: impl Into<PathBuf>) -> Self {
         let runtime: String = name.into();

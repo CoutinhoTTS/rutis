@@ -136,6 +136,23 @@ impl Launcher {
         self
     }
 
+    /// The Node runtime of the npm package `node_package` (`interop/node`,
+    /// or a deployed `@arcships/rutis-interop`): `node --import tsx
+    /// src/runner.mjs` in the package, on an inherited socket when the
+    /// package says it takes one (`rutisChannels` lists `"fd"`).
+    #[cfg(feature = "node")]
+    pub fn node(node_package: &std::path::Path) -> Self {
+        let launcher = Launcher::new("node")
+            .arg("--import")
+            .arg("tsx")
+            .arg(node_package.join("src/runner.mjs"))
+            .cwd(node_package);
+        match crate::spawn::node_inherits(node_package) {
+            true => launcher.inherit_fd(),
+            false => launcher,
+        }
+    }
+
     /// The Python runtime: `python3 -m rutis_runtime`, with the SDK
     /// directory `sdk` (`interop/python`) and then `project` ahead of the
     /// inherited `PYTHONPATH`, in `project`, on an inherited socket.

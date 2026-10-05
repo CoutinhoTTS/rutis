@@ -39,6 +39,7 @@ libc = "0.2"
 
 [dev-dependencies]
 rutis-transport-local = { path = "../rutis-transport-local" }
+rutis-runtime-local = { path = "../rutis-runtime-local", default-features = false }
 rutis-bridge = { path = "../rutis-bridge" }
 rutis-transport-websocket = { path = "../rutis-transport-websocket" }
 rutis-channel = { path = "../rutis-channel", features = ["testing"] }

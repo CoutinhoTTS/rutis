@@ -1,0 +1,28 @@
+[package]
+name = "rutis-runtime-local"
+description = "Local language runtimes for rutis: a process the local transport starts, a link to it, and the runtime running its plugins"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["rutis", "runtime", "interop"]
+categories = ["development-tools"]
+
+[dependencies]
+rutis = { path = "../rutis", version = "0.6.0" }
+rutis-channel = { path = "../rutis-channel", version = "0.1.0" }
+rutis-bridge = { path = "../rutis-bridge", version = "0.1.0" }
+rutis-interop = { path = "../rutis-interop", version = "0.3.0", default-features = false }
+rutis-transport-local = { path = "../rutis-transport-local", version = "0.1.0" }
+serde_json = "1"
+tokio.workspace = true
+
+[features]
+default = ["node"]
+# The local runtimes of these languages (LocalRuntime::node, ::python).
+node = ["rutis-interop/node"]
+python = ["rutis-interop/python"]
+
+[dev-dependencies]
+tempfile = "3"

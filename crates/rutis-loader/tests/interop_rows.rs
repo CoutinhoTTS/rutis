@@ -15,7 +15,7 @@ use rutis_loader::{
     Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin,
     Patch, RuntimeRows, RuntimeRowsPlugin, ServiceCatalog,
 };
-use rutis_transport_local::LocalRuntime;
+use rutis_runtime_local::LocalRuntime;
 use serde_json::{json, Value};
 
 const PROVIDER: &str = r#"

@@ -3181,6 +3181,7 @@ dependencies = [
  "rutis",
  "rutis-bridge",
  "rutis-channel",
+ "rutis-runtime-local",
  "rutis-transport-local",
  "rutis-transport-memory",
  "rutis-transport-websocket",
@@ -3201,7 +3202,7 @@ dependencies = [
  "rutis-bridge",
  "rutis-channel",
  "rutis-interop",
- "rutis-transport-local",
+ "rutis-runtime-local",
  "rutis-transport-memory",
  "rutis-transport-websocket",
  "schemars",
@@ -3211,6 +3212,20 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "rutis-runtime-local"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-bridge",
+ "rutis-channel",
+ "rutis-interop",
+ "rutis-transport-local",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -3228,11 +3243,10 @@ dependencies = [
 name = "rutis-transport-local"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rutis",
  "rutis-bridge",
  "rutis-channel",
- "rutis-interop",
- "serde_json",
  "tempfile",
  "tokio",
 ]

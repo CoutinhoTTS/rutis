@@ -1,5 +1,5 @@
 //! Plugins of other languages as loader rows, each language in its own
-//! runtime process: one on this machine (`rutis_transport_local::LocalRuntime`,
+//! runtime process: one on this machine (`rutis_runtime_local::LocalRuntime`,
 //! the process started by the local transport and its session over a link),
 //! or one elsewhere ([`RuntimePlugin::remote`], its session over a link to
 //! it). Either way the rows are the same.
@@ -156,7 +156,7 @@ impl InteropResolver {
     }
 
     /// Rows of a runtime that loads plugins by module name, such as a
-    /// Python runtime (`rutis_transport_local::LocalRuntime::python`): a row named
+    /// Python runtime (`rutis_runtime_local::LocalRuntime::python`): a row named
     /// `<runtime name>:<module>` (`py:weather.plugin`) loads `<module>`.
     pub fn modules(runtime: RuntimeHandle) -> Self {
         let prefix = format!("{}:", runtime.name());

@@ -11,7 +11,7 @@ use rutis_interop::{host_key, HostDispatch};
 use rutis_loader::{
     Chain, InteropResolver, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin,
 };
-use rutis_transport_local::LocalRuntime;
+use rutis_runtime_local::LocalRuntime;
 use serde_json::{json, Value};
 
 #[derive(Clone, Default)]

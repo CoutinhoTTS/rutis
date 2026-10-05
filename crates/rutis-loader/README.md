@@ -54,7 +54,7 @@ JavaScript 行与 rutis 按名字共享服务，键都是 `rutis_interop::host_k
 
 - 插件 `inject` 的服务名，在 catalog 里用 `register_shared` 登记过的，由 rutis 门控：服务就绪才启动这一行，撤销就停下，运行期间把它注册进 Cordis。没登记的名字仍交给 Cordis 自己门控（同一个 Node 进程里插件之间的依赖）。
 - 插件所在包的 `package.json` 里 `rutis.provides` 声明的服务（`{ "名字": { "方法": "sync" | "async" } }`）会投到 rutis，注册在这一行的 fiber 上，Rust 插件和其他行可以按名字 inject。同一个 Node 进程里的行用它时直接拿 Cordis 里的原生对象。
-- 应用依次挂载运行时（本机用 `rutis_transport_local::LocalRuntime`，远程用 `RuntimePlugin::remote` 加 link）、`LoaderPlugin`、`RuntimeRowsPlugin`，并让后两者共用同一个 `InteropResolver`：
+- 应用依次挂载运行时（本机用 `rutis_runtime_local::LocalRuntime`，远程用 `RuntimePlugin::remote` 加 link）、`LoaderPlugin`、`RuntimeRowsPlugin`，并让后两者共用同一个 `InteropResolver`：
 
 ```rust
 let mut catalog = ServiceCatalog::new();
