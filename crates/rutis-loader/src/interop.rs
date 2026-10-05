@@ -381,10 +381,11 @@ impl Plugin for JsRow {
                 .runtime()
                 .clone();
             let process = runtime.process().clone();
-            // Every lease taken is released on every path: by the cleanup
-            // once the row runs, here when it does not get that far. The
-            // kernel waits for apply to finish, so this frame always gets
-            // to release them.
+            // Every lease taken is released: by the cleanup once the row
+            // runs, here when it does not get that far. The kernel waits for
+            // apply to finish, so this frame gets to release them; only a
+            // panic in it leaves them raised, in a runtime whose state is
+            // then unknown anyway.
             let mut leases: Vec<HostLease> = Vec::new();
             let (key, projection) = match self.start(ctx, &runtime, &mut leases).await {
                 Ok(started) => started,
