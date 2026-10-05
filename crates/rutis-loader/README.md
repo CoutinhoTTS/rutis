@@ -40,4 +40,25 @@ loader.update("my-row", serde_json::json!({ "level": 2 })).await?;
 | --- | --- | --- |
 | `Builtins` | 注册时给的任意名字 | 编译进宿主的插件 |
 | `rutis_dylib::DylibResolver` | `dylib:<目录>` | dylib 插件（rutis-dylib 的 `loader` feature，Linux、macOS、Windows x64/MSVC） |
-| `InteropResolver` | npm 包名、包的子路径、文件路径 | JavaScript（Cordis）插件，装进 rutis-interop 的 `CordisRuntimePlugin`（一个 Node 进程与 Cordis Context）；各行 inject 运行时服务，运行时没就绪或进程退出时等待（本 crate 的 `interop` feature，Unix） |
+| `InteropResolver` | npm 包名、包的子路径、文件路径 | JavaScript（Cordis）插件，装进 rutis-interop 的 `CordisRuntimePlugin`（一个 Node 进程与 Cordis Context）；各行依赖 `RuntimeRowsPlugin` 提供的 `CordisRuntimeRows`，运行时没就绪或进程退出时等待（本 crate 的 `interop` feature，Unix）。服务按名字与 rutis 共享，见下文 |
+
+JavaScript 行与 rutis 按名字共享服务，键都是 `rutis_interop::host_key(名字)`（`dyn HostDispatch`）：
+
+- 插件 `inject` 的服务名，在 catalog 里用 `register_shared` 登记过的，由 rutis 门控：服务就绪才启动这一行，撤销就停下，运行期间把它注册进 Cordis。没登记的名字仍交给 Cordis 自己门控（同一个 Node 进程里插件之间的依赖）。
+- 插件所在包的 `package.json` 里 `rutis.provides` 声明的服务（`{ "名字": { "方法": "sync" | "async" } }`）会投到 rutis，注册在这一行的 fiber 上，Rust 插件和其他行可以按名字 inject。同一个 Node 进程里的行用它时直接拿 Cordis 里的原生对象。
+- 应用依次挂载 `CordisRuntimePlugin`、`LoaderPlugin`、`RuntimeRowsPlugin`，并让后两者共用同一个 `InteropResolver`：
+
+```rust
+let mut catalog = ServiceCatalog::new();
+catalog.register_shared("llm").register_shared("weather");
+let runtime = CordisRuntimePlugin::new(node_package, anchor);
+let resolver = Arc::new(InteropResolver::new(runtime.handle()).with_catalog(&catalog));
+root.plugin(runtime);
+let options = LoaderOptions { catalog, ..LoaderOptions::default() };
+root.plugin(LoaderPlugin::new(Chain::new().with_shared(resolver.clone()), options)).await?;
+root.plugin(RuntimeRowsPlugin::new(resolver));
+```
+
+`RuntimeRowsPlugin` 在运行时启动后先重新解析运行时启动前解析的行（以及包版本变了的行），拿到插件声明的依赖，然后才提供 `CordisRuntimeRows`，所以行启动时依赖声明是完整的。
+
+解析结果按包的 `version` 判断是否过期。包内容变了但版本号没变时（例如开发中 link 的包），用 `InteropResolver::invalidate(名字)` 或 `invalidate_all()` 手动失效：只改了声明（`rutis.provides`）时接着 `Loader::reload`；改了代码时重启运行时的 fiber，Node 会在新进程里导入新代码，失效的行在启动前重新解析。

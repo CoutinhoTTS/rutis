@@ -141,8 +141,8 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 
 要按 rutis 的生命周期管理这个 Context，挂载 `CordisRuntimePlugin`。它是一个普通插件：apply 时启动 Node 进程，提供 `CordisRuntime` 服务；清理时先撤销服务，再关闭进程。
 
-- 逐个装载的插件 inject `CordisRuntime`，所以会按依赖等待运行时，并先于进程卸载。
-- 宿主服务用 `.host(名字, 方法)` 声明。应用以 `host_key(名字)` 提供 `dyn HostDispatch`，运行时会等它就绪，宿主服务撤销时运行时随之停止。
+- 运行时本身不依赖任何服务。逐个装载的插件用到哪个宿主服务，就由那个插件去等它、在运行期间租用它（`Process::lease_host`），宿主服务撤销时只有用到它的插件停下。
+- `.host(名字, 方法)` 只声明宿主服务的方法形状，给没有自己报出形状（`HostDispatch::methods`）的服务用；它不再让运行时等待这个服务。
 - Node 进程意外结束时，运行时撤销服务、保持 Active；依赖它的插件回到等待。之后由应用调用该 fiber 的 `restart` 重新启动。
 
 ```rust

@@ -2,38 +2,59 @@
 //!
 //! All rows load into one [`CordisRuntimePlugin`]: one Node process and one
 //! Cordis Context, so they resolve each other's services natively, as in
-//! dsh. The runtime is a rutis plugin the application mounts first; every
-//! row injects its [`CordisRuntime`] service, so rows wait for it and stop
-//! when its process goes away. A row names an npm package (resolved from
-//! the runtime's anchor `package.json`, `exports` honored), a subpath of
-//! one, or a file (`file://`, absolute). Each row is loaded and disposed on
-//! its own; its `isolate` and `inject` name Cordis services, so the resolver
-//! handles them itself (`Resolved::foreign_scope`) and forwards them. Its
+//! dsh. The runtime is a rutis plugin the application mounts first, then the
+//! loader, then a [`RuntimeRowsPlugin`]; every row depends on the
+//! [`CordisRuntimeRows`] service that plugin provides once the rows'
+//! declarations are complete, so rows wait for the runtime and stop when its
+//! process goes away. A row names an npm package (resolved from the
+//! runtime's anchor `package.json`, `exports` honored), a subpath of one, or
+//! a file (`file://`, absolute). Each row is loaded and disposed on its own;
+//! its `isolate` and `inject` name Cordis services, so the resolver handles
+//! them itself (`Resolved::foreign_scope`) and forwards them. Its
 //! schemastery `Config` becomes the row's JSON Schema (`meta.volatile` →
 //! `x-volatile`), and a volatile-only change is handed to Cordis, which
 //! commits it in place and emits `loader/volatile-update` to the plugin, as
 //! dsh's loader does.
 //!
-//! Services do not cross between the JavaScript rows and Rust plugins here;
-//! a Rust service the rows need is a host of the runtime
-//! ([`CordisRuntimePlugin::host`]).
+//! Services cross between the rows and the rest of rutis by name, as
+//! `dyn HostDispatch` at `host_key(name)`:
+//!
+//! - a service the plugin injects that the catalog registers as shared
+//!   ([`ServiceCatalog::register_shared`]) gates the row in rutis, and the
+//!   row leases it into Cordis while it runs; other injected names are left
+//!   to Cordis, as before;
+//! - the services the plugin's package declares in `rutis.provides` are
+//!   published from the row's own fiber, so Rust plugins and other runtimes'
+//!   rows can inject them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, PluginFactory, TypeKey};
-use rutis_interop::{CordisRuntime, Process, RuntimeHandle};
-use serde_json::{json, Value};
+use rutis_interop::{host_key, row_projection, HostDispatch, HostLease, Process, RuntimeHandle};
+use serde_json::{json, Map, Value};
 
-use crate::{volatile_key, Loader, LoaderError, Resolved, Resolver, VolatileUpdate};
+use crate::{
+    volatile_key, Loader, LoaderError, Resolved, Resolver, ServiceCatalog, VolatileUpdate,
+};
+
+mod rows;
+pub use rows::{CordisRuntimeRows, RuntimeRowsPlugin};
 
 #[cfg(doc)]
 use rutis_interop::CordisRuntimePlugin;
 
 pub struct InteropResolver {
     runtime: RuntimeHandle,
+    catalog: ServiceCatalog,
     resolved: Mutex<HashMap<String, Arc<Resolved>>>,
+    /// Names whose resolution lacks the plugin's current declarations
+    /// (resolved while the runtime was not running, or their package
+    /// changed): [`RuntimeRowsPlugin`] resolves them again. A name leaves
+    /// the set only once it is resolved with the runtime, so a refresh that
+    /// is cut short is redone by the next one.
+    offline: Mutex<HashSet<String>>,
 }
 
 impl InteropResolver {
@@ -41,8 +62,61 @@ impl InteropResolver {
     pub fn new(runtime: RuntimeHandle) -> Self {
         Self {
             runtime,
+            catalog: ServiceCatalog::default(),
             resolved: Mutex::new(HashMap::new()),
+            offline: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// The catalog the loader uses (`LoaderOptions::catalog`): its shared
+    /// names are the injected services rows wait for in rutis.
+    pub fn with_catalog(mut self, catalog: &ServiceCatalog) -> Self {
+        self.catalog = catalog.clone();
+        self
+    }
+
+    /// Forget what is known about the row module `name`, for a package whose
+    /// content changed without a new `version` (a linked package during
+    /// development). Its next resolution asks the runtime again: at once
+    /// with `Loader::reload`, or when the runtime restarts, through
+    /// [`RuntimeRowsPlugin`].
+    ///
+    /// Node keeps the module code it has imported, so after a code change
+    /// restart the runtime (`FiberView::restart` on its fiber): the new
+    /// process imports the new code, and the invalidated rows are resolved
+    /// again before they start.
+    pub fn invalidate(&self, name: &str) {
+        self.resolved.lock().unwrap().remove(name);
+        self.offline.lock().unwrap().insert(name.to_owned());
+    }
+
+    /// [`InteropResolver::invalidate`] every row module resolved so far.
+    pub fn invalidate_all(&self) {
+        let names: Vec<String> = self
+            .resolved
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(name, _)| name)
+            .collect();
+        self.offline.lock().unwrap().extend(names);
+    }
+
+    /// Names whose resolution is out of date: resolved without the runtime,
+    /// or whose package version changed since. Their cached resolution is
+    /// dropped, so the next resolution asks the runtime again.
+    pub(crate) fn take_stale(&self) -> HashSet<String> {
+        let mut stale = self.offline.lock().unwrap();
+        self.resolved.lock().unwrap().retain(|name, found| {
+            let current = Path::new(found.meta["entry"].as_str().unwrap_or_default());
+            let recorded = found.meta.get("version").filter(|v| !v.is_null()).cloned();
+            let fresh = package_version(current) == recorded;
+            if !fresh {
+                stale.insert(name.clone());
+            }
+            fresh
+        });
+        stale.clone()
     }
 }
 
@@ -57,18 +131,15 @@ impl Resolver for InteropResolver {
             if let Some(found) = self.resolved.lock().unwrap().get(name) {
                 return Ok(found.clone());
             }
-            let factory = Arc::new(JsFactory {
-                name: name.to_owned(),
-                entry: entry.clone(),
-                injects: vec![TypeKey::of::<CordisRuntime>()],
-            });
-            // The schema needs Node. Without a running runtime the row still
-            // resolves (it waits for the runtime like any dependency), and
-            // says why it has no schema; it is not cached, so a later
-            // resolution (`Loader::reload`) fetches it.
+            // The declarations need Node. Without a running runtime the row
+            // still resolves (it waits for the runtime like any dependency),
+            // and says why it has no schema; it is not cached, and
+            // `RuntimeRowsPlugin` resolves it again once the runtime is up,
+            // before the row may start.
             let Some(process) = self.runtime.ready().await else {
+                self.offline.lock().unwrap().insert(name.to_owned());
                 return Ok(Arc::new(Resolved {
-                    factory,
+                    factory: Arc::new(JsFactory::new(name, entry.clone(), Vec::new(), Map::new())),
                     schema: None,
                     meta: json!({
                         "source": "interop",
@@ -78,18 +149,36 @@ impl Resolver for InteropResolver {
                     foreign_scope: true,
                 }));
             };
-            let schema = process
-                .describe_row(&entry)
-                .await
-                .map_err(|e| LoaderError::Resolve {
-                    name: name.to_owned(),
-                    message: e.to_string(),
-                })?
-                .config;
+            let described =
+                process
+                    .describe_row(&entry)
+                    .await
+                    .map_err(|e| LoaderError::Resolve {
+                        name: name.to_owned(),
+                        message: e.to_string(),
+                    })?;
+            let gated: Vec<String> = described
+                .inject
+                .iter()
+                .filter(|name| self.catalog.is_shared(name))
+                .cloned()
+                .collect();
+            self.offline.lock().unwrap().remove(name);
             let resolved = Arc::new(Resolved {
-                factory,
-                schema,
-                meta: json!({ "source": "interop", "entry": entry }),
+                factory: Arc::new(JsFactory::new(
+                    name,
+                    entry.clone(),
+                    gated,
+                    described.provides.clone(),
+                )),
+                schema: described.config,
+                meta: json!({
+                    "source": "interop",
+                    "entry": entry,
+                    "version": package_version(&entry),
+                    "inject": described.inject,
+                    "provides": described.provides,
+                }),
                 foreign_scope: true,
             });
             self.resolved
@@ -104,7 +193,25 @@ impl Resolver for InteropResolver {
 struct JsFactory {
     name: String,
     entry: PathBuf,
+    /// The injected services that gate the row in rutis.
+    gated: Vec<String>,
+    provides: Map<String, Value>,
     injects: Vec<TypeKey>,
+}
+
+impl JsFactory {
+    fn new(name: &str, entry: PathBuf, gated: Vec<String>, provides: Map<String, Value>) -> Self {
+        let injects = std::iter::once(TypeKey::of::<CordisRuntimeRows>())
+            .chain(gated.iter().map(|name| host_key(name)))
+            .collect();
+        Self {
+            name: name.to_owned(),
+            entry,
+            gated,
+            provides,
+            injects,
+        }
+    }
 }
 
 impl PluginFactory<Value> for JsFactory {
@@ -121,6 +228,8 @@ impl PluginFactory<Value> for JsFactory {
             name: self.name.clone(),
             entry: self.entry.clone(),
             config: config.clone(),
+            gated: self.gated.clone(),
+            provides: self.provides.clone(),
             injects: self.injects.clone(),
         }))
     }
@@ -131,7 +240,13 @@ struct JsRow {
     name: String,
     entry: PathBuf,
     config: Value,
+    gated: Vec<String>,
+    provides: Map<String, Value>,
     injects: Vec<TypeKey>,
+}
+
+fn failed(error: impl std::fmt::Display) -> CordisError {
+    CordisError::PluginFailed(error.to_string().into())
 }
 
 impl Plugin for JsRow {
@@ -145,7 +260,26 @@ impl Plugin for JsRow {
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let process = ctx.require::<CordisRuntime>()?.process().clone();
+            let runtime = ctx.require::<CordisRuntimeRows>()?.runtime().clone();
+            let process = runtime.process().clone();
+            // The shared services the plugin injects, registered in Cordis
+            // for as long as the row runs. One served by a row of this same
+            // process is already there natively.
+            let mut leases: Vec<HostLease> = Vec::new();
+            for name in &self.gated {
+                let dispatch = ctx.require_as::<dyn HostDispatch>(host_key(name))?;
+                if dispatch
+                    .origin()
+                    .is_some_and(|origin| std::ptr::eq(origin, &*process))
+                {
+                    continue;
+                }
+                let lease = process
+                    .lease_host(name, dispatch, runtime.host_methods(name))
+                    .await
+                    .map_err(failed)?;
+                leases.push(lease);
+            }
             // The fiber identity keys the row on the Cordis side: unique, and
             // new for every generation.
             let key = ctx.instance().to_string();
@@ -153,25 +287,54 @@ impl Plugin for JsRow {
                 .get::<Loader>()
                 .and_then(|loader| loader.row(ctx.instance()));
             let (isolate, inject) = row.map(|row| (row.isolate, row.inject)).unwrap_or_default();
-            process
-                .load_row(&key, &self.entry, self.config.clone(), &isolate, &inject)
+            // The row's services are published from this fiber, so they go
+            // when it does.
+            let projection = row_projection(&self.provides);
+            projection.attach(ctx, process.clone())?;
+            if let Err(error) = process
+                .load_row_exporting(
+                    &key,
+                    &self.entry,
+                    self.config.clone(),
+                    &isolate,
+                    &inject,
+                    &self.provides,
+                    projection.clone(),
+                )
                 .await
-                .map_err(|e| CordisError::PluginFailed(e.to_string().into()))?;
+            {
+                projection.close();
+                return Err(failed(error));
+            }
             // Volatile-only changes go to Cordis, which commits them in place.
-            ctx.events().on(
+            let listening = ctx.events().on(
                 ctx,
                 &volatile_key(ctx),
                 Forward {
                     key: key.clone(),
                     process: process.clone(),
                 },
-            )?;
+            );
+            if let Err(error) = listening {
+                // The plugin is loaded, but no cleanup will be registered for
+                // it: undo the load here. The leases go with this frame.
+                let _ = process.unload_row(&key).await;
+                projection.close();
+                return Err(error);
+            }
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 Box::pin(async move {
-                    match process.unload_row(&key).await {
+                    let unloaded = process.unload_row(&key).await;
+                    projection.close();
+                    // After the unload: the plugin never sees a service it
+                    // injects go away before it does.
+                    for lease in leases {
+                        let _ = lease.release().await;
+                    }
+                    match unloaded {
                         // The process is gone, and the row with it.
                         Ok(()) | Err(rutis_interop::Error::Transport(_)) => Ok(()),
-                        Err(e) => Err(CordisError::PluginFailed(e.to_string().into())),
+                        Err(e) => Err(failed(e)),
                     }
                 })
             })))
@@ -194,10 +357,22 @@ impl Listener<VolatileUpdate> for Forward {
             self.process
                 .update_row(&self.key, update.config.clone())
                 .await
-                .map_err(|e| CordisError::PluginFailed(e.to_string().into()))?;
+                .map_err(failed)?;
             Ok(None)
         })
     }
+}
+
+/// The `version` of the package a plugin file belongs to (the nearest
+/// `package.json` above it), if it has one.
+fn package_version(entry: &Path) -> Option<Value> {
+    let manifest = entry
+        .ancestors()
+        .skip(1)
+        .map(|dir| dir.join("package.json"))
+        .find(|path| path.exists())?;
+    let manifest: Value = serde_json::from_str(&std::fs::read_to_string(manifest).ok()?).ok()?;
+    manifest.get("version").cloned()
 }
 
 // ── Node's package resolution ───────────────────────────────────
@@ -317,6 +492,77 @@ mod tests {
             resolve_entry(&anchor, "/abs/p.mjs"),
             Some(PathBuf::from("/abs/p.mjs"))
         );
+    }
+
+    fn cached(entry: &Path, version: Option<Value>) -> Arc<Resolved> {
+        Arc::new(Resolved {
+            factory: Arc::new(JsFactory::new(
+                "x",
+                entry.to_owned(),
+                Vec::new(),
+                Map::new(),
+            )),
+            schema: None,
+            meta: json!({ "entry": entry, "version": version }),
+            foreign_scope: true,
+        })
+    }
+
+    #[test]
+    fn stale_rows_are_those_without_current_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        let versioned = dir.path().join("pkg/index.mjs");
+        std::fs::create_dir_all(versioned.parent().unwrap()).unwrap();
+        std::fs::write(
+            dir.path().join("pkg/package.json"),
+            r#"{ "version": "2.0.0" }"#,
+        )
+        .unwrap();
+        let loose = Path::new("/nowhere/loose.mjs");
+        let resolver = InteropResolver::new(
+            rutis_interop::CordisRuntimePlugin::new(dir.path(), dir.path().join("package.json"))
+                .handle(),
+        );
+        {
+            let mut resolved = resolver.resolved.lock().unwrap();
+            // No package version, recorded as null: unchanged.
+            resolved.insert("loose".into(), cached(loose, None));
+            resolved.insert("same".into(), cached(&versioned, Some(json!("2.0.0"))));
+            resolved.insert("older".into(), cached(&versioned, Some(json!("1.0.0"))));
+        }
+        resolver.offline.lock().unwrap().insert("offline".into());
+        let stale = resolver.take_stale();
+        assert_eq!(
+            stale,
+            HashSet::from(["older".to_owned(), "offline".to_owned()])
+        );
+        assert!(!resolver.resolved.lock().unwrap().contains_key("older"));
+        // A refresh that never finished leaves them stale for the next one.
+        assert_eq!(resolver.take_stale(), stale);
+    }
+
+    #[test]
+    fn invalidated_rows_are_stale_until_resolved_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("p.mjs");
+        let resolver = InteropResolver::new(
+            rutis_interop::CordisRuntimePlugin::new(dir.path(), dir.path().join("package.json"))
+                .handle(),
+        );
+        {
+            let mut resolved = resolver.resolved.lock().unwrap();
+            resolved.insert("a".into(), cached(&entry, None));
+            resolved.insert("b".into(), cached(&entry, None));
+        }
+        assert!(resolver.take_stale().is_empty());
+        resolver.invalidate("a");
+        assert_eq!(resolver.take_stale(), HashSet::from(["a".to_owned()]));
+        resolver.invalidate_all();
+        assert_eq!(
+            resolver.take_stale(),
+            HashSet::from(["a".to_owned(), "b".to_owned()])
+        );
+        assert!(resolver.resolved.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -1,11 +1,13 @@
 //! A Cordis runtime as a rutis plugin: one Node process and one empty Cordis
 //! Context, whose lifetime is the plugin's.
 //!
-//! Plugins loaded into it one by one (`Process::load_row`) inject the
+//! Plugins loaded into it one by one (`Process::load_row`) depend on the
 //! [`CordisRuntime`] service, so they wait for the runtime natively and stop
-//! when it goes away. The host services the Cordis plugins may use are rutis
-//! services the runtime injects, so it waits for them too.
+//! when it goes away. The runtime itself depends on nothing: each plugin
+//! leases the host services it uses (`Process::lease_host`), so the waiting
+//! falls on that plugin, and runtimes never wait for each other.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -14,16 +16,22 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::{Host, HostDispatch, Mount, Process};
+use crate::{HostDispatch, Mount, Process};
 
 /// The service a running Cordis runtime provides.
 pub struct CordisRuntime {
     process: Arc<Process>,
+    hosts: Arc<HashMap<String, Value>>,
 }
 
 impl CordisRuntime {
     pub fn process(&self) -> &Arc<Process> {
         &self.process
+    }
+
+    /// The methods declared with [`CordisRuntimePlugin::host`] for `name`.
+    pub fn host_methods(&self, name: &str) -> Option<Value> {
+        self.hosts.get(name).cloned()
     }
 }
 
@@ -36,8 +44,7 @@ pub fn host_key(name: &str) -> TypeKey {
 /// What the runtime is doing, as seen through a [`RuntimeHandle`].
 #[derive(Clone)]
 pub enum RuntimeState {
-    /// No generation is running: not applied yet, waiting for host
-    /// services, or disposed.
+    /// No generation is running: not applied yet, or disposed.
     Idle,
     /// A generation is starting the Node process.
     Starting,
@@ -87,8 +94,7 @@ impl RuntimeHandle {
 pub struct CordisRuntimePlugin {
     node_package: PathBuf,
     anchor: PathBuf,
-    hosts: Vec<(String, Value)>,
-    injects: Vec<TypeKey>,
+    hosts: Arc<HashMap<String, Value>>,
     state: Arc<watch::Sender<RuntimeState>>,
 }
 
@@ -100,18 +106,17 @@ impl CordisRuntimePlugin {
         Self {
             node_package: node_package.into(),
             anchor: anchor.into(),
-            hosts: Vec::new(),
-            injects: Vec::new(),
+            hosts: Arc::default(),
             state: Arc::new(watch::channel(RuntimeState::Idle).0),
         }
     }
 
-    /// Offer the rutis service at [`host_key`]`(name)` to the Cordis plugins
-    /// as `name`, with methods `{ method: "sync" | "async" }`. The runtime
-    /// waits for it, and restarts when it is replaced.
+    /// Declare the methods `{ method: "sync" | "async" }` of the rutis
+    /// service at [`host_key`]`(name)`, for when it does not report them
+    /// itself ([`HostDispatch::methods`]). The runtime does not wait for it:
+    /// the plugins that use it do.
     pub fn host(mut self, name: &str, methods: Value) -> Self {
-        self.injects.push(host_key(name));
-        self.hosts.push((name.to_owned(), methods));
+        Arc::make_mut(&mut self.hosts).insert(name.to_owned(), methods);
         self
     }
 
@@ -128,43 +133,26 @@ impl Plugin for CordisRuntimePlugin {
         "cordis-runtime"
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
-    }
-
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hosts = self
-                .hosts
-                .iter()
-                .map(|(name, methods)| {
-                    Ok(Host {
-                        name: name.clone(),
-                        methods: methods.clone(),
-                        dispatch: ctx.require_as::<dyn HostDispatch>(host_key(name))?,
-                    })
-                })
-                .collect::<Result<Vec<_>, CordisError>>()?;
             self.state.send_replace(RuntimeState::Starting);
-            // Node may hang before it connects; dispose, restart or a
-            // withdrawn host cancels this generation, and dropping the mount
-            // kills the half-started process.
+            // Node may hang before it connects; dispose or restart cancels
+            // this generation, and dropping the mount kills the half-started
+            // process.
             let mounted = tokio::select! {
                 mounted = Process::mount(
                     &self.node_package,
                     Mount {
-                        hosts,
                         anchor: Some(&self.anchor),
                         ..Mount::default()
                     },
                 ) => Some(mounted),
                 _ = ctx.cancelled() => None,
             };
-            // Cancelled (dispose, restart, a withdrawn host) while starting:
-            // the dropped start, or the process it produced, is killed, and
-            // the generation ends with nothing registered, so the kernel
-            // carries on with the unload (back to Pending on a lost host)
-            // instead of marking a failure.
+            // Cancelled (dispose, restart) while starting: the dropped start,
+            // or the process it produced, is killed, and the generation ends
+            // with nothing registered, so the kernel carries on with the
+            // unload instead of marking a failure.
             if ctx.cancellation_token().is_cancelled() {
                 self.state.send_replace(RuntimeState::Idle);
                 return Ok(Effect::Done);
@@ -212,6 +200,7 @@ impl Plugin for CordisRuntimePlugin {
             }
             let disposer = ctx.provide(CordisRuntime {
                 process: process.clone(),
+                hosts: self.hosts.clone(),
             })?;
             *service.lock().unwrap() = Some(disposer);
             // The watcher starts last, so every failure above leaves no task

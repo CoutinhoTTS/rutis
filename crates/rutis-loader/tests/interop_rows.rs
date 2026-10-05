@@ -1,6 +1,7 @@
 //! JavaScript plugins as loader rows (P6): one shared Cordis Context,
 //! services resolved between rows natively, per-row load/update/unload,
-//! isolate and inject forwarded, schemastery schema exported.
+//! isolate and inject forwarded, schemastery schema exported; services
+//! shared with rutis by name (multilanguage M1).
 #![cfg(all(unix, feature = "interop"))]
 
 use std::path::{Path, PathBuf};
@@ -11,8 +12,8 @@ use rutis::{Ctx, FiberState, FiberView};
 use rutis_interop::rpc::{Reply, Value as RpcValue};
 use rutis_interop::{host_key, CordisRuntimePlugin, HostDispatch};
 use rutis_loader::{
-    Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin,
-    Patch,
+    Chain, CordisRuntimeRows, EntryStatus, InteropResolver, Layer, Loader, LoaderError,
+    LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value};
 
@@ -306,15 +307,31 @@ async fn interop_loader(probe: &Probe) -> (Ctx, Loader, FiberView) {
     let root = Ctx::root().unwrap();
     root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
         .unwrap();
-    let runtime = CordisRuntimePlugin::new(node_package(), node_package().join("package.json"))
-        .host("probe", json!({ "record": "sync" }));
-    let resolver = InteropResolver::new(runtime.handle());
-    let runtime = root.plugin(runtime);
+    let (loader, runtime) = mount(&root, node_package(), &["probe"]).await;
     (&runtime).await.unwrap();
-    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
+    (root, loader, runtime)
+}
+
+/// The runtime, the loader and the rows' second stage, with `shared` as
+/// the catalog's shared names. Waits for the loader only.
+async fn mount(root: &Ctx, package: PathBuf, shared: &[&str]) -> (Loader, FiberView) {
+    let mut catalog = ServiceCatalog::new();
+    for name in shared {
+        catalog.register_shared(*name);
+    }
+    let runtime = CordisRuntimePlugin::new(package, node_package().join("package.json"))
+        .host("probe", json!({ "record": "sync" }));
+    let resolver = Arc::new(InteropResolver::new(runtime.handle()).with_catalog(&catalog));
+    let runtime = root.plugin(runtime);
+    let options = LoaderOptions {
+        catalog,
+        ..LoaderOptions::default()
+    };
+    let plugin = LoaderPlugin::new(Chain::new().with_shared(resolver.clone()), options);
     let loader = plugin.handle();
     root.plugin(plugin).await.unwrap();
-    (root, loader, runtime)
+    root.plugin(RuntimeRowsPlugin::new(resolver));
+    (loader, runtime)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -473,7 +490,7 @@ async fn a_dead_process_stops_the_rows_until_restart() {
     })
     .await;
     assert_eq!(runtime.state().state, FiberState::Active);
-    let runtime_key = rutis::TypeKey::of::<rutis_interop::CordisRuntime>();
+    let runtime_key = rutis::TypeKey::of::<CordisRuntimeRows>();
     let waiting = root
         .diagnostics()
         .plugins
@@ -499,19 +516,13 @@ async fn a_dead_process_stops_the_rows_until_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_runtime_waits_for_its_hosts() {
+async fn rows_wait_for_their_hosts_not_the_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let (provider, consumer, _) = write_plugins(dir.path());
     let probe = Probe::default();
     let root = Ctx::root().unwrap();
-    let runtime = CordisRuntimePlugin::new(node_package(), node_package().join("package.json"))
-        .host("probe", json!({ "record": "sync" }));
-    let resolver = InteropResolver::new(runtime.handle());
-    let runtime = root.plugin(runtime);
-    let plugin = LoaderPlugin::new(Chain::new().with(resolver), LoaderOptions::default());
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    assert_eq!(runtime.state().state, FiberState::Pending);
+    let (loader, runtime) = mount(&root, node_package(), &["probe"]).await;
+    (&runtime).await.unwrap();
 
     let base = vec![
         row("p", &provider, json!({ "who": "rust" }), json!(null)),
@@ -519,31 +530,95 @@ async fn the_runtime_waits_for_its_hosts() {
     ];
     let report = loader.reconcile(rows(base), None).await.unwrap();
     assert!(report.failures.is_empty(), "{report:?}");
-    // Resolved without Node: no schema yet, and the row says why.
-    let entry = loader.get("p").unwrap();
-    assert!(entry.schema.is_none());
-    assert!(
-        entry.meta["schema"]
-            .as_str()
-            .unwrap()
-            .contains("not running"),
-        "{}",
-        entry.meta
-    );
+    // The consumer injects `probe`, which nobody provides yet: only it waits.
+    until("the provider to run", || {
+        row_state(&loader, "p") == Some(FiberState::Active)
+    })
+    .await;
     assert_eq!(row_state(&loader, "c"), Some(FiberState::Pending));
+    assert_eq!(runtime.state().state, FiberState::Active);
 
     let host = root
         .provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
         .unwrap();
     probe.wait_for("c: hello rust").await;
 
-    // The host goes: the runtime and its rows stop with it.
+    // The host goes: its user stops; the runtime and the provider stay.
     host.dispose().await.unwrap();
-    until("everything waiting for the host", || {
-        runtime.state().state == FiberState::Pending
-            && row_state(&loader, "c") == Some(FiberState::Pending)
+    probe.wait_for("c: bye").await;
+    until("the consumer to wait for the host", || {
+        row_state(&loader, "c") == Some(FiberState::Pending)
     })
     .await;
+    assert_eq!(row_state(&loader, "p"), Some(FiberState::Active));
+    assert_eq!(runtime.state().state, FiberState::Active);
+
+    root.shutdown().await.unwrap();
+}
+
+/// `greeter` served from Rust, with the methods it declares itself.
+struct RustGreeter;
+
+impl HostDispatch for RustGreeter {
+    fn invoke(&self, method: &str, _args: RpcValue) -> Reply {
+        assert_eq!(method, "hello");
+        Ok(json!("hello from rust").into())
+    }
+
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "hello": "sync" }))
+    }
+}
+
+/// Resolved before the runtime runs, a row learns what its plugin injects
+/// only once the runtime is up; it must not start before that service.
+#[tokio::test(flavor = "multi_thread")]
+async fn rows_resolved_offline_wait_for_what_they_inject() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, consumer, _) = write_plugins(dir.path());
+    let probe = Probe::default();
+    let root = Ctx::root().unwrap();
+    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+        .unwrap();
+    let mut catalog = ServiceCatalog::new();
+    catalog.register_shared("probe").register_shared("greeter");
+    let runtime = CordisRuntimePlugin::new(node_package(), node_package().join("package.json"))
+        .host("probe", json!({ "record": "sync" }));
+    let resolver = Arc::new(InteropResolver::new(runtime.handle()).with_catalog(&catalog));
+    let options = LoaderOptions {
+        catalog,
+        ..LoaderOptions::default()
+    };
+    let plugin = LoaderPlugin::new(Chain::new().with_shared(resolver.clone()), options);
+    let loader = plugin.handle();
+    root.plugin(plugin).await.unwrap();
+    root.plugin(RuntimeRowsPlugin::new(resolver));
+
+    // No runtime yet: the row resolves without its declarations.
+    let base = vec![row("c", &consumer, json!({ "tag": "c" }), json!(null))];
+    loader.reconcile(rows(base), None).await.unwrap();
+    assert!(loader.get("c").unwrap().meta["schema"].is_string());
+
+    // The runtime starts: the row is resolved again before it may start,
+    // and now also waits for the shared `greeter`, which nobody provides.
+    root.plugin(runtime).await.unwrap();
+    until("the row to know its injects", || {
+        loader
+            .get("c")
+            .is_some_and(|entry| entry.meta["inject"].is_array())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(row_state(&loader, "c"), Some(FiberState::Pending));
+    assert!(probe.take().is_empty());
+
+    // `greeter` from Rust: the JavaScript consumer calls it through Cordis.
+    let greeter = root
+        .provide_as::<dyn HostDispatch>(host_key("greeter"), Arc::new(RustGreeter))
+        .unwrap();
+    probe.wait_for("c: hello from rust").await;
+    greeter.dispose().await.unwrap();
+    probe.wait_for("c: bye").await;
 
     root.shutdown().await.unwrap();
 }
@@ -627,15 +702,11 @@ async fn starting(runtime: &FiberView, package: &Path, count: usize) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_starting_runtime_can_be_disposed_restarted_or_lose_its_host() {
+async fn a_starting_runtime_can_be_disposed_or_restarted() {
     let dir = tempfile::tempdir().unwrap();
     let package = hanging_runtime(dir.path());
     let root = Ctx::root().unwrap();
-    let host = root
-        .provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(Probe::default()))
-        .unwrap();
-    let runtime = CordisRuntimePlugin::new(&package, node_package().join("package.json"))
-        .host("probe", json!({ "record": "sync" }));
+    let runtime = CordisRuntimePlugin::new(&package, node_package().join("package.json"));
     let handle = runtime.handle();
     let runtime = root.plugin(runtime);
 
@@ -646,30 +717,183 @@ async fn a_starting_runtime_can_be_disposed_restarted_or_lose_its_host() {
     let first = pids(&package)[0];
     until("the first runner to stop", || stopped(first)).await;
 
-    // The host goes: the runtime returns to waiting.
-    host.dispose().await.unwrap();
-    until("the runtime to wait for its host", || {
-        runtime.state().state == FiberState::Pending
-    })
-    .await;
-    let second = pids(&package)[1];
-    until("the second runner to stop", || stopped(second)).await;
-    assert!(handle.ready().await.is_none());
     restart.abort();
 
     // Dispose while starting.
-    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(Probe::default()))
-        .unwrap();
-    starting(&runtime, &package, 3).await;
     tokio::time::timeout(Duration::from_secs(10), runtime.dispose())
         .await
         .expect("dispose does not wait for the hanging start")
         .unwrap();
-    let third = pids(&package)[2];
-    until("the third runner to stop", || stopped(third)).await;
+    let second = pids(&package)[1];
+    until("the second runner to stop", || stopped(second)).await;
     tokio::time::timeout(Duration::from_secs(10), handle.ready())
         .await
         .expect("the handle settles");
 
+    root.shutdown().await.unwrap();
+}
+
+// ── Services shared by name ─────────────────────────────────────
+
+const WEATHER: &str = r#"
+export const name = 'weather'
+export function apply(ctx) {
+  ctx.provide('weather', {
+    today() { return 'sunny' },
+    // Not declared in `rutis.provides`: only a native user can call it.
+    secret() { return 'native' },
+  })
+}
+"#;
+
+const FORECASTER: &str = r#"
+export const name = 'forecaster'
+export const inject = ['weather', 'probe']
+export function apply(ctx) {
+  ctx.probe.record(`js: ${ctx.weather.today()} ${ctx.weather.secret()}`)
+}
+"#;
+
+fn weather_package(dir: &Path) -> PathBuf {
+    let package = dir.join("weather");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{ "version": "1.0.0", "rutis": { "provides": { "weather": { "today": "sync" } } } }"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("index.mjs"), WEATHER).unwrap();
+    package.join("index.mjs")
+}
+
+/// A Rust plugin using `weather` by name, whoever provides it.
+struct RustUser(Probe);
+
+impl rutis::Plugin for RustUser {
+    fn name(&self) -> &str {
+        "rust-user"
+    }
+
+    fn injects(&self) -> &[rutis::TypeKey] {
+        static KEYS: std::sync::OnceLock<[rutis::TypeKey; 1]> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| [host_key("weather")])
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let weather = ctx.require_as::<dyn HostDispatch>(host_key("weather"))?;
+            let today: String =
+                rutis_interop::decode_value(weather.invoke("today", json!([]).into()).unwrap())
+                    .unwrap();
+            let probe = self.0.clone();
+            probe.0.lock().unwrap().push(format!("rust: {today}"));
+            Ok(rutis::Effect::Disposer(Box::new(move || {
+                probe.0.lock().unwrap().push("rust: bye".into());
+                Ok(())
+            })))
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn row_services_are_shared_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let weather = weather_package(dir.path());
+    let forecaster = dir.path().join("forecaster.mjs");
+    std::fs::write(&forecaster, FORECASTER).unwrap();
+    let probe = Probe::default();
+    let root = Ctx::root().unwrap();
+    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+        .unwrap();
+    let (loader, runtime) = mount(&root, node_package(), &["probe", "weather"]).await;
+    (&runtime).await.unwrap();
+    root.plugin(RustUser(probe.clone()));
+
+    let base = vec![
+        row("w", &weather, json!({}), json!(null)),
+        row("f", &forecaster, json!({}), json!(null)),
+    ];
+    let report = loader.reconcile(rows(base.clone()), None).await.unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    // Rust injects the row's service by name and calls it.
+    probe.wait_for("rust: sunny").await;
+    // A row of the same process gets the native object, not a proxy.
+    probe.wait_for("js: sunny native").await;
+    assert_eq!(
+        loader.get("w").unwrap().meta["provides"],
+        json!({ "weather": { "today": "sync" } })
+    );
+
+    // The provider goes: its users stop.
+    let remaining: Vec<Value> = base.into_iter().filter(|r| r["id"] != "w").collect();
+    loader.reconcile(rows(remaining), None).await.unwrap();
+    probe.wait_for("rust: bye").await;
+    until("the forecaster to wait", || {
+        row_state(&loader, "f") == Some(FiberState::Pending)
+    })
+    .await;
+
+    root.shutdown().await.unwrap();
+}
+
+// ── A row removed while it loads ────────────────────────────────
+
+const SLOW: &str = r#"
+export const name = 'slow'
+export const inject = ['probe']
+export async function apply(ctx) {
+  await new Promise(resolve => setTimeout(resolve, 300))
+  ctx.probe.record('slow: start')
+  ctx.effect(() => () => ctx.probe.record('slow: bye'))
+}
+"#;
+
+/// The row restarts while its plugin is still starting in Node: once the
+/// old generation's load returns, that plugin is unloaded there too, not
+/// left running next to the new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_restarted_while_loading_is_unloaded_in_the_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let slow = dir.path().join("slow.mjs");
+    std::fs::write(&slow, SLOW).unwrap();
+    let probe = Probe::default();
+    let (root, loader, _runtime) = interop_loader(&probe).await;
+    let adding = {
+        let loader = loader.clone();
+        let slow = slow.clone();
+        tokio::spawn(async move {
+            loader
+                .reconcile(rows(vec![row("s", &slow, json!({}), json!(null))]), None)
+                .await
+        })
+    };
+    until("the row to start loading", || {
+        row_state(&loader, "s") == Some(FiberState::Loading)
+    })
+    .await;
+    // Restarted while its apply still waits for Node: that generation's
+    // plugin must not stay loaded once its load returns.
+    let view = loader.get("s").unwrap().view.unwrap();
+    view.restart().await.unwrap();
+    let _ = adding.await;
+    until("the new generation to run", || {
+        row_state(&loader, "s") == Some(FiberState::Active)
+    })
+    .await;
+    loader.reconcile(rows(Vec::new()), None).await.unwrap();
+    until("both generations to be unloaded", || {
+        probe
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| *l == "slow: bye")
+            .count()
+            == 2
+    })
+    .await;
     root.shutdown().await.unwrap();
 }
