@@ -29,21 +29,39 @@
 
 | 模块 | 职责 | 所属 |
 | --- | --- | --- |
-| Channel / 连接器 | 单次连接、分帧、背压、承载鉴权、存活、关闭原因 | Rust `rutis-channel`；各语言对应实现 |
-| Session / codec | 握手、调用、引用、取消、调用链、错误、编码 | 协议库 |
-| 承载插件 | 配置与持有连接器、监听器、本机子进程 | `local` / `websocket` / `memory` / … |
-| 身份插件 | 凭据、验证规则、端点身份映射 | `identity` |
-| 链接插件 | 连接与会话生命周期、身份校验、重连、旧会话替换、会话就绪 | `link` |
-| 运行时接入插件 | 将会话接入运行时契约，管理服务租用与投影 | `RuntimePlugin` 及运行时适配 |
-| 节点功能插件 | 导入、导出、代装、事件 | `import` / `export` / `host` / `events` |
+| Channel / 连接器 | 单次连接、分帧、背压、承载鉴权、存活、关闭原因 | 契约归 `rutis-channel`；具体实现归各 `rutis-transport-*` crate；各语言提供对应实现 |
+| Session / codec | 握手、调用、引用、取消、调用链、错误、编码 | Rust `rutis-interop`；各语言对应实现 |
+| 承载插件 | 配置与持有连接器、监听器、本机子进程 | `rutis-transport-local` / `rutis-transport-websocket` / `rutis-transport-memory` / … |
+| 身份插件 | 凭据、验证规则、端点身份映射 | `rutis-bridge`：identity |
+| 链接插件 | 连接与会话生命周期、身份校验、重连、旧会话替换、会话就绪 | `rutis-bridge`：link |
+| 运行时接入插件 | 运行时契约、服务租用与投影 | `rutis-interop`：RuntimePlugin；`rutis-bridge`：Peer 到运行时的接入 Adapter |
+| 节点功能插件 | 导入、导出、代装、事件 | `rutis-bridge`：import / export / host / events |
 | 行集成插件与解析器 | 描述查询、依赖解析、刷新、行就绪、行装卸 | `rutis-loader` |
-| 组合插件 | 装配已有插件和配套实现 | 节点 `peer` 组合；运行时组合入口 |
+| 组合插件 | 装配已有插件和配套实现 | 不涉及 loader 的组合归 `rutis-bridge`；含行集成的组合归 `rutis-loader` |
 
 - 承载、身份、link 和节点桥使用 `rutis-bridge/` 前缀；运行时保留多语言设计的 Runtime 命名。
 - Channel、Session、codec 是机制库，不单独插件化。
 - WebSocket 是承载协议的一种，不是固定架构层。新增承载只增加 Adapter 与承载插件，不修改会话、运行时契约或节点功能插件。
-- `rutis-interop` 不依赖 `rutis-loader`。link 不查询 schema、不刷新行、不提供 RuntimeRows 或 PeerRows。
+- `rutis-interop`、`rutis-bridge` 不依赖 `rutis-loader`。link 不查询 schema、不刷新行、不提供 RuntimeRows 或 PeerRows。
 - 叶子执行端实现所需的承载、会话和运行时处理器，不要求实现完整插件框架或节点桥插件组。
+
+### crate 归属与依赖
+
+全部在 rutis 仓库内开发、联调与测试，以独立 crate 按需启用。核心 `rutis` 不增加网络、运行时或重连概念，也不反向依赖这些扩展。
+
+- `rutis-channel`：Channel、连接器契约、连接元信息与结构化错误；不依赖 rutis、bridge 或 interop，不包含具体承载实现。
+- `rutis-interop`：Session、codec、运行时契约及 RuntimePlugin；通过通用会话入口接入，不依赖 bridge 的 Peer 类型或具体承载。
+- `rutis-bridge`：Transport 服务及注册接口、identity、link、节点功能插件、Peer 到运行时的 Adapter；不依赖任何具体 transport crate。
+- `rutis-transport-local`：LocalPlugin，内部实现 Unix socket、继承 fd、spawn 与退出监控；不按内部机制继续拆 crate。
+- `rutis-transport-websocket`：WebSocketPlugin，内部实现拨号、监听、TLS 接入、心跳与关闭处理。
+- `rutis-transport-memory`：MemoryPlugin，内部实现有界内存通道，支持测试与进程内互联。
+- `rutis-loader`：两类行集成、解析器及其组合。应用装配层选择具体承载，loader 不固定绑定承载清单。
+
+承载 crate 依赖 `rutis-channel`、`rutis-bridge` 和核心插件 API，以原生 rutis 插件为主要交付入口，不将插件包装设为附属的 `plugin` feature。插件校验配置、提供 Transport、持有资源，并随卸载撤销服务和清理所属资源；依赖 link 通过原生门控停止。
+
+组合通过统一 Transport 服务引用具体承载；需要自建承载的便捷组合在应用装配层完成，不能使 bridge 反向依赖 transport。运行时通用会话入口由 interop 定义，bridge Adapter 将 Peer 转为该入口，避免 crate 循环依赖。
+
+只用核心不带入扩展；只用本机运行时不带入 WebSocket；只接远端执行端不要求安装本机 Node/Python 环境。memory 默认仅由测试或明确配置的应用选用。新增外部承载 crate 实现同一契约，无需修改 bridge。
 
 ## 3. 共享连接与会话
 
@@ -52,7 +70,7 @@
 - 承载插件提供 `Transport#<种类>`，配置键为 `transport`。
 - 网络 link 依赖 Transport 和 Identity；本机执行端身份由父进程指定。
 - link 完成身份及协议握手后提供 `Peer#<id>`，仅表示会话就绪，不表示某种管理功能已授权。
-- 运行时接入插件与节点功能插件依赖 Peer，登记各自控制操作；处理器随插件卸载注销。
+- bridge 的运行时接入 Adapter 与节点功能插件依赖 Peer，登记各自控制操作；RuntimePlugin 使用 interop 定义的通用会话入口，不直接依赖 Peer 类型。处理器随所属插件卸载注销。
 - Peer 提供端点 ID、Session、操作注册及对端功能宣告观察接口。会话仅归 link 所有。
 - 同一链接明确选择运行时或节点接入契约；不得对同一插件实例同时启用两套管理归属。
 
@@ -249,6 +267,8 @@
 ### 公共机制
 
 - 同一会话测试覆盖 memory、本机 IPC、网络承载；新增承载不增加管理操作。
+- local/websocket/memory 各自通过原生插件装载、配置校验、服务提供和卸载测试；卸载承载时依赖 link 停止并清理资源。
+- 核心、interop、bridge、loader 和各承载 crate 无循环依赖；bridge 不依赖具体承载，纯本机组合不编译 WebSocket 依赖。
 - 身份、版本或端点契约不符时拒绝；重连按结构化错误处理，不解析文字。
 - link 不依赖 loader，任何行未解析时仍可建立会话。
 - link / Identity 撤销阻止旧注册和迟到握手接入，不影响共享监听器的其他链接。

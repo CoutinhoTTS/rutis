@@ -19,11 +19,11 @@
 
 | 层 | 职责 | 实现与约束 |
 | --- | --- | --- |
-| 连接器 | 单次拨号、接收连接、拉起子进程端点、执行承载适用的身份验证 | Rust 位于 `rutis-channel`；JS 位于 I/O worker；不负责重连 |
-| Channel | 有序可靠消息流、分帧、背压、存活检测、关闭 | Rust 位于 `rutis-channel`；JS 位于桥包 `src/channel/*.mjs`；不认识协议帧和编码 |
+| 连接器 | 单次拨号、接收连接、拉起子进程端点、执行承载适用的身份验证 | Rust 契约归 `rutis-channel`，实现归具体 `rutis-transport-*` crate；JS 位于 I/O worker；不负责重连 |
+| Channel | 有序可靠消息流、分帧、背压、存活检测、关闭 | Rust 契约归 `rutis-channel`，实现归具体承载 crate；JS 位于桥包 `src/channel/*.mjs`；不认识协议帧和编码 |
 | codec | 协议帧与字节互转 | Rust 位于 `rutis-interop` 内部；JS 为 `src/codec.mjs`；不依赖通道种类 |
 | Session | 协议握手、调用、引用、取消、调用链和错误 | Rust 为 `rpc.rs`；JS 为 `session.mjs`；不依赖通道种类或身份验证机制，按端点契约接入操作封装 |
-| 端点操作 | 完整框架节点的服务公告、代装插件、事件转发；叶子运行时的运行时操作 | `rutis-interop`、各语言适配；不依赖通道种类，不强行合并 `rows.*` / `hosts.*` 与 `plugins.*` / `services.*` |
+| 端点操作 | 完整框架节点的服务公告、代装插件、事件转发；叶子运行时的运行时操作 | 节点操作归 `rutis-bridge`，运行时契约归 `rutis-interop`；各语言提供对应适配；不依赖通道种类，不强行合并 `rows.*` / `hosts.*` 与 `plugins.*` / `services.*` |
 | 接入与功能插件 | 共享承载、身份、link；节点桥功能与运行时接入分别配置 | 按下表分工 |
 
 `rutis-interop` 只通过 `Channel` 使用通道；`rutis-channel` 不依赖任何协议 crate。`Channel`、`Session`、codec 是机制库，不要求分别插件化。
@@ -34,10 +34,16 @@
 | 身份 | 提供凭据、对端身份映射和验证规则；身份撤销触发依赖 link 的清理 |
 | link | 依赖承载；网络链接依赖 Identity，本机子进程端点身份由启动方指定；持有监听注册；仅负责连接、会话身份核对与协议握手、重连退避、会话替换、会话就绪及相关清理；不认识 loader、schema 或行，不负责 `PeerRows` / `RuntimeRows` |
 | 节点桥功能 | 完整框架节点按需分别配置 `export`、`import`、`host`、`events`；权限由两端为对方安装的功能插件决定，与拨号方向无关 |
-| 运行时接入 | loader 侧配套插件负责叶子运行时接入与两阶段行就绪；按端点契约管理 `PeerRows` / `RuntimeRows`，处理会话替换与撤销；不要求安装节点桥功能 |
+| 运行时接入 | interop 的 RuntimePlugin 与 bridge 的接入 Adapter 负责会话接入；loader 侧配套插件按端点契约管理 `PeerRows` / `RuntimeRows` 和第二阶段行就绪，处理会话替换与撤销；不要求安装节点桥功能 |
 | `peer` 组合 | 只组合已有插件，不另实现连接、鉴权、心跳或 link 生命周期 |
 
-承载实现可扩展：`rutis-bridge/local` 包装 `spawn`，`rutis-bridge/websocket` 包装 WebSocket，测试用 `rutis-bridge/memory` 包装内存通道。WebSocket 仅是一种承载。新增承载不修改 link 或协议层，不强制其他承载采用 WebSocket 的认证方式，也不放宽其安全规则。
+承载以独立 crate 中的原生 rutis 插件交付：`rutis-transport-local` 导出 LocalPlugin，`rutis-transport-websocket` 导出 WebSocketPlugin，`rutis-transport-memory` 导出 MemoryPlugin。插件配置名保留 `rutis-bridge/local`、`rutis-bridge/websocket`、`rutis-bridge/memory`；crate 名不等于插件名。每个 crate 同时持有通道实现与插件生命周期包装，不另设附属的 `plugin` feature。
+
+插件校验配置、提供 Transport 服务、管理监听器/连接/子进程，卸载时撤销服务并清理资源，使用它的 link 通过原生门控停止。local 内部包含 Unix、fd、spawn；memory 也可用于进程内互联。
+
+`rutis-bridge` 定义 Transport 公共服务接口，持有 identity、link 和节点功能插件；具体承载依赖 bridge 和 channel，bridge 不反向依赖具体承载。应用装配层选择承载并完成需要自建承载的组合。运行时通用会话入口归 interop，Peer 到该入口的 Adapter 归 bridge；loader 只负责行侧集成，bridge/interop 不依赖 loader。所有 crate 留在同仓库，核心 `rutis` 不变；不用网络不引入 WebSocket 依赖。
+
+WebSocket 仅是一种承载。新增承载不修改 link 或协议层，不强制其他承载采用 WebSocket 的认证方式，也不放宽其安全规则。
 
 ## Channel 契约
 
@@ -229,9 +235,9 @@ pub enum ConnectError {
 
 | 阶段 | 交付 | 验收 |
 | --- | --- | --- |
-| D1 | 新建 `rutis-channel`（契约、Unix 字节流、memory）；`rpc.rs` 使用 `Channel`；从 `Process` 拆出 Session；会话内部 `Peer` 改为 `SessionState` 等不与节点 Peer 混淆的名称，JS `peer.mjs` 改为 `session.mjs`；Node 编码去掉换行，worker 通道模块化（路径方式）；将 `rpc.rs` 借用的 `server::native_error` 移出冻结的 `server.rs` | 现有测试全通过；Unix 线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 不再引用 `std::os::unix`，移除其 `cfg(unix)` 后可编译 |
+| D1 | 新建 `rutis-channel`（契约）、`rutis-bridge`（Transport 公共接口）及 local/memory 承载 crate（通道实现与原生插件）；`rpc.rs` 使用 `Channel`；从 `Process` 拆出 Session；会话内部 `Peer` 改为 `SessionState` 等不与节点 Peer 混淆的名称，JS `peer.mjs` 改为 `session.mjs`；Node 编码去掉换行，worker 通道模块化（路径方式）；将 `rpc.rs` 借用的 `server::native_error` 移出冻结的 `server.rs` | 现有测试全通过；Unix 线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 不再引用 `std::os::unix`，移除其 `cfg(unix)` 后可编译 |
 | D2 | Rust、Node、Python 的继承 fd 接入；装饰器；通道契约测试；会话矩阵 | 各语言支持的本地通道通过契约测试和会话矩阵 |
-| D3 | Rust `rutis-channel` 的 `websocket` 特性、JS 与 Python 网络承载接入；单次 `dial` / `listen`；结构化建立错误；承载与 link 的监听注册接口 | Rust/JS 双向互通及 Rust/Python 运行时接入；回环 WebSocket 会话矩阵通过；结合远程稿验收重试分类、注册撤销、运行时租约与接管 |
+| D3 | Rust `rutis-transport-websocket` 及 WebSocketPlugin、JS 与 Python 网络承载接入；单次 `dial` / `listen`；结构化建立错误；承载与 link 的监听注册接口 | Rust/JS 双向互通及 Rust/Python 运行时接入；回环 WebSocket 会话矩阵通过；结合远程稿验收重试分类、注册撤销、运行时租约与接管 |
 
 - D1、D2 不修改接入基线的线格式与协议版本；Unix 与继承 fd 上仍为逐行 JSON，不将已使用 PROTOCOL 2 的多语言实现退回版本 1。
 - WebSocket 子协议跟随实际会话主版本；通道内部变化不自行升级会话协议。远程稿新增的不兼容会话格式另行分配主版本，实施前确定发布编号。
