@@ -1,0 +1,24 @@
+[package]
+name = "rutis-transport-local"
+description = "The local transport of rutis bridges: Unix socket channels to processes on the same machine, and processes it starts"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["rutis", "transport", "ipc", "unix"]
+categories = ["network-programming"]
+
+[dependencies]
+rutis = { path = "../rutis", version = "0.6.0" }
+rutis-channel = { path = "../rutis-channel", version = "0.1.0" }
+rutis-bridge = { path = "../rutis-bridge", version = "0.1.0" }
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+tempfile = "3"
+
+[dev-dependencies]
+rutis-channel = { path = "../rutis-channel", features = ["testing"] }
+tempfile = "3"

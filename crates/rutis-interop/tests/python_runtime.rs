@@ -189,7 +189,7 @@ async fn a_runtime_without_the_row_contract_fails_to_start() {
              runpy.run_module('rutis_runtime', run_name='__main__')",
         )
         .env("PYTHONPATH", path);
-    let runtime = rutis_interop::RuntimePlugin::launcher("old", launcher, dir.path());
+    let runtime = rutis_runtime_local::LocalRuntime::launcher("old", launcher, dir.path());
     let handle = runtime.handle();
     let ctx = Ctx::root().unwrap();
     let view = ctx.plugin(runtime);
@@ -201,5 +201,78 @@ async fn a_runtime_without_the_row_contract_fails_to_start() {
         }
         _ => panic!("the runtime should be down"),
     }
+    ctx.shutdown().await.unwrap();
+}
+
+/// Unloading a row withdraws its services even when the runtime's
+/// withdrawal reaches the session late. Here it never comes: the runtime is
+/// made to drop it, which is the latest it can be.
+#[tokio::test(flavor = "multi_thread")]
+async fn unloading_a_row_withdraws_its_services_without_waiting_for_the_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("weather_plugin.py"), WEATHER).unwrap();
+    let mut path = sdk().into_os_string();
+    path.push(":");
+    path.push(dir.path());
+    let launcher = Launcher::new("python3")
+        .arg("-c")
+        .arg(
+            "import runpy, rutis_runtime.peer as p\n\
+             notify = p.Peer.notify\n\
+             def dropping(self, target, method, args):\n\
+             \x20   if method == 'service' and args[1] is None: return\n\
+             \x20   notify(self, target, method, args)\n\
+             p.Peer.notify = dropping\n\
+             runpy.run_module('rutis_runtime', run_name='__main__')",
+        )
+        .env("PYTHONPATH", path);
+    let process = Process::mount(
+        &sdk(),
+        Mount {
+            anchor: Some(dir.path()),
+            launcher: Some(&launcher),
+            ..Mount::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let entry = Path::new("weather_plugin");
+    let described = process.describe_row(entry).await.unwrap();
+    let lease = process
+        .lease_host("clock", Arc::new(Clock(Arc::default())), None)
+        .await
+        .unwrap();
+    let ctx = Ctx::root().unwrap();
+    let projection = row_projection(&described.provides);
+    projection.attach(&ctx, process.clone()).unwrap();
+    process
+        .load_row_exporting(
+            "w",
+            entry,
+            json!({}),
+            &[],
+            &[],
+            &described.provides,
+            projection.clone(),
+        )
+        .await
+        .unwrap();
+    let key = host_key("weather");
+    eventually(
+        || ctx.get_as::<dyn HostDispatch>(key.clone()).is_some(),
+        "the weather service",
+    )
+    .await;
+
+    process.unload_row("w").await.unwrap();
+    eventually(
+        || ctx.get_as::<dyn HostDispatch>(key.clone()).is_none(),
+        "the withdrawal",
+    )
+    .await;
+    projection.close();
+    lease.release().await.unwrap();
+    process.dispose().await.unwrap();
     ctx.shutdown().await.unwrap();
 }

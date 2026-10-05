@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use rutis::{Ctx, FiberState, FiberView};
 use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, HostDispatch, RuntimePlugin};
+use rutis_interop::{host_key, HostDispatch};
 use rutis_loader::{
     Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderOptions, LoaderPlugin, Patch,
     RuntimeRowsPlugin, ServiceCatalog,
 };
+use rutis_runtime_local::LocalRuntime;
 use serde_json::{json, Value};
 
 // ── The plugins, once per language ──────────────────────────────
@@ -241,8 +242,8 @@ async fn fixture() -> Fixture {
     for name in ["probe", "llm", "py_weather", "js_weather"] {
         catalog.register_shared(name);
     }
-    let node = RuntimePlugin::node(interop().join("node"), interop().join("node/package.json"));
-    let python = RuntimePlugin::python(interop().join("python"), &py);
+    let node = LocalRuntime::node(interop().join("node"), interop().join("node/package.json"));
+    let python = LocalRuntime::python(interop().join("python"), &py);
     let node_rows = Arc::new(InteropResolver::node(node.handle()).with_catalog(&catalog));
     let python_rows = Arc::new(InteropResolver::modules(python.handle()).with_catalog(&catalog));
     let node = root.plugin(node);

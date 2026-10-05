@@ -55,7 +55,8 @@
 - `rutis-channel`：Channel、连接器契约、连接元信息与结构化错误；不依赖 rutis、bridge 或 interop，不包含具体承载实现。
 - `rutis-interop`：Session、codec、运行时契约及 RuntimePlugin；通过通用会话入口接入，不依赖 bridge 的 Peer 类型或具体承载。
 - `rutis-bridge`：Transport 服务及注册接口、identity、link、节点功能插件、Peer 到运行时的 Adapter；不依赖任何具体 transport crate。
-- `rutis-transport-local`：LocalPlugin，内部实现 Unix socket、继承 fd、spawn 与退出监控；不按内部机制继续拆 crate。
+- `rutis-transport-local`：LocalPlugin（Unix socket 拨号；登记拉起配置 `Spawn` 后，`spawn:<名字>` 以继承 fd 或回拨 socket 拉起并接入进程，通道拥有进程，通道的结束原因说明进程怎样结束，关闭通道后宽限 2 秒再结束进程）。它只依赖 rutis、rutis-channel、rutis-bridge，不认识进程里跑的是什么；不按内部机制继续拆 crate。
+- `rutis-runtime-local`：本机语言运行时组合 `LocalRuntime`（承载、兼容模式 link、运行时接入、`RuntimePlugin::session`）。语言怎样启动（程序、参数、通道交接方式）由 interop 的 `Launcher`（`Launcher::node` / `Launcher::python`）给出，组合 crate 把它转成承载的 `Spawn`。它不能放进 interop（interop → 承载 → bridge → interop 成环），也不属于 loader。`Process` 兼容外观保留自己的一份拉起代码，随外观一起移除。
 - `rutis-transport-websocket`：WebSocketPlugin，内部实现拨号、监听、TLS 接入、心跳与关闭处理。
 - `rutis-transport-memory`：MemoryPlugin，内部实现有界内存通道，支持测试与进程内互联。
 - `rutis-loader`：两类行集成、解析器及其组合。应用装配层选择具体承载，loader 不固定绑定承载清单。
@@ -76,7 +77,7 @@
 - bridge 的运行时接入 Adapter 与节点功能插件依赖 Peer，登记各自控制操作；RuntimePlugin 使用 interop 定义的通用会话入口，不直接依赖 Peer 类型。处理器随所属插件卸载注销。
 - Peer 提供端点 ID、Session、操作注册及对端功能宣告观察接口。会话仅归 link 所有。
 - 同一链接明确选择运行时或节点接入契约；不得对同一插件实例同时启用两套管理归属。
-- 本机运行时的会话来源：N2 起，RuntimePlugin 的本机来源为 `local` 承载 + link（身份由父进程指定），与远程来源走同一入口；`Process` 外观仅为生成代码和既有调用方保留的兼容层，内部改由同一 Session 实现，不再是 RuntimePlugin 的另一条接入路径。迁移完成并通过兼容验收前，`Process` 不删除。
+- 本机运行时的会话来源：RuntimePlugin 的本机来源为 `local` 承载 + link（身份由拉起方指定），与远程来源走同一入口（`RuntimeSession#<名字>`）。link 的本机兼容模式（`LinkConfig::local_runtime`）说协议 2、不校验契约、不发 `link.offers`、会话结束后不重连；进程结束时 link 停止，运行时状态为 `Down(原因)`，`LocalRuntime` 的 `restart` 拉起新进程。`LocalRuntime` 的 apply 等到运行时就绪或 link 停止，启动期间可 dispose / restart，启动失败即失败。`RuntimePlugin::node` / `python` / `launcher` 自行拉起进程的路径保留为兼容层并标为弃用；`Process` 外观仅为生成代码和既有调用方保留，与之共用同一 Session 实现。
 
 ### Session 共享与资源归属
 
@@ -182,13 +183,13 @@
 
 | 操作 | 语义 / 处理方 |
 | --- | --- |
-| `services.announce { name, service, shape, version }` | 公告服务对象引用 / import |
-| `services.withdraw { name, version }` | 撤销服务 / import |
+| `services.announce { name, service, shape, version }` | 公告服务对象引用；版本取自会话级的单一递增序列（`Peer::next_version`），导出插件改列表重启后继续递增，不会被当作旧消息 / import |
+| `services.withdraw { name, version }` | 撤销服务；导入方保留撤销的版本，晚到的更旧公告不得恢复服务 / import |
 | `plugins.describe(插件)` | 返回 `{ schema, version, integrity }` / host |
-| `plugins.load(key, 插件, config, isolate, inject)` | 代装 / host |
+| `plugins.load(key, 插件, config, isolate, inject)` | 代装：按行的 `isolate`（[服务名, 标签]，标签按对端区分）隔离、按 `inject` 门控；服务名经宿主的映射转为键（loader 组合用其服务目录，默认 `host_key`），无法映射即拒绝 / host |
 | `plugins.update(key, config)`、`plugins.unload(key)` | 更新、卸载 / host |
 | `events.forward { name, args }` | 以 parallel 发通知，等待监听完成 / events |
-| `link.offers { families, version }` | 宣告已注册功能族，版本递增，忽略旧宣告 / link |
+| `link.offers { families, version, since }` | 宣告已注册功能族，版本递增，忽略旧宣告；`since` 为各族登记时的版本，族被撤销后重新登记即为新的一次提供，跟随方按它（而不是族在不在）重新提供依赖它的东西；不带 `since` 的一端各族视为 0 / link |
 
 - 服务通过 Session 对象 call/get 访问；换值公告新引用，按 version 排序，旧引用按计数释放。
 - Cordis 服务经 export 的导出 fiber 读取，调用产生的 effect 归该 fiber。
@@ -234,7 +235,7 @@
 - 函数、异步结果、对象引用按能力声明；对象首次授予附形状。Node/Python 未实现对象接收时不得宣告支持。
 - 取消双向落到 AbortSignal、Rust 取消令牌或语言等价物；丢弃 future 发送取消。
 - 转发按（会话，引用号）保持身份，释放沿中继链传递；复用 M1a 的中继机制，补充网络多跳契约与测试。
-- 能力包含 objects、signals、reentrant-sync、plugins、events、volatile、forwarding；能力不授予权限，缺少必需能力时使用前拒绝。
+- 会话能力为 objects、signals、reentrant-sync、forwarding，按实现宣告（Rust 四项；Node 为 signals；Python 为 signals、reentrant-sync）；端点契约以能力 `runtime`、`node` 宣告，link 以 `require` 在握手后校验，缺少即按不兼容停止。plugins、events、volatile 等功能族经 `link.offers` 宣告，不作为会话能力。能力不授予权限，缺少必需能力时使用前拒绝。
 - 不支持同步重入时，同步等待期间的同链反向调用立即返回 SyncWaitCycle，不得排队。
 
 ### 6.3 服务形状与同步
@@ -264,7 +265,7 @@
 - 远程运行时控制权仅授予配置的控制方；只能加载执行环境中已部署的插件，不提供代码上传。
 - 远程加载默认拒绝 file: 和绝对路径插件名；显式本机运行时可保留 profile 的 file:// 兼容路径。
 - 求值后的配置发送到执行机器，可能含密钥；诊断和追踪不得记录秘密。
-- 通道限制消息大小；本设计不增加调用数和引用数配额。
+- 消息大小上限由各承载配置，超限时承载关闭通道；本设计不增加调用数和引用数配额。
 
 ## 8. 放置与配置
 

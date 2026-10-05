@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::{HostDispatch, Mount, Process};
+use crate::{Mount, Process};
 
 /// What the rows of a runtime need from it: describing plugins, exporting
 /// their services (`rows.v2`) and leasing host services (`hosts`). Static
@@ -49,12 +49,6 @@ impl Runtime {
     }
 }
 
-/// The key a host service named `name` is provided under, for example
-/// `ctx.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe))`.
-pub fn host_key(name: &str) -> TypeKey {
-    TypeKey::keyed_dynamic::<dyn HostDispatch>(name.to_owned())
-}
-
 /// What the runtime is doing, as seen through a [`RuntimeHandle`].
 #[derive(Clone)]
 pub enum RuntimeState {
@@ -72,6 +66,7 @@ pub enum RuntimeState {
 pub struct RuntimeHandle {
     name: String,
     anchor: PathBuf,
+    remote: bool,
     state: watch::Receiver<RuntimeState>,
 }
 
@@ -91,6 +86,28 @@ impl RuntimeHandle {
         self.state.borrow().clone()
     }
 
+    /// Resolves at the next change of [`RuntimeHandle::state`].
+    pub async fn changed(&self) {
+        let mut state = self.state.clone();
+        state.borrow_and_update();
+        let _ = state.changed().await;
+    }
+
+    /// Whether the runtime runs elsewhere ([`RuntimePlugin::remote`]): its
+    /// plugins are found where it runs, not under [`RuntimeHandle::anchor`].
+    pub fn is_remote(&self) -> bool {
+        self.remote
+    }
+
+    /// Whether the running runtime reported `feature` (`rows.v2`, `hosts`,
+    /// `leaf`, …); `false` while none runs.
+    pub fn supports(&self, feature: &str) -> bool {
+        match &*self.state.borrow() {
+            RuntimeState::Ready(process) => process.supports(feature),
+            _ => false,
+        }
+    }
+
     /// The running process. Waits while a generation is starting; `None`
     /// when no generation is running.
     pub async fn ready(&self) -> Option<Arc<Process>> {
@@ -106,6 +123,16 @@ impl RuntimeHandle {
     }
 }
 
+/// Where a runtime's session comes from.
+#[derive(Clone)]
+enum Source {
+    /// A process this plugin starts (the compatibility path).
+    Spawn,
+    /// `RuntimeSession#<name>`, which something else (a link) provides.
+    /// `remote`: the runtime runs elsewhere, so it resolves its plugins.
+    Session { key: [TypeKey; 1], remote: bool },
+}
+
 /// The runtime plugin. Mount it before the plugins that load into it.
 ///
 /// One runtime is one process of one language: the Node runtime runs a
@@ -118,9 +145,12 @@ impl RuntimeHandle {
 /// and stays Active: dependent plugins stop and wait, as for any provider
 /// that goes away. Restarting it (`FiberView::restart`) is the
 /// application's decision.
+#[derive(Clone)]
 pub struct RuntimePlugin {
     runtime: String,
     label: String,
+    /// Where its session comes from.
+    source: Source,
     node_package: PathBuf,
     anchor: PathBuf,
     launcher: Option<crate::Launcher>,
@@ -132,11 +162,18 @@ impl RuntimePlugin {
     /// The Node runtime, named `"node"`. `node_package`: the rutis-interop
     /// npm runtime (`interop/node`, or a deployed `@arcships/rutis-interop`).
     /// `anchor`: the `package.json` plugins and Cordis resolve from.
+    ///
+    /// The compatibility path: this plugin starts the process itself.
     #[cfg(feature = "node")]
+    #[deprecated(
+        since = "0.4.0",
+        note = "a local runtime is rutis_runtime_local::LocalRuntime: its process started by the local transport, its session over a link"
+    )]
     pub fn node(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
         Self {
             runtime: "node".into(),
             label: "node-runtime".into(),
+            source: Source::Spawn,
             node_package: node_package.into(),
             anchor: anchor.into(),
             launcher: None,
@@ -148,6 +185,7 @@ impl RuntimePlugin {
     /// The Node runtime, as [`RuntimePlugin::node`].
     #[cfg(feature = "node")]
     #[deprecated(since = "0.3.0", note = "use RuntimePlugin::node")]
+    #[allow(deprecated)]
     pub fn new(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
         Self::node(node_package, anchor)
     }
@@ -164,29 +202,20 @@ impl RuntimePlugin {
     /// A Python runtime named `"py"`: `python3 -m rutis_runtime`, with the
     /// SDK directory `sdk` (`interop/python`) on `PYTHONPATH`, importing
     /// plugin modules from `project`. Python 3.12 or later.
+    ///
+    /// The compatibility path: this plugin starts the process itself.
     #[cfg(feature = "python")]
+    #[deprecated(
+        since = "0.4.0",
+        note = "a local runtime is rutis_runtime_local::LocalRuntime: its process started by the local transport, its session over a link"
+    )]
     pub fn python(sdk: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
         let (sdk, project) = (sdk.into(), project.into());
-        // Ahead of whatever the application already puts on the path.
-        let mut path = std::ffi::OsString::from(&sdk);
-        path.push(":");
-        path.push(&project);
-        if let Some(inherited) = std::env::var_os("PYTHONPATH").filter(|p| !p.is_empty()) {
-            path.push(":");
-            path.push(inherited);
-        }
-        let launcher = crate::Launcher::new("python3")
-            .arg("-m")
-            .arg("rutis_runtime")
-            .env("PYTHONPATH", path)
-            .env("PYTHONUNBUFFERED", "1")
-            // A plugin imported again after an edit must not come from a
-            // bytecode file written in the same second as the old source.
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .cwd(&project);
+        let launcher = crate::Launcher::python(&sdk, &project);
         Self {
             runtime: "py".into(),
             label: "python-runtime".into(),
+            source: Source::Spawn,
             node_package: sdk,
             anchor: project,
             launcher: Some(launcher),
@@ -205,8 +234,15 @@ impl RuntimePlugin {
     }
 
     /// Start the runtime process with `launcher` (another language, or
-    /// another way to start one). The launcher receives the socket path and
-    /// the anchor as its last two arguments.
+    /// another way to start one). The launcher receives its channel (`fd:3`
+    /// or a socket path, see [`crate::Launcher`]) and the anchor as its last
+    /// two arguments.
+    ///
+    /// The compatibility path: this plugin starts the process itself.
+    #[deprecated(
+        since = "0.4.0",
+        note = "a local runtime is rutis_runtime_local::LocalRuntime: its process started by the local transport, its session over a link"
+    )]
     pub fn launcher(
         name: impl Into<String>,
         launcher: crate::Launcher,
@@ -215,10 +251,55 @@ impl RuntimePlugin {
         let runtime: String = name.into();
         Self {
             label: format!("{runtime}-runtime"),
+            source: Source::Spawn,
             runtime,
             node_package: launcher.cwd.clone().unwrap_or_default(),
             anchor: anchor.into(),
             launcher: Some(launcher),
+            hosts: Arc::default(),
+            state: Arc::new(watch::channel(RuntimeState::Idle).0),
+        }
+    }
+
+    /// A runtime this side does not start: its session is
+    /// `RuntimeSession#<name>`, provided by whatever reaches it (a link to a
+    /// remote runtime, through the bridge's runtime access plugin). It waits
+    /// for that session and stops when it goes; a new session is a new
+    /// generation of the runtime, whose rows are loaded again. Row names are
+    /// resolved where the runtime runs.
+    pub fn remote(name: impl Into<String>) -> Self {
+        let runtime: String = name.into();
+        Self {
+            label: format!("{runtime}-runtime"),
+            source: Source::Session {
+                key: [crate::runtime_session_key(&runtime)],
+                remote: true,
+            },
+            runtime,
+            node_package: PathBuf::new(),
+            anchor: PathBuf::new(),
+            launcher: None,
+            hosts: Arc::default(),
+            state: Arc::new(watch::channel(RuntimeState::Idle).0),
+        }
+    }
+
+    /// A runtime on this machine whose session something else provides
+    /// (`RuntimeSession#<name>`): a link to the process the local transport
+    /// starts, as `rutis_runtime_local::LocalRuntime` composes it. Its
+    /// plugins resolve from `anchor`, as for a runtime this plugin starts.
+    pub fn session(name: impl Into<String>, anchor: impl Into<PathBuf>) -> Self {
+        let runtime: String = name.into();
+        Self {
+            label: format!("{runtime}-runtime"),
+            source: Source::Session {
+                key: [crate::runtime_session_key(&runtime)],
+                remote: false,
+            },
+            runtime,
+            node_package: PathBuf::new(),
+            anchor: anchor.into(),
+            launcher: None,
             hosts: Arc::default(),
             state: Arc::new(watch::channel(RuntimeState::Idle).0),
         }
@@ -229,13 +310,36 @@ impl RuntimePlugin {
     /// several of one language, live side by side.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.runtime = name.into();
+        // A session-sourced runtime waits for the session of its name.
+        if let Source::Session { key, .. } = &mut self.source {
+            *key = [crate::runtime_session_key(&self.runtime)];
+        }
         self
+    }
+
+    /// For a composition that starts this runtime's session (a local
+    /// runtime): the runtime is starting, before this plugin can run.
+    pub fn starting(&self) {
+        self.state.send_replace(RuntimeState::Starting);
+    }
+
+    /// For a composition that starts this runtime's session: the start was
+    /// abandoned (a restart or dispose while starting).
+    pub fn stopped(&self) {
+        self.state.send_replace(RuntimeState::Idle);
+    }
+
+    /// For a composition that starts this runtime's session: it could not,
+    /// or it ended, and why.
+    pub fn failed(&self, reason: impl Into<String>) {
+        self.state.send_replace(RuntimeState::Down(reason.into()));
     }
 
     pub fn handle(&self) -> RuntimeHandle {
         RuntimeHandle {
             name: self.runtime.clone(),
             anchor: self.anchor.clone(),
+            remote: matches!(self.source, Source::Session { remote: true, .. }),
             state: self.state.subscribe(),
         }
     }
@@ -246,21 +350,47 @@ impl Plugin for RuntimePlugin {
         &self.label
     }
 
+    fn injects(&self) -> &[TypeKey] {
+        match &self.source {
+            Source::Spawn => &[],
+            Source::Session { key, .. } => key,
+        }
+    }
+
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             self.state.send_replace(RuntimeState::Starting);
             // Node may hang before it connects; dispose or restart cancels
             // this generation, and dropping the mount kills the half-started
             // process.
+            let start = async {
+                match &self.source {
+                    Source::Spawn => {
+                        Process::mount(
+                            &self.node_package,
+                            Mount {
+                                anchor: Some(&self.anchor),
+                                launcher: self.launcher.as_ref(),
+                                ..Mount::default()
+                            },
+                        )
+                        .await
+                    }
+                    Source::Session { key: [key], .. } => {
+                        let session = ctx
+                            .get_as::<dyn crate::RuntimeSession>(key.clone())
+                            .ok_or_else(|| {
+                                crate::Error::Value(format!(
+                                    "the session of the {} runtime is gone",
+                                    self.runtime
+                                ))
+                            })?;
+                        Process::over(session, Mount::default()).await
+                    }
+                }
+            };
             let mounted = tokio::select! {
-                mounted = Process::mount(
-                    &self.node_package,
-                    Mount {
-                        anchor: Some(&self.anchor),
-                        launcher: self.launcher.as_ref(),
-                        ..Mount::default()
-                    },
-                ) => Some(mounted),
+                mounted = start => Some(mounted),
                 _ = ctx.cancelled() => None,
             };
             // Cancelled (dispose, restart) while starting: the dropped start,
@@ -314,11 +444,12 @@ impl Plugin for RuntimePlugin {
                             watcher.abort();
                         }
                         let ended = matches!(*state.borrow(), RuntimeState::Down(_));
-                        state.send_replace(RuntimeState::Idle);
                         if ended {
-                            // Already gone; its cause was reported by the watcher.
+                            // Already gone, and its cause stays visible: the
+                            // plugin may stop only because its session went.
                             return Ok(());
                         }
+                        state.send_replace(RuntimeState::Idle);
                         owner.dispose().await.map_err(Into::into)
                     })
                 }))
@@ -361,10 +492,13 @@ async fn watch_exit(
     service: Arc<Mutex<Option<Disposer>>>,
 ) {
     process.closed().await;
-    let status = process.exit_status().map_or_else(
-        || "runtime disconnected".to_owned(),
-        |status| format!("runtime process {status}"),
-    );
+    // A process started here says how it ended; a session through a link
+    // ends with its channel's reason (for a local runtime, the same).
+    let status = match (process.exit_status(), process.connection().close_reason()) {
+        (Some(status), _) => format!("runtime process {status}"),
+        (None, Some(reason)) => format!("runtime ended: {reason}"),
+        (None, None) => "runtime disconnected".to_owned(),
+    };
     state.send_replace(RuntimeState::Down(status));
     withdraw(&service).await;
 }

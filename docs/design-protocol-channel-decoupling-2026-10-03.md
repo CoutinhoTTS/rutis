@@ -93,16 +93,16 @@ pub struct ChannelInfo {
 }
 
 pub enum ChannelError {
+    // 通道结束；为什么结束（对端断开、消息超出承载上限、心跳失联）是承载自己的事。
     Closed { reason: String },
-    // 发送超限不关闭通道；接收超限关闭通道。
-    TooLarge { limit: usize, size: usize },
 }
 ```
+
+- 契约只规定有序、可靠、保持边界、背压与关闭。分帧、存活检测、消息大小上限属于具体承载协议，由各 Adapter 实现和配置，不进入 `rutis-channel` 契约，会话也不为它们定义特殊语义。
 
 - 会话在发送锁内完成编码和发送，保持引用表变化与发送顺序一致。
 - `close` 先在发送锁外打断阻塞发送，再取得锁清理表。
 - 读线程循环 `recv()`，解码后交给会话；`Closed { reason }` 映射为 `Error::Transport("<label>: <reason>")`。移除会话入口的 `disconnected` 闭包。
-- 发送超限按编码失败处理：请求向调用方返回错误，应答改发错误帧。
 - 会话入口为 `Connection::open(Channel, dispatch)`；已有 `connect` 可保留为 Unix 通道的兼容简写。
 - `PeerId` 表示会话端点 ID，不要求对端是完整框架节点。`ChannelInfo.peer` 的可选类型兼容无需端点身份的通道用途；link 不得将缺少已确认对端身份的通道标为会话就绪。
 
@@ -115,7 +115,7 @@ Node 通道在 I/O worker 内提供等价接口：
 // 建立失败另行返回结构化 ConnectError，不通过 closed(reason) 推断。
 ```
 
-- 通道规格：`unix:<path>`、`fd:<n>`、`wss://…`；裸路径等同 `unix:`。
+- 通道规格：`unix:<path>`、`fd:<n>`、`ws://…`（仅回环）/`wss://…`、`listen:ws://…`/`listen:wss://…`；裸路径等同 `unix:`。`listen:` 用于运行时等待控制方拨入，接受第一条通过鉴权的连接；凭据、CA、证书与私钥经环境变量 `RUTIS_INTEROP_TOKEN`、`RUTIS_INTEROP_CA`、`RUTIS_INTEROP_CERT`、`RUTIS_INTEROP_KEY` 传入，不进入通道规格、URL 或命令行。Python 运行时的 WebSocket 接入为可选依赖 `rutis-runtime[network]`。
 - 主线程与 worker 沿用 MessagePort + `Atomics` 交接；主线程同步等待时，worker 继续收发和处理心跳。
 - 会话使用不带换行的 `codec.encode`；worker 可调用 `codec.decode`，通道模块不决定编码。
 - JS 接受 WebSocket 连接时使用支持服务端的依赖（如 `ws`）；仅拨号不要求服务端能力。
@@ -135,7 +135,7 @@ Node 通道在 I/O worker 内提供等价接口：
 上层多个插件共享 Session：一个 Runtime 实例的多个插件共用其活动控制 Session；一个节点 link 的桥功能及其代装插件共用该 link 的活动 Session。插件按实例 key 和资源 ID 区分，装卸单个插件不创建或关闭 Session。该共享模型与 Adapter 的物理连接复用互相独立，资源清理范围见远程稿“Session 共享与资源归属”。
 
 - Adapter 决定一个逻辑 Channel 独占物理连接，或多个 Channel 共享物理连接；Session 和 link 不访问物理连接句柄。
-- send/recv、顺序、背压、大小限制和 close 契约均以逻辑 Channel 为单位。复用实现隔离消息边界与流控，不允许一个通道的阻塞导致其他通道无界积压。
+- send/recv、顺序、背压和 close 契约均以逻辑 Channel 为单位。复用实现隔离消息边界与流控，不允许一个通道的阻塞导致其他通道无界积压。
 - 关闭或替换会话只释放其逻辑 Channel；共享物理连接及其他 Channel 保持有效。Adapter 决定空闲连接保留与回收。
 - 物理连接故障由 Adapter 通知全部受影响的 Channel。无法继续满足有序可靠契约时必须终止 Channel；终止后的 Channel 不得通过换物理连接重新变为可用，也不得自动重放 Session 请求。
 - Adapter 维护物理连接；link 在 Channel 失败后重新申请逻辑 Channel 并建立新 Session。两层不得各自重试同一次会话接入；不新增会话恢复或进程自动重启。
@@ -152,7 +152,7 @@ Node 通道在 I/O worker 内提供等价接口：
 | `spawn`（路径） | 临时目录 socket、子进程回拨；保留兼容 |
 | `unix::connect` / `unix::listen` | 每次产出一个 `Channel`；用于工具及冻结的反方向 |
 | `memory::pair` | 两条首尾相连的 `Channel`；用于测试或进程内端点 |
-| WebSocket `dial` / `listen` | 每次连接产出 `Channel`，身份放入 `ChannelInfo.peer`；心跳在通道内部；`dial` 只尝试一次 |
+| WebSocket `dial` / `listen` | 每次连接产出 `Channel`，身份放入 `ChannelInfo.peer`；心跳在通道内部；`dial` 只尝试一次。拨号请求为 `Dial { address, peer, identity, protocol }`：`protocol` 是会话协议名，由上层传入，承载只核对，不认识会话版本 |
 
 连接器每次调用只报告一次逻辑 Channel 建立结果，不自行重试失败的会话接入、不替换会话、不决定 link 会话就绪。Adapter 可内部管理物理连接池与连接维护；单次建立必须可取消，内部维护不得演变为无限等待或另一个会话重连循环。link 完成身份核对和协议握手后才进入会话就绪状态；此状态不表示 loader 的 schema 或行已就绪。两阶段行就绪由 loader 侧配套插件独立完成，不作为 link 的握手或就绪条件。卸载承载或身份依赖时，link 按框架原生门控停止、撤销注册并清理连接；配套插件清理其管理的行。
 
@@ -170,25 +170,25 @@ pub enum ConnectError {
 
 | 类别 | 含义 | WebSocket 拨号侧 link 行为 |
 | --- | --- | --- |
-| `Retryable` | 暂时性连接失败，如连接拒绝、超时、临时不可用 | 指数退避后再次调用单次 `dial` |
-| `AuthRejected` | 凭据、证书验证、身份映射或注册授权未通过 | 按 30 秒上限间隔慢重试并持续报告错误，不绕过验证 |
+| `Retryable` | 暂时性连接失败，如连接拒绝、超时、临时不可用；以及凭据有效但尚无 link 监听它（监听器上没有任何注册，或监听器的身份能验证该凭据、但对应对端的 link 尚未注册，例如拨号方先于监听 link 就绪） | 指数退避后再次调用单次 `dial` |
+| `AuthRejected` | 凭据、证书验证、身份映射未通过（监听器上没有任何身份能验证所出示的凭据） | 按 30 秒上限间隔慢重试并持续报告错误，不绕过验证 |
 | `Incompatible` | 子协议或必要承载能力不兼容 | 停止自动重试，等待配置修正或显式重启 link |
 
 - 连接器和承载适配层从类型、协议状态或验证结果生成类别；不得解析诊断文字分类。
 - JS 等实现使用等价的稳定类别字段；`reason` 仅供诊断，不含凭据。
 - 会话握手发生在通道建立之后；握手的身份拒绝、协议不兼容须以结构化结果交给 link，采用对应慢重试或停止策略，不从 `ChannelError.Closed.reason` 反推类别。
-- `ChannelError` 只表达通道运行期的结束与超限。正常运行期断线按 link 策略恢复；本地子进程不自动重启。
+- `ChannelError` 只表达通道运行期的结束。正常运行期断线按 link 策略恢复；本地子进程不自动重启。
 - link 停止或依赖撤销后不得继续安排重试；已发起的连接结果不得再交付为新会话。
 
 ### 共享监听器注册与接收路由
 
-网络监听器由承载插件持有，link 通过注册句柄声明允许接收的连接。注册至少绑定：监听器、承载实例、本地端点 id、预期对端 id、有效 Identity 验证规则、所属 link 及本次注册代次。
+网络监听器由承载插件持有，link 通过注册句柄声明允许接收的连接。注册至少绑定：监听器、承载实例、本地端点 id、预期对端 id、有效 Identity 验证规则、会话协议、所属 link 及本次注册代次。每个监听器服务一个本地端点（配置项），注册按（监听器，对端）唯一。路由、代次复核与撤销互斥由 `rutis-bridge` 的 `Registrations` 统一实现，各承载复用。
 
 | 环节 | 强制规则 |
 | --- | --- |
 | 注册验证 | link、承载与 Identity 均须有效；端点 id 与身份绑定须一致，验证规则须适用于该承载；同一监听器与本地端点下，同一对端只允许一个有效 link 路由，重复或歧义注册拒绝 |
 | 入站认证 | 承载执行适用的身份验证，以验证得到的对端 id 查找注册；不得以未验证的自报 id 或请求参数直接选定授权目标 |
-| 路由 | 仅交给身份绑定匹配的有效注册；无注册、已撤销或身份不符直接拒绝，不创建隐式 link |
+| 路由 | 仅交给身份绑定匹配的有效注册；无注册、已撤销或身份不符直接拒绝，不创建隐式 link。拒绝的类别按凭据区分：凭据可验证而无注册为 `Retryable`（WebSocket 503），凭据无法验证为 `AuthRejected`（403） |
 | 移交复核 | 承载握手完成、移交 link 前，重新核验注册代次、所属 link 和 Identity 仍有效；撤销与移交须有确定的先后顺序，旧握手不能越过撤销完成移交 |
 | 会话接收 | link 再核对会话 `hello` 的端点 id 与 `ChannelInfo.peer` 一致；完成握手前不得就绪；旧会话仅由 link 决定是否替换 |
 | 撤销 | 注册句柄随 link 生命周期释放；link 停止、重建或 Identity 撤销时撤销旧代次，清理相关握手中连接和已移交通道/会话；迟到结果关闭，旧注册不得继续接受连接 |
@@ -214,11 +214,11 @@ pub enum ConnectError {
 | 对端身份 | 监听方将验证得到的端点 id 放入 `ChannelInfo.peer`；拨号方在证书验证通过后绑定配置的预期端点 id；双方均核对会话 `hello` 的端点 id |
 | 接收授权 | 按“共享监听器注册与接收路由”执行；通过凭据验证不等于获得 link 接收授权 |
 | 消息 | 一帧一条文本消息，UTF-8 JSON，不带换行；二进制消息保留给后续二进制编码 |
-| 大小上限 | 默认 16 MiB，可配置；发送超限不关闭通道，接收超限以关闭码 1009 关闭 |
+| 大小上限 | 默认 16 MiB，可配置；任一方向超限都以关闭码 1009 关闭该通道，会话看到的是一次 `Closed` |
 | 心跳 | 双方默认每 10 秒发一次 ping；30 秒内收不到任何消息即判定失联并关闭；启用 TCP keepalive；心跳独立于调用方执行器推进 |
 | 关闭原因 | close frame 的 reason 为 UTF-8，最多 123 字节；只供诊断 |
 | 有序关闭 | 关闭码 1001 |
-| 接管 | link 决定同一端点 id 的新连接接管旧会话后，旧连接以 4002 关闭，reason 为 `replaced by a new connection` |
+| 接管 | link 决定同一端点 id 的新连接接管旧会话后，调用旧通道的 `Closer::replaced()`；WebSocket 以 4002 关闭，reason 为 `replaced by a new connection`，其他承载普通关闭 |
 
 完整框架节点之间的拨号方向由部署配置；远程叶子运行时只监听，由控制方 link 拨号，因为叶子侧没有 link 持有重连退避（见远程稿“远端租约”）。方向不授予功能权限。心跳使用 WebSocket ping/pong，不注入会话协议帧。
 
@@ -226,8 +226,9 @@ pub enum ConnectError {
 
 - `Session` 以 `Connection` 提供会话机制，按端点契约接入操作封装，可建立在任意 `Channel` 上；不要求叶子运行时具备节点桥操作。
 - `Process` = `spawn` 产出的子进程句柄 + `Session`；D1 保留全部已有构造函数和方法，生成代码及 `CordisRuntimePlugin` 继续使用该外观。
-- `rutis-bridge/local` 可拉起完整框架节点或叶子语言运行时；生成代码迁至对应接入插件并完成兼容验收后，才可移除 `Process` 外观，运行时接入不以节点桥功能落地为前提。
-- 启动参数：`<程序> <通道> --id <id> <插件或 project>`；通道为 `fd:3`、`unix:/path` 或裸路径；端点 id 由启动方指定。
+- `rutis-bridge/local` 可拉起完整框架节点或叶子语言运行时（登记拉起配置，拨号 `spawn:<名字>`）；本机语言运行时由 `rutis-runtime-local` 的 `LocalRuntime` 组合承载、link 与运行时接入，承载本身不认识语言。生成代码迁至对应接入插件并完成兼容验收后，才可移除 `Process` 外观，运行时接入不以节点桥功能落地为前提。
+- 启动参数：`<程序> <通道> <插件或 project>`；通道为 `fd:3`、`unix:/path` 或裸路径。N1 起新会话格式需要端点 id 时追加 `--id <id>`，由启动方指定；兼容会话不传。
+- 是否用继承 fd 由启动方决定：Node 运行时包声明 `rutisChannels` 含 `fd` 时使用；Python 运行时由 `RuntimePlugin::python` 启用；自定义 `Launcher` 以 `inherit_fd()` 声明，未声明的沿用路径方式。
 - 继承 fd：Rust 用 `UnixStream::pair()`，在 `pre_exec` 中 `dup2` 到 fd 3；只允许该 fd 作为通道被继承，其余 fd 保持 `CLOEXEC`，标准流按原有用途保留。stdout 不承载协议帧，可供插件输出。
 - cordis 桥包在 `package.json` 声明 `rutisChannels`（如 `["unix", "fd"]`），构建时与 `rutisProtocol` 一并核对；未声明 `fd` 的旧版本使用路径方式。
 - `spawn` 的 Receiver 在 EOF 后最多等 1 秒获取子进程退出状态，再返回 `Closed`；保留已有退出诊断的逐字兼容，例如 `Cordis process exited with signal: 9 (SIGKILL)`。子进程不自动重启。
@@ -237,11 +238,10 @@ pub enum ConnectError {
 
 | 装饰器 | 契约 |
 | --- | --- |
-| `limit(n)` | 限制消息大小，遵守发送不关闭、接收关闭的超限语义 |
-| `trace` | 调试用，默认关闭；记录须脱敏，不暴露凭据或秘密 |
-| `fault` | 仅测试：延迟、丢弃后关闭、半开（停止转发但不关闭） |
+| `trace` | 调试用，默认关闭（运行时通道由 `RUTIS_INTEROP_TRACE` 开启）；只记录方向、长度与关闭原因，不记录消息内容 |
+| `fault` | 仅测试（`rutis-channel` 的 `testing` feature）：延迟、丢弃后关闭、半开（停止转发但不关闭） |
 
-心跳由具有带外控制能力的承载实现，不作为通用消息装饰器。
+装饰器包装任意 `Channel`，与具体承载无关，位于 `rutis-channel`。心跳与消息大小上限由具体承载实现和配置，不作为通用消息装饰器。通道契约本身以 `rutis_channel::testing::contract` 的形式提供，每种实现在自己的测试中运行。
 
 ## 阶段与版本
 

@@ -12,6 +12,8 @@ mod error;
 mod interop;
 mod loader;
 mod patch;
+#[cfg(feature = "peer")]
+mod peer;
 mod persist;
 mod resolver;
 mod volatile;
@@ -29,6 +31,10 @@ pub use loader::{
     NewEntry, PendingEditDropped, ReconcileReport, RowInfo,
 };
 pub use patch::{apply_patches, Composed, ComposedRow, Layer, Owner, Patch, PatchWarning};
+#[cfg(feature = "peer")]
+pub use peer::{
+    node_schema, register_peer_node, LoaderCatalog, PeerResolver, PeerRows, PeerRowsPlugin,
+};
 pub use persist::{NoPersist, Persist, Version};
 pub use resolver::{Builtins, Chain, Resolved, Resolver};
 pub use volatile::{volatile_key, volatile_paths, VolatileUpdate};

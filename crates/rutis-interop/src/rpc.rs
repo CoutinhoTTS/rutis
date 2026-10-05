@@ -3,9 +3,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{BufRead, BufReader, Write};
-use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
@@ -13,12 +10,15 @@ use std::task::{Context, Poll, Waker};
 use std::thread::ThreadId;
 
 use rutis::BoxFuture;
+use rutis_channel::{Channel, ChannelError, Closer, Sender};
 use serde_json::Value as Json;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::{oneshot, watch, Notify};
 
+pub use crate::protocol::Implementation;
 use crate::protocol::{Frame, Kind, WireValue, VERSION};
-use crate::Error;
+use crate::{Error, Handshake};
+use rutis_channel::PeerId;
 
 pub type Reply = Result<Value, Error>;
 type Callback = dyn Fn(Value) -> Reply + Send + Sync;
@@ -34,7 +34,9 @@ pub enum Value {
     Record(std::collections::BTreeMap<String, Value>),
     Reference(Reference),
     /// As an argument: an AbortSignal the callee receives, aborted when this
-    /// call is cancelled (its future dropped).
+    /// call is cancelled (its future dropped). Received by Rust, it only
+    /// marks the call as cancellable: a Rust callee is cancelled by the
+    /// future it returned being dropped.
     Signal,
 }
 impl Value {
@@ -72,6 +74,7 @@ impl Value {
     pub fn future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
         Self::future_inner(future, true)
     }
+    #[cfg(unix)]
     pub(crate) fn control_future(future: impl Future<Output = Reply> + Send + 'static) -> Self {
         Self::future_inner(future, false)
     }
@@ -406,7 +409,7 @@ fn protected(call: impl FnOnce() -> Reply) -> Reply {
 fn panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
     match panic.downcast::<Error>() {
         Ok(error) => *error,
-        Err(panic) => crate::server::native_error(
+        Err(panic) => crate::native_error(
             panic
                 .downcast_ref::<String>()
                 .cloned()
@@ -418,9 +421,9 @@ fn panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
 tokio::task_local! { static ASYNC_PATH: Vec<String>; }
 thread_local! { static SYNC_PATH: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; }
 thread_local! { static CALLER: RefCell<Option<Connection>> = const { RefCell::new(None) }; }
-/// The session whose `invoke` is being dispatched on this thread, if any. A
-/// dispatcher that forwards the call to another session passes it to
-/// [`Connection::forward`].
+/// The session whose call (an `invoke`, or a call of a function this side
+/// exported) is being dispatched on this thread, if any. Code that calls
+/// another session on its behalf passes it to [`Connection::forward`].
 pub fn caller() -> Option<Connection> {
     CALLER.with(|caller| caller.borrow().clone())
 }
@@ -492,7 +495,7 @@ pub fn rebase(path: &[String], from: &str, to: &str) -> Vec<String> {
 static NEXT_TAG: AtomicU64 = AtomicU64::new(1);
 
 struct Import {
-    peer: Weak<Peer>,
+    peer: Weak<SessionState>,
     id: u64,
     kind: Kind,
     grants: Mutex<u64>,
@@ -601,7 +604,7 @@ struct Calls {
 
 /// Cancels an async call whose future is dropped before it completes.
 struct CancelOnDrop {
-    peer: Weak<Peer>,
+    peer: Weak<SessionState>,
     id: String,
     done: bool,
 }
@@ -630,12 +633,78 @@ impl Drop for Flight {
 pub trait Dispatch: Send + Sync + 'static {
     fn invoke(&self, peer: &Connection, target: &str, method: &str, args: Value) -> Reply;
 }
-struct Peer {
+/// How a session identifies itself and its calls.
+#[derive(Clone, Debug, Default)]
+pub enum Format {
+    /// Protocol 2, as local runtimes speak it: this side calls as `rust:`,
+    /// the far end as `node:`, and the handshake carries only the version.
+    #[default]
+    Compat,
+    /// The endpoint format ([`crate::ENDPOINT_PROTOCOL`]): each side names
+    /// itself in the handshake and calls as `<endpoint id>:<n>`.
+    Endpoint(Endpoint),
+}
+
+/// This side of an endpoint-format session.
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    pub local: PeerId,
+    /// The far end this side expects; the session fails if the handshake
+    /// names another.
+    pub expected: Option<PeerId>,
+    pub implementation: Implementation,
+    /// What this side supports: `objects`, `signals`, `reentrant-sync`,
+    /// `forwarding`. Capabilities grant no permission.
+    pub capabilities: Vec<String>,
+}
+
+impl Endpoint {
+    /// This implementation (rutis-interop), as `local`, with what it
+    /// supports.
+    pub fn rust(local: PeerId) -> Self {
+        Self {
+            local,
+            expected: None,
+            implementation: Implementation {
+                name: "rutis-interop".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+            capabilities: ["objects", "signals", "reentrant-sync", "forwarding"]
+                .map(String::from)
+                .to_vec(),
+        }
+    }
+
+    pub fn expect(mut self, peer: PeerId) -> Self {
+        self.expected = Some(peer);
+        self
+    }
+}
+
+/// What the far end said of itself in an endpoint-format handshake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Greeting {
+    pub endpoint: PeerId,
+    pub implementation: Option<Implementation>,
+    pub capabilities: Vec<String>,
+}
+
+/// One session's state. The session is reached through [`Connection`];
+/// the channel underneath is any [`Channel`].
+struct SessionState {
     /// Process-unique; marks this session's call ids in chains forwarded
     /// to other sessions (see [`rebase`]).
     tag: String,
-    writer: Mutex<UnixStream>,
-    closer: UnixStream,
+    format: Format,
+    /// The far end as the channel's connector verified it, if it did.
+    verified: Option<PeerId>,
+    /// This side's call ids: `rust:` or `<endpoint>:`.
+    local_prefix: String,
+    /// The far end's: `node:`, or `<endpoint>:` once it greeted.
+    remote_prefix: std::sync::OnceLock<String>,
+    greeting: std::sync::OnceLock<Greeting>,
+    writer: Mutex<Box<dyn Sender>>,
+    closer: Arc<dyn Closer>,
     calls: Mutex<Calls>,
     exports: Mutex<Exports>,
     imports: Mutex<HashMap<u64, Weak<Import>>>,
@@ -646,37 +715,69 @@ struct Peer {
     ended: watch::Sender<bool>,
     activity: Arc<Activity>,
 }
-impl Drop for Peer {
+impl Drop for SessionState {
     fn drop(&mut self) {
-        let _ = self.writer.get_mut().unwrap().shutdown(Shutdown::Both);
+        self.closer.close("session dropped");
     }
 }
 
 #[derive(Clone)]
-pub struct Connection(Arc<Peer>);
+pub struct Connection(Arc<SessionState>);
 impl Connection {
-    pub fn connect(stream: UnixStream, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
-        Self::connect_with(
-            stream,
-            dispatch,
-            Box::new(|| Error::Transport("peer disconnected".into())),
-        )
+    /// Start a session on `channel`: sends `hello` and reads frames on a
+    /// thread of its own. When the channel ends, the session closes with
+    /// `peer disconnected` (a normal end) or the channel's reason.
+    pub fn open(channel: Channel, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
+        Self::open_with(channel, dispatch, Format::Compat)
     }
 
-    /// Like [`Connection::connect`]; `disconnected` builds the error that
-    /// ends the session when the peer goes away, for example with the exit
-    /// status of its process. It runs on the reader thread and may block.
-    pub fn connect_with(
-        stream: UnixStream,
+    /// [`Connection::open`] in `format`. In the endpoint format the session
+    /// is ready only once the far end greeted with the endpoint the channel
+    /// verified (if it verified one) and this side expects (if it expects
+    /// one); otherwise [`Connection::ready`] fails with [`Error::Handshake`].
+    pub fn open_with(
+        channel: Channel,
         dispatch: Arc<dyn Dispatch>,
-        disconnected: Box<dyn FnOnce() -> Error + Send>,
+        format: Format,
     ) -> Result<Self, Error> {
-        stream.set_nonblocking(false).map_err(transport)?;
-        let reader = stream.try_clone().map_err(transport)?;
-        let peer = Self(Arc::new(Peer {
+        let Channel {
+            sender,
+            mut receiver,
+            closer,
+            info,
+        } = channel;
+        let label = info.label;
+        let (local_prefix, remote_prefix, hello) = match &format {
+            Format::Compat => (
+                "rust:".to_owned(),
+                std::sync::OnceLock::from("node:".to_owned()),
+                Frame::Hello {
+                    version: VERSION,
+                    endpoint: None,
+                    implementation: None,
+                    capabilities: None,
+                },
+            ),
+            Format::Endpoint(endpoint) => (
+                format!("{}:", endpoint.local),
+                std::sync::OnceLock::new(),
+                Frame::Hello {
+                    version: crate::ENDPOINT_PROTOCOL,
+                    endpoint: Some(endpoint.local.to_string()),
+                    implementation: Some(endpoint.implementation.clone()),
+                    capabilities: Some(endpoint.capabilities.clone()),
+                },
+            ),
+        };
+        let peer = Self(Arc::new(SessionState {
             tag: format!("s{}", NEXT_TAG.fetch_add(1, Ordering::Relaxed)),
-            closer: stream.try_clone().map_err(transport)?,
-            writer: Mutex::new(stream),
+            format,
+            verified: info.peer,
+            local_prefix,
+            remote_prefix,
+            greeting: std::sync::OnceLock::new(),
+            closer,
+            writer: Mutex::new(sender),
             calls: Mutex::new(Calls::default()),
             exports: Mutex::new(Exports::default()),
             imports: Mutex::new(HashMap::new()),
@@ -694,23 +795,41 @@ impl Connection {
         std::thread::Builder::new()
             .name("rutis-interop-reader".into())
             .spawn(move || {
-                let result: Result<(), Error> = (|| {
-                    for line in BufReader::new(reader).lines() {
-                        let Ok(line) = line else { break };
-                        let Some(peer) = weak.upgrade().map(Self) else {
-                            return Ok(());
-                        };
-                        peer.receive(serde_json::from_str(&line).map_err(transport)?)?;
-                    }
-                    Err(disconnected())
+                let result: Result<(), Error> = (|| loop {
+                    let message = match receiver.recv() {
+                        Ok(Some(message)) => message,
+                        Ok(None) => return Err(Error::Transport("peer disconnected".into())),
+                        Err(error) => return Err(ended(&label, error)),
+                    };
+                    let Some(peer) = weak.upgrade().map(Self) else {
+                        return Ok(());
+                    };
+                    peer.receive(serde_json::from_slice(&message).map_err(transport)?)?;
                 })();
                 if let (Err(error), Some(peer)) = (result, weak.upgrade()) {
                     Self(peer).close(error);
                 }
             })
             .map_err(transport)?;
-        peer.write(Frame::Hello { version: VERSION })?;
+        peer.write(hello)?;
         Ok(peer)
+    }
+
+    /// What ended the session, once it ended.
+    pub fn close_reason(&self) -> Option<Error> {
+        self.0.calls.lock().unwrap().closed.clone()
+    }
+
+    /// What the far end said of itself (endpoint format), once it greeted.
+    pub fn greeting(&self) -> Option<&Greeting> {
+        self.0.greeting.get()
+    }
+
+    /// Whether the far end declared `capability` (endpoint format). A
+    /// compat session declares none.
+    pub fn supports(&self, capability: &str) -> bool {
+        self.greeting()
+            .is_some_and(|greeting| greeting.capabilities.iter().any(|c| c == capability))
     }
     pub async fn ready(&self) -> Result<(), Error> {
         let mut ready = self.0.ready.subscribe();
@@ -733,7 +852,7 @@ impl Connection {
         // Interrupt a blocked write before taking the writer lock. Serialize
         // table teardown with encoding/sending so no export can be added after
         // teardown and no partial encoding rollback races the cleared table.
-        let _ = self.0.closer.shutdown(Shutdown::Both);
+        self.0.closer.close(&error.to_string());
         let writer = self.0.writer.lock().unwrap();
         let (waiting, incoming, awaiting) = {
             let mut calls = self.0.calls.lock().unwrap();
@@ -841,13 +960,12 @@ impl Connection {
         }
         result
     }
-    fn write_locked(&self, writer: &mut UnixStream, frame: Frame) -> Result<(), Error> {
+    fn write_locked(&self, writer: &mut Box<dyn Sender>, frame: Frame) -> Result<(), Error> {
         if let Some(error) = &self.0.calls.lock().unwrap().closed {
             return Err(error.clone());
         }
-        let mut bytes = serde_json::to_vec(&frame).map_err(transport)?;
-        bytes.push(b'\n');
-        writer.write_all(&bytes).map_err(transport)
+        let bytes = serde_json::to_vec(&frame).map_err(transport)?;
+        writer.send(&bytes).map_err(|error| ended("", error))
     }
     fn send(&self, call: Operation, mut waiting: Waiting) -> Result<String, Error> {
         let mut writer = self.0.writer.lock().unwrap();
@@ -863,7 +981,7 @@ impl Connection {
                 .next
                 .checked_add(1)
                 .ok_or_else(|| transport("call identifiers exhausted"))?;
-            format!("rust:{}", calls.next)
+            format!("{}{}", self.0.local_prefix, calls.next)
         };
         let mut path = current_path();
         if let Operation::Await(_, origin) = &call {
@@ -928,7 +1046,8 @@ impl Connection {
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
-                related.sort_by_key(|id| id.strip_prefix("node:").unwrap().parse::<u64>().unwrap());
+                let remote = self.remote_prefix();
+                related.sort_by_key(|id| id.strip_prefix(remote).unwrap().parse::<u64>().unwrap());
                 for id in related {
                     let incoming = calls.incoming.remove(&id).unwrap();
                     sender.send(Message::Invoke(incoming)).map_err(transport)?;
@@ -1073,7 +1192,10 @@ impl Connection {
                     .map(|value| self.decode(value))
                     .collect::<Result<_, _>>()?,
             ),
-            WireValue::Signal => return Err(transport("Rust receives no AbortSignal values")),
+            // A Rust callee is cancelled by its future being dropped, once
+            // the caller gives the call up and releases its result; the
+            // signal itself only marks the call as cancellable.
+            WireValue::Signal => Value::Signal,
             WireValue::Record(fields) => Value::Record(
                 fields
                     .into_iter()
@@ -1138,6 +1260,64 @@ impl Connection {
         })
     }
     /// The waiter for a reply, `None` for a late reply to a cancelled call.
+    /// The far end's call id prefix; empty (matching nothing a valid far
+    /// end sends) before it greeted.
+    fn remote_prefix(&self) -> &str {
+        self.0.remote_prefix.get().map_or("\0", String::as_str)
+    }
+    /// Check the far end's handshake against this session's format.
+    fn greet(
+        &self,
+        version: u32,
+        endpoint: Option<String>,
+        implementation: Option<Implementation>,
+        capabilities: Option<Vec<String>>,
+    ) -> Result<(), Error> {
+        let incompatible = |reason: String| Error::Handshake(Handshake::Incompatible(reason));
+        let Format::Endpoint(local) = &self.0.format else {
+            if version != VERSION || endpoint.is_some() {
+                return Err(incompatible(format!(
+                    "the far end speaks protocol {version}, this side {VERSION}"
+                )));
+            }
+            return Ok(());
+        };
+        if version != crate::ENDPOINT_PROTOCOL {
+            return Err(incompatible(format!(
+                "the far end speaks protocol {version}, this side {}",
+                crate::ENDPOINT_PROTOCOL
+            )));
+        }
+        let endpoint = endpoint
+            .ok_or_else(|| incompatible("the far end named no endpoint".into()))
+            .and_then(|endpoint| {
+                PeerId::new(endpoint).map_err(|error| incompatible(error.to_string()))
+            })?;
+        for (whose, expected) in [
+            ("verified", &self.0.verified),
+            ("expected", &local.expected),
+        ] {
+            if let Some(expected) = expected {
+                if expected != &endpoint {
+                    return Err(Error::Handshake(Handshake::IdentityMismatch(format!(
+                        "the far end greeted as {endpoint}, but {expected} is the {whose} endpoint"
+                    ))));
+                }
+            }
+        }
+        if endpoint == local.local {
+            return Err(Error::Handshake(Handshake::IdentityMismatch(format!(
+                "the far end greeted as this endpoint ({endpoint})"
+            ))));
+        }
+        let _ = self.0.remote_prefix.set(format!("{endpoint}:"));
+        let _ = self.0.greeting.set(Greeting {
+            endpoint,
+            implementation,
+            capabilities: capabilities.unwrap_or_default(),
+        });
+        Ok(())
+    }
     fn reply_target(&self, id: &str) -> Result<Option<Waiting>, Error> {
         let mut calls = self.0.calls.lock().unwrap();
         if let Some(waiting) = calls.waiting.remove(id) {
@@ -1163,10 +1343,17 @@ impl Connection {
         if let Some(error) = &self.0.calls.lock().unwrap().closed {
             return Err(error.clone());
         }
-        if let Frame::Hello { version } = frame {
-            if version != VERSION || self.0.ready.borrow().is_some() {
-                return Err(transport("incompatible or duplicate protocol handshake"));
+        if let Frame::Hello {
+            version,
+            endpoint,
+            implementation,
+            capabilities,
+        } = frame
+        {
+            if self.0.ready.borrow().is_some() {
+                return Err(transport("duplicate protocol handshake"));
             }
+            self.greet(version, endpoint, implementation, capabilities)?;
             self.0.ready.send_replace(Some(Ok(())));
             return Ok(());
         }
@@ -1272,7 +1459,7 @@ impl Connection {
             } => (id, path, Accepted::Await(self.export(reference)?)),
             Frame::Hello { .. } => unreachable!(),
         };
-        if !id.starts_with("node:") || path.contains(&id) {
+        if !id.starts_with(self.remote_prefix()) || path.contains(&id) {
             return Err(transport("invalid invocation identity/path"));
         }
         path.push(id.clone());
@@ -1307,7 +1494,7 @@ impl Connection {
             }
             let sequence = incoming
                 .id
-                .strip_prefix("node:")
+                .strip_prefix(self.remote_prefix())
                 .and_then(|n| n.parse::<u64>().ok())
                 .filter(|n| *n > calls.received && *n <= 9_007_199_254_740_991)
                 .ok_or_else(|| transport("invalid or repeated invocation identity"))?;
@@ -1425,7 +1612,12 @@ impl Connection {
                     }));
             }
             Accepted::Call(object, args) => {
-                self.respond(id, object.call(args));
+                // A function this side exported, called by this session: code
+                // in it that calls another session forwards from this one.
+                let previous = CALLER.with(|caller| caller.replace(Some(self.clone())));
+                let result = object.call(args);
+                CALLER.with(|caller| caller.replace(previous));
+                self.respond(id, result);
                 drop(_flight);
             }
             Accepted::Invoke(target, method, args) => {
@@ -1503,9 +1695,18 @@ fn finish(waiting: Waiting, result: Reply) {
 fn transport(error: impl std::fmt::Display) -> Error {
     Error::Transport(error.to_string())
 }
+/// The error a channel failure ends a session with: `"<label>: <reason>"`,
+/// or the bare reason for an unlabelled channel.
+fn ended(label: &str, error: ChannelError) -> Error {
+    match label {
+        "" => transport(error),
+        label => Error::Transport(format!("{label}: {error}")),
+    }
+}
 
 mod relay;
 use relay::Relayed;
 
+// The tests script the far end over a memory channel.
 #[cfg(test)]
 mod tests;

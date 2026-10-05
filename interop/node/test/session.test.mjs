@@ -1,14 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { Peer } from '../src/peer.mjs'
+import { Session } from '../src/session.mjs'
 
 const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).rutisProtocol
 const data = value => ({ type: 'data', value })
 function harness(dispatch) {
   const sent = [], incoming = []
   let fault
-  const peer = new Peer({
+  const peer = new Session({
     dispatch,
     send: line => sent.push(JSON.parse(line)),
     pump: () => { assert.ok(incoming.length, 'sync caller must not strand'); peer.receive(incoming.shift()) },
@@ -122,4 +122,26 @@ test('objects with behaviour cross as live object references', async () => {
   assert.equal(account.balance, 7)
   assert.equal(fault(), undefined)
   peer.close()
+})
+
+test('an object reference goes only to a far end that declared objects', async () => {
+  for (const [capabilities, expected] of [[['signals'], 'throw'], [['objects'], 'return']]) {
+    const sent = []
+    const session = new Session({
+      dispatch: () => ({ today() { return 'monday' } }),
+      send: line => sent.push(JSON.parse(line)),
+      pump: () => {},
+      endpoint: { local: 'node', expected: 'main' },
+    })
+    session.start()
+    session.receive({ op: 'hello', version: 3, endpoint: 'main', capabilities })
+    await session.ready
+    session.receive({ op: 'invoke', id: 'main:1', path: [], target: 'svc', method: 'get', args: data([]) })
+    await Promise.resolve()
+    const reply = sent.at(-1)
+    assert.equal(reply.op, expected, JSON.stringify(reply))
+    if (expected === 'throw') assert.match(reply.error.message, /cannot receive object references/)
+    else assert.equal(reply.value.value.kind, 'object')
+    session.close()
+  }
 })

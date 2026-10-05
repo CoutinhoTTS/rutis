@@ -139,16 +139,16 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 
 `Mount { anchor: Some(package_json), .. }` 不带插件时启动一个空的 Cordis Context，之后用 `Process::load_row` / `unload_row` 逐个装载、卸载插件，`describe_row` 读取插件声明的内容：schemastery `Config` 转成的 JSON Schema、`inject` 的服务名，以及包的 `package.json` 里 `rutis.provides` 声明的、要提供给 rutis 的服务和方法形状。`load_row_exporting` 装载时把这些服务投到 rutis（`row_projection`，键为 `host_key(name)`）；`lease_host` 按行向 Cordis 注册宿主服务，最后一个使用者释放后撤销。rutis-loader 的 `InteropResolver` 就是这样把 JavaScript 插件作为行来管理的。
 
-要按 rutis 的生命周期管理这个 Context，挂载 `RuntimePlugin`。它是一个普通插件：apply 时启动 Node 进程，提供 `Runtime` 服务；清理时先撤销服务，再关闭进程。
+要按 rutis 的生命周期管理这个 Context，挂载运行时插件。本机运行时用 [`rutis-runtime-local`](../rutis-runtime-local) 的 `LocalRuntime`：本机承载（`rutis-transport-local`）以继承 fd 拉起进程，link 以兼容协议（2）接入，`RuntimePlugin` 在这条会话上提供 `Runtime` 服务；清理时先撤销服务，再关闭进程。远程运行时用 `RuntimePlugin::remote(名字)`，会话来自到它的 link（见 rutis-bridge 的 `RuntimeAccessPlugin`）。两种运行时的行完全一样。（`RuntimePlugin::node` / `python` / `launcher` 自己拉起进程，是保留的兼容路径，已标为弃用。）
 
 - 运行时本身不依赖任何服务。逐个装载的插件用到哪个宿主服务，就由那个插件去等它、在运行期间租用它（`Process::lease_host`），宿主服务撤销时只有用到它的插件停下。
 - `.host(名字, 方法)` 只声明宿主服务的方法形状，给没有自己报出形状（`HostDispatch::methods`）的服务用；它不再让运行时等待这个服务。
-- Node 进程意外结束时，运行时撤销服务、保持 Active；依赖它的插件回到等待。之后由应用调用该 fiber 的 `restart` 重新启动。
+- 进程意外结束时，它的 link 停止、会话撤销，运行时随之停下，依赖它的插件回到等待；`RuntimeHandle` 的状态是 `Down(原因)`，说明进程怎样结束。之后由应用调用 `LocalRuntime` 那个 fiber 的 `restart` 重新启动（拉起新进程）。
 - 运行时有名字（`.named(名字)`，默认 `"node"`），服务键是 `Runtime::key(名字)`。所以同一个应用里可以同时有多个运行时，包括不同语言的。
 
 ```rust
 root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe))?;
-let runtime = RuntimePlugin::node(node_package, anchor).host("probe", json!({ "record": "sync" }));
+let runtime = LocalRuntime::node(node_package, anchor).host("probe", json!({ "record": "sync" }));
 let handle = runtime.handle();   // 给 rutis-loader 的 InteropResolver
 let view = root.plugin(runtime);
 ```
@@ -159,17 +159,21 @@ let view = root.plugin(runtime);
 
 | feature | 内容 | 默认 |
 | --- | --- | --- |
-| `node` | Node 运行时（`RuntimePlugin::node`）、构建期代码生成（`build`，静态挂载用）及其依赖 syn、quote、toml | 开 |
-| `python` | Python 运行时（`RuntimePlugin::python`） | 关 |
+| `node` | Node 运行时、构建期代码生成（`build`，静态挂载用）及其依赖 syn、quote、toml | 开 |
+| `python` | Python 运行时 | 关 |
+
+`LocalRuntime::node` / `python` 在 `rutis-runtime-local` 里，用同名 feature 打开；语言怎样启动由这里的 `Launcher::node` / `Launcher::python` 给出。
 
 协议、进程管理、服务投影（`Process`、`Projection`、`RuntimePlugin` 本身、`Launcher`）不属于任何一种语言，总是可用。只用 Python 的应用写 `rutis-interop = { version = "0.3", default-features = false, features = ["python"] }`；不挂运行时插件，就不会启动任何进程。
 
 一种语言一个运行时插件、一个进程。它们和 Node 运行时说同一套协议和行契约（`rows.*`、`hosts.*`、服务投影），所以 rutis-loader 用同样的方式管理它们的插件。
 
-- **Python**：`RuntimePlugin::python(sdk, project)`，名字为 `"py"`。`sdk` 是本仓库的 `interop/python`（Python 包 `rutis_runtime`），`project` 是插件模块所在的目录。用 `python3 -m rutis_runtime` 启动，需要 Python 3.12 或更高；`.interpreter(路径)` 换解释器（例如项目的 venv）。写法见 [interop/python/README.md](../../interop/python/README.md)。
-- 其他启动方式：`Mount::launcher` 接受任意 `Launcher { program, args, env, cwd }`，它的最后两个参数是 socket 路径和项目位置。
+- **Python**：`LocalRuntime::python(sdk, project)`，名字为 `"py"`。`sdk` 是本仓库的 `interop/python`（Python 包 `rutis_runtime`），`project` 是插件模块所在的目录。用 `python3 -m rutis_runtime` 启动，需要 Python 3.12 或更高；`.interpreter(路径)` 换解释器（例如项目的 venv）。写法见 [interop/python/README.md](../../interop/python/README.md)。
+- 其他启动方式：`Mount::launcher` 接受任意 `Launcher`（`program`、`args`、`env`、`cwd`），它的最后两个参数是通道和项目位置。通道默认是要回拨的 socket 路径；进程能接继承的 socket 时用 `.inherit_fd()` 声明，通道就是 `fd:3`（Node、Python 运行时都已支持）。设置 `RUTIS_INTEROP_TRACE` 时，运行时通道上的每条消息都会在 stderr 记一行（方向和长度，不含内容）。
 
 Python 运行时只跑"叶子插件"：插件有 `apply(ctx, config)`，在里面用服务（`ctx.use`）、提供服务（`ctx.provide`），返回清理函数；依赖、启停顺序和重启都由 rutis 决定。它在 `mount` 时报告 `leaf` 特性，rutis-loader 据此让插件 `inject` 的每个名字都在 rutis 里门控。
+
+会话不依赖具体通道：`rpc::Connection::open(channel, dispatch)` 可以建立在任意 [`rutis-channel`](../rutis-channel) 的 `Channel` 上（有序、可靠、保持消息边界）。本机运行时进程仍走 Unix socket、逐行 JSON，线格式不变；`Connection::connect(UnixStream, …)` 保留为它的简写。
 
 同一个进程里的插件互相使用服务时直接拿到对象本身，不走进程间通信。跨进程的调用经 Rust 转发，同步调用链会按会话改写（`rpc::rebase`），回调能回到正在等待的线程。
 

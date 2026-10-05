@@ -212,69 +212,87 @@ async fn sync_await_reports_known_executor_cycle_but_allows_ready_future() {
     peer.dispose().await.unwrap();
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn node_sync_wait_pumps_callbacks_and_reports_its_executor_cycle() {
-    use rutis_interop::rpc::{Connection, Dispatch, Reference, Reply};
-    use std::sync::Mutex;
-    struct Service(Mutex<Option<Reference>>);
-    impl Dispatch for Service {
-        fn invoke(&self, _: &Connection, _: &str, method: &str, args: Value) -> Reply {
-            if method == "dispose" {
-                return Ok(Value::Undefined);
+use rutis_interop::rpc::{Connection, Dispatch, Reference, Reply};
+use std::sync::Mutex;
+
+/// What `interop/node/test/fixtures/rpc-client.mjs` calls: synchronous
+/// waits that pump callbacks, saved callbacks, lazy futures, executor
+/// cycles and error graphs.
+struct Service(Mutex<Option<Reference>>);
+impl Dispatch for Service {
+    fn invoke(&self, _: &Connection, _: &str, method: &str, args: Value) -> Reply {
+        if method == "dispose" {
+            return Ok(Value::Undefined);
+        }
+        let mut args = args.list()?;
+        match method {
+            "apply" => args.remove(0).reference()?.call(Value::List(args)),
+            "add" => Ok(json!(number(args.remove(0)) + number(args.remove(0))).into()),
+            "save" => {
+                *self.0.lock().unwrap() = Some(args.remove(0).reference()?);
+                Ok(Value::Undefined)
             }
-            let mut args = args.list()?;
-            match method {
-                "apply" => args.remove(0).reference()?.call(Value::List(args)),
-                "add" => Ok(json!(number(args.remove(0)) + number(args.remove(0))).into()),
-                "save" => {
-                    *self.0.lock().unwrap() = Some(args.remove(0).reference()?);
-                    Ok(Value::Undefined)
-                }
-                "fire" => {
-                    let callback = self.0.lock().unwrap().clone().unwrap();
-                    callback.call(Value::List(args))
-                }
-                "saved" => Ok(Value::Reference(self.0.lock().unwrap().clone().unwrap())),
-                "clear" => {
-                    self.0.lock().unwrap().take();
-                    Ok(Value::Undefined)
-                }
-                "onlyInvoke" => Ok(json!(args
-                    .remove(0)
-                    .reference()?
-                    .call(json!([]).into())?
-                    .reference()?
-                    .is_future())
-                .into()),
-                "awaitCallback" => {
-                    let callback = args.remove(0).reference()?;
-                    Ok(Value::future(async move {
-                        callback
-                            .call_async(json!([]).into())
-                            .await?
-                            .reference()?
-                            .wait_async()
-                            .await
-                    }))
-                }
-                "syncAwait" => args
-                    .remove(0)
-                    .reference()?
-                    .call(json!([]).into())?
-                    .reference()?
-                    .wait(),
-                "dispose" => Ok(Value::Undefined),
-                _ => Err(Error::Value(method.into())),
+            "fire" => {
+                let callback = self.0.lock().unwrap().clone().unwrap();
+                callback.call(Value::List(args))
             }
+            "saved" => Ok(Value::Reference(self.0.lock().unwrap().clone().unwrap())),
+            "clear" => {
+                self.0.lock().unwrap().take();
+                Ok(Value::Undefined)
+            }
+            "onlyInvoke" => Ok(json!(args
+                .remove(0)
+                .reference()?
+                .call(json!([]).into())?
+                .reference()?
+                .is_future())
+            .into()),
+            "awaitCallback" => {
+                let callback = args.remove(0).reference()?;
+                Ok(Value::future(async move {
+                    callback
+                        .call_async(json!([]).into())
+                        .await?
+                        .reference()?
+                        .wait_async()
+                        .await
+                }))
+            }
+            "syncAwait" => args
+                .remove(0)
+                .reference()?
+                .call(json!([]).into())?
+                .reference()?
+                .wait(),
+            "dispose" => Ok(Value::Undefined),
+            _ => Err(Error::Value(method.into())),
         }
     }
+}
+
+fn rpc_client() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/node/test/fixtures/rpc-client.mjs")
+}
+
+/// Run the fixture's session on `channel` and wait for it to pass.
+async fn fixture_passes(peer: Connection, mut child: tokio::process::Child) {
+    peer.ready().await.unwrap();
+    let status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+    peer.closed().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn node_sync_wait_pumps_callbacks_and_reports_its_executor_cycle() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("rpc.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../interop/node/test/fixtures/rpc-client.mjs");
-    let mut child = tokio::process::Command::new("node")
-        .arg(fixture)
+    let child = tokio::process::Command::new("node")
+        .arg(rpc_client())
         .arg(socket)
         .kill_on_drop(true)
         .spawn()
@@ -285,13 +303,132 @@ async fn node_sync_wait_pumps_callbacks_and_reports_its_executor_cycle() {
         Arc::new(Service(Mutex::new(None))),
     )
     .unwrap();
-    peer.ready().await.unwrap();
-    let status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+    fixture_passes(peer, child).await;
+}
+
+mod websocket {
+    use super::*;
+    use rutis_bridge::{Credential, Dial, Identity, Registration, StaticIdentity, Transport};
+    use rutis_channel::PeerId;
+    use rutis_transport_websocket::{Config, ListenerConfig, WebSocketTransport};
+    use tokio::io::AsyncBufReadExt;
+
+    const PROTOCOL: &str = "rutis.3";
+
+    fn endpoint(expected: &str) -> rutis_interop::rpc::Format {
+        rutis_interop::rpc::Format::Endpoint(
+            rutis_interop::rpc::Endpoint::rust(id("main")).expect(id(expected)),
+        )
+    }
+
+    fn id(s: &str) -> PeerId {
+        PeerId::new(s).unwrap()
+    }
+
+    /// The same session, Node dialing a Rust listener over WebSocket.
+    #[tokio::test(flavor = "current_thread")]
+    async fn node_dialing_a_rust_listener() {
+        let transport = WebSocketTransport::start(Config::new().listener(ListenerConfig::new(
+            "public",
+            "127.0.0.1:0".parse().unwrap(),
+            id("main"),
+        )))
+        .unwrap();
+        let (sender, accepted) = std::sync::mpsc::channel();
+        let sender = Mutex::new(sender);
+        let _registered = transport
+            .register(Registration {
+                listener: "public".into(),
+                peer: id("node"),
+                identity: Arc::new(
+                    StaticIdentity::new(id("main")).accept_token("node-token", id("node")),
+                ),
+                protocol: PROTOCOL.into(),
+                deliver: Box::new(move |channel| {
+                    let _ = sender.lock().unwrap().send(channel);
+                }),
+            })
+            .unwrap();
+        let address = format!("ws://{}/rutis", transport.local_addr("public").unwrap());
+        let child = tokio::process::Command::new("node")
+            .arg(rpc_client())
+            .arg(address)
+            .env("RUTIS_INTEROP_TOKEN", "node-token")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let channel = tokio::task::spawn_blocking(move || {
+            accepted.recv_timeout(std::time::Duration::from_secs(10))
+        })
         .await
         .unwrap()
         .unwrap();
-    assert!(status.success());
-    peer.closed().await;
+        assert_eq!(channel.info.peer, Some(id("node")));
+        let peer = Connection::open_with(
+            channel,
+            Arc::new(Service(Mutex::new(None))),
+            endpoint("node"),
+        )
+        .unwrap();
+        fixture_passes(peer, child).await;
+    }
+
+    /// The same session, Rust dialing a Node listener over WebSocket.
+    #[tokio::test(flavor = "current_thread")]
+    async fn rust_dialing_a_node_listener() {
+        let mut child = tokio::process::Command::new("node")
+            .arg(rpc_client())
+            .arg("listen:ws://127.0.0.1:0/rutis")
+            .arg("node")
+            .arg("main")
+            .env("RUTIS_INTEROP_TOKEN", "main-token")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+        let address = loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the listener's address");
+            if let Some(address) = line.strip_prefix("rutis-interop: listening on ") {
+                break address.to_owned();
+            }
+        };
+        let transport = WebSocketTransport::start(Config::new()).unwrap();
+        let identity: Arc<dyn Identity> = Arc::new(
+            StaticIdentity::new(id("main"))
+                .present(id("node"), Credential::Bearer("main-token".into())),
+        );
+        let channel = transport
+            .dial(
+                &Dial::address(address)
+                    .peer(id("node"))
+                    .identity(identity)
+                    .protocol(PROTOCOL),
+            )
+            .await
+            .unwrap();
+        let peer = Connection::open_with(
+            channel,
+            Arc::new(Service(Mutex::new(None))),
+            endpoint("node"),
+        )
+        .unwrap();
+        assert!(peer.ready().await.is_ok());
+        assert_eq!(
+            peer.greeting()
+                .unwrap()
+                .implementation
+                .as_ref()
+                .unwrap()
+                .name,
+            "@arcships/rutis-interop"
+        );
+        fixture_passes(peer, child).await;
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

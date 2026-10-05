@@ -22,16 +22,30 @@ import contextvars
 import dataclasses
 import json
 import re
+import socket
 import sys
 import threading
 import traceback
 import weakref
 from typing import Any, Callable
 
+from .channel import SocketChannel
+
 PROTOCOL = 2
+# The endpoint format: endpoint ids in the handshake and the call ids,
+# capabilities, either side calling the other.
+ENDPOINT_PROTOCOL = 3
+# What this implementation supports in the endpoint format. It sends objects
+# but cannot receive them, so it does not declare `objects`.
+CAPABILITIES = ["signals", "reentrant-sync"]
+IMPLEMENTATION = {"name": "rutis-runtime", "version": "0.3.0"}
 MAX_SAFE = 9_007_199_254_740_991
-_RUST_ID = re.compile(r"^rust:[1-9][0-9]*$")
-_ORIGIN_ID = re.compile(r"^(node|rust):[1-9][0-9]*$")
+_ENDPOINT_ID = re.compile(r"^[a-z0-9-]+$")
+_COMPAT_ORIGIN = re.compile(r"^(node|rust):[1-9][0-9]*$")
+# An id in a chain: either side's, possibly tagged with the session it came
+# through (`s3/mac:4`).
+_ENDPOINT_ORIGIN = re.compile(r"^(s[0-9]+/)?[a-z0-9-]+:[1-9][0-9]*$")
+_SEQUENCE = re.compile(r"^[1-9][0-9]*$")
 
 
 class _Undefined:
@@ -113,7 +127,9 @@ def decode_error(failure: dict) -> RemoteError:
 
 
 def dumps(frame: dict) -> bytes:
-    return (json.dumps(frame, separators=(",", ":"), allow_nan=False) + "\n").encode()
+    """Compact JSON; newlines inside strings are escaped, so a frame never
+    contains a raw one. The channel frames it."""
+    return json.dumps(frame, separators=(",", ":"), allow_nan=False).encode()
 
 
 _DATA = (type(None), bool, int, float, str)
@@ -244,15 +260,20 @@ class Peer:
 
     def __init__(
         self,
-        sock,
+        channel,
         dispatch: Callable,
         settled: Callable | None = None,
         reentrant: bool = True,
+        endpoint: dict | None = None,
     ):
+        """`endpoint` ({"local", "expected"?, "verified"?, "declare"?}) selects
+        the endpoint format (`declare`: capabilities beyond the session's, such
+        as the contract); without it the session speaks the compat protocol."""
         self._reentrant = reentrant
         self.loop = asyncio.get_running_loop()
         self._thread = threading.get_ident()
-        self._sock = sock
+        # A socket is a newline-framed channel.
+        self._channel = SocketChannel(channel) if isinstance(channel, socket.socket) else channel
         self._write_lock = threading.Lock()
         self._dispatch = dispatch
         self._settled = settled
@@ -273,10 +294,20 @@ class Peer:
         self._context: contextvars.ContextVar[list] = contextvars.ContextVar("rutis_path", default=[])
         self._tasks: dict[str, asyncio.Future] = {}
         self._signals: dict[str, Signal] = {}
+        # (call, result) while a call's result is encoded.
+        self._answering: tuple[str, Any] | None = None
         self._decoding_for: str | None = None
         self._active = 0
         self._draining: list[asyncio.Future] = []
         self._handshake = False
+        # Call id prefixes: `node:` / `rust:` (compat), `<endpoint>:` (endpoint format).
+        self._endpoint = endpoint
+        if endpoint is not None and not _ENDPOINT_ID.match(endpoint["local"]):
+            raise ValueError(f"invalid endpoint id {endpoint['local']}")
+        self._local = f"{endpoint['local']}:" if endpoint else "node:"
+        self._remote: str | None = None if endpoint else "rust:"
+        # What the far end said of itself (endpoint format), once it greeted.
+        self.greeting: dict | None = None
         self.closed_error: BaseException | None = None
         self.ready: asyncio.Future = self.loop.create_future()
         self.closed: asyncio.Future = self.loop.create_future()
@@ -286,14 +317,59 @@ class Peer:
 
     def start(self) -> None:
         self._reader.start()
-        self._send({"op": "hello", "version": PROTOCOL})
+        if self._endpoint is None:
+            self._send({"op": "hello", "version": PROTOCOL})
+        else:
+            self._send(
+                {
+                    "op": "hello",
+                    "version": ENDPOINT_PROTOCOL,
+                    "endpoint": self._endpoint["local"],
+                    "implementation": IMPLEMENTATION,
+                    "capabilities": CAPABILITIES + list(self._endpoint.get("declare", [])),
+                }
+            )
+
+    @property
+    def _origin_id(self):
+        return _COMPAT_ORIGIN if self._endpoint is None else _ENDPOINT_ORIGIN
+
+    def supports(self, capability: str) -> bool:
+        return self.greeting is not None and capability in self.greeting["capabilities"]
+
+    def _greet(self, frame: dict) -> None:
+        version = frame.get("version")
+        if self._endpoint is None:
+            if version != PROTOCOL or "endpoint" in frame:
+                raise ValueError(f"incompatible session: the far end speaks protocol {version}, this side {PROTOCOL}")
+            return
+        if version != ENDPOINT_PROTOCOL:
+            raise ValueError(
+                f"incompatible session: the far end speaks protocol {version}, this side {ENDPOINT_PROTOCOL}"
+            )
+        endpoint = frame.get("endpoint")
+        if not isinstance(endpoint, str) or not _ENDPOINT_ID.match(endpoint):
+            raise ValueError("incompatible session: the far end named no valid endpoint")
+        for whose in ("verified", "expected"):
+            expected = self._endpoint.get(whose)
+            if expected is not None and expected != endpoint:
+                raise ValueError(
+                    f"endpoint mismatch: the far end greeted as {endpoint}, but {expected} is the {whose} endpoint"
+                )
+        if endpoint == self._endpoint["local"]:
+            raise ValueError(f"endpoint mismatch: the far end greeted as this endpoint ({endpoint})")
+        self._remote = f"{endpoint}:"
+        capabilities = frame.get("capabilities")
+        self.greeting = {
+            "endpoint": endpoint,
+            "implementation": frame.get("implementation"),
+            "capabilities": capabilities if isinstance(capabilities, list) else [],
+        }
 
     def _read(self) -> None:
-        stream = self._sock.makefile("rb")
         try:
-            for line in stream:
-                frame = json.loads(line)
-                self._deliver(frame)
+            while (message := self._channel.recv()) is not None:
+                self._deliver(json.loads(message))
         except Exception as error:  # noqa: BLE001 - any failure ends the session
             self._deliver((_CLOSED, f"session failed: {error}"))
             return
@@ -329,7 +405,7 @@ class Peer:
             raise self.closed_error
         data = dumps(frame)
         with self._write_lock:
-            self._sock.sendall(data)
+            self._channel.send(data)
 
     def close(self, error: BaseException | None = None) -> None:
         if self.closed_error is not None:
@@ -355,7 +431,7 @@ class Peer:
     def _fault(self, error: BaseException) -> None:
         self.close(error)
         try:
-            self._sock.close()
+            self._channel.close(str(error))
         except OSError:
             pass
 
@@ -374,7 +450,7 @@ class Peer:
         self._next += 1
         if self._next > MAX_SAFE:
             raise RuntimeError("call identifiers exhausted")
-        return f"node:{self._next}"
+        return f"{self._local}{self._next}"
 
     # ── Values ───────────────────────────────────────────────────
 
@@ -398,7 +474,12 @@ class Peer:
                 self._ref += 1
                 ref = self._ref
                 kind = "future" if asyncio.isfuture(value) else "function" if callable(value) else "object"
+                if kind == "object" and self._endpoint is not None and not self.supports("objects"):
+                    raise ValueError("the far end cannot receive object references")
                 entry = _Export(value, kind, list(self._path()), business)
+                # The result of a call: awaiting it is awaiting that call.
+                if kind == "future" and self._answering is not None and self._answering[1] is value:
+                    entry.call = self._answering[0]
                 self._identities[key] = ref
                 self._exports[ref] = entry
                 if kind == "future":
@@ -475,7 +556,7 @@ class Peer:
             or kind not in ("function", "future", "object")
             or not isinstance(home, bool)
             or not isinstance(origin, list)
-            or not all(isinstance(item, str) and _ORIGIN_ID.match(item) for item in origin)
+            or not all(isinstance(item, str) and self._origin_id.match(item) for item in origin)
         ):
             raise ValueError("invalid reference")
         if home:
@@ -540,7 +621,7 @@ class Peer:
             if self.closed_error is not None:
                 raise self.closed_error
             with self._write_lock:
-                self._sock.sendall(data)
+                self._channel.send(data)
         except BaseException:
             self._pending.pop(call, None)
             self._rollback(grants)
@@ -611,11 +692,18 @@ class Peer:
         return result
 
     def notify(self, target: str, method: str, args: list) -> None:
-        """Fire and forget: an async call whose result nobody awaits."""
+        """Fire and forget: a call whose result nobody awaits. It is sent
+        before this returns, so it goes out ahead of anything sent later,
+        such as the reply of the call that caused it."""
         if self.closed_error is not None:
             return
-        task = self.loop.create_task(self.call_async(target, method, args))
-        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        if threading.get_ident() != self._thread:
+            self.loop.call_soon_threadsafe(self.notify, target, method, args)
+            return
+        try:
+            self._request("invoke", {"target": target, "method": method}, args, lambda _result: None)
+        except Exception:  # noqa: BLE001 - nobody awaits a notification
+            pass
 
     async def drain(self) -> None:
         if self._active:
@@ -644,8 +732,9 @@ class Peer:
     def _receive(self, frame: dict) -> None:
         op = frame.get("op")
         if op == "hello":
-            if frame.get("version") != PROTOCOL or self._handshake:
-                raise ValueError("incompatible or duplicate protocol handshake")
+            if self._handshake:
+                raise ValueError("duplicate protocol handshake")
+            self._greet(frame)
             self._handshake = True
             if not self.ready.done():
                 self.ready.set_result(None)
@@ -685,13 +774,14 @@ class Peer:
         if (
             op not in ("invoke", "call", "get", "await")
             or not isinstance(call, str)
-            or not _RUST_ID.match(call)
+            or not call.startswith(self._remote)
+            or not _SEQUENCE.match(call[len(self._remote):])
             or not isinstance(path, list)
             or not all(isinstance(item, str) for item in path)
             or call in path
         ):
             raise ValueError("invalid invocation")
-        sequence = int(call[5:])
+        sequence = int(call[len(self._remote):])
         if sequence <= self._received or sequence > MAX_SAFE:
             raise ValueError("invalid or repeated invocation identity")
         self._received = sequence
@@ -762,6 +852,10 @@ class Peer:
                 else:
                     if entry.call is not None:
                         self._tasks[call] = self._tasks.get(entry.call) or entry.value
+                        # Cancelling this await is cancelling that call.
+                        signal = self._signals.get(entry.call)
+                        if signal is not None:
+                            self._signals[call] = signal
                     entry.value.add_done_callback(lambda _done: self._respond(call, entry.result, business))
                 return
             value = None
@@ -804,12 +898,19 @@ class Peer:
         return task
 
     def _respond(self, call: str, result: tuple, business: bool) -> None:
-        self._signals.pop(call, None)
+        # A signal lives until the call's result settles: a returned future
+        # keeps it, so cancelling an await of it still reaches it.
+        ok_value = result[1] if result[0] else None
+        if asyncio.isfuture(ok_value) and not ok_value.done():
+            ok_value.add_done_callback(lambda _done: self._signals.pop(call, None))
+        else:
+            self._signals.pop(call, None)
         grants: list = []
         try:
             if self.closed_error is not None:
                 return
             ok, value = result
+            self._answering = (call, value)
             try:
                 frame = (
                     {"op": "return", "id": call, "value": self._encode(value, grants, business)}
@@ -820,8 +921,10 @@ class Peer:
             except Exception as error:  # noqa: BLE001
                 self._rollback(grants)
                 data = dumps({"op": "throw", "id": call, "error": encode_error(error)})
+            finally:
+                self._answering = None
             with self._write_lock:
-                self._sock.sendall(data)
+                self._channel.send(data)
         except Exception as error:  # noqa: BLE001
             self._fault(error)
         finally:

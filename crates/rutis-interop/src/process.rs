@@ -1,38 +1,17 @@
 use crate::events::EventSink;
 use crate::rpc::{Connection, Dispatch, Reply, Value as RpcValue};
+use crate::services::{HostDispatch, RuntimeSession};
 use crate::Error;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
-use tokio::sync::{oneshot, watch};
+use std::sync::{Arc, Mutex};
 
 /// Receives changes of exported Cordis service slots. `handle` addresses the
 /// object now in the slot (`None` when it is unavailable); `version` orders
 /// changes, so an older notification must not override a newer one.
 pub trait ServiceEvents: Send + Sync + 'static {
     fn changed(&self, name: &str, handle: Option<String>, version: u64);
-}
-
-/// A rutis service provided to the mounted Cordis plugins: the Node side
-/// registers a proxy under `name` whose calls arrive here.
-pub trait HostDispatch: Send + Sync + 'static {
-    fn invoke(&self, method: &str, args: RpcValue) -> Reply;
-
-    /// The methods as `{ method: "sync" | "async" }`, when the service knows
-    /// them; otherwise whoever registers it with a runtime supplies them.
-    fn methods(&self) -> Option<Value> {
-        None
-    }
-
-    /// The process whose plugin serves this service, when it is one
-    /// ([`crate::RowService`]): a row of that same process uses the plugin
-    /// natively instead of through a proxy.
-    fn origin(&self) -> Option<&Process> {
-        None
-    }
 }
 
 /// One host-provided service: its Cordis name, the bound methods as
@@ -89,8 +68,10 @@ pub struct Mount<'a> {
     pub launcher: Option<&'a Launcher>,
 }
 
-/// The command that starts a runtime process. It receives the socket path
-/// and then the first plugin (or the anchor) as its last two arguments.
+/// The command that starts a runtime process. It receives its channel and
+/// then the first plugin (or the anchor) as its last two arguments: `fd:3`
+/// when it takes an inherited socket ([`Launcher::inherit_fd`]), otherwise
+/// a socket path to dial.
 #[derive(Debug, Clone, Default)]
 pub struct Launcher {
     pub program: std::ffi::OsString,
@@ -98,6 +79,9 @@ pub struct Launcher {
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// The working directory; the application's by default.
     pub cwd: Option<std::path::PathBuf>,
+    /// The process takes its channel as an inherited socket on fd 3
+    /// (`fd:3`) instead of dialing a socket path.
+    pub inherit_fd: bool,
 }
 
 impl Launcher {
@@ -125,6 +109,53 @@ impl Launcher {
     pub fn cwd(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(dir.into());
         self
+    }
+
+    /// The process takes `fd:3`, an inherited socket, as its channel.
+    pub fn inherit_fd(mut self) -> Self {
+        self.inherit_fd = true;
+        self
+    }
+
+    /// The Node runtime of the npm package `node_package` (`interop/node`,
+    /// or a deployed `@arcships/rutis-interop`): `node --import tsx
+    /// src/runner.mjs` in the package, on an inherited socket when the
+    /// package says it takes one (`rutisChannels` lists `"fd"`).
+    #[cfg(feature = "node")]
+    pub fn node(node_package: &std::path::Path) -> Self {
+        let launcher = Launcher::new("node")
+            .arg("--import")
+            .arg("tsx")
+            .arg(node_package.join("src/runner.mjs"))
+            .cwd(node_package);
+        match crate::spawn::node_inherits(node_package) {
+            true => launcher.inherit_fd(),
+            false => launcher,
+        }
+    }
+
+    /// The Python runtime: `python3 -m rutis_runtime`, with the SDK
+    /// directory `sdk` (`interop/python`) and then `project` ahead of the
+    /// inherited `PYTHONPATH`, in `project`, on an inherited socket.
+    #[cfg(feature = "python")]
+    pub fn python(sdk: &std::path::Path, project: &std::path::Path) -> Self {
+        let mut path = std::ffi::OsString::from(sdk);
+        path.push(":");
+        path.push(project);
+        if let Some(inherited) = std::env::var_os("PYTHONPATH").filter(|p| !p.is_empty()) {
+            path.push(":");
+            path.push(inherited);
+        }
+        Launcher::new("python3")
+            .arg("-m")
+            .arg("rutis_runtime")
+            .env("PYTHONPATH", path)
+            .env("PYTHONUNBUFFERED", "1")
+            // A plugin imported again after an edit must not come from a
+            // bytecode file written in the same second as the old source.
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .cwd(project)
+            .inherit_fd()
     }
 }
 impl Imports {
@@ -178,127 +209,73 @@ impl Dispatch for Imports {
     }
 }
 
-/// The Node process, owned by a task that records how it ended. Dropping
-/// `_kill` ends the process.
-struct Child {
-    exit: watch::Receiver<Option<String>>,
-    /// The same status for the reader thread, which must not depend on the
-    /// runtime: a current-thread runtime may be blocked in a synchronous call.
-    ended: Arc<(Mutex<Option<String>>, Condvar)>,
-    _kill: oneshot::Sender<()>,
+/// What the `mount` call sends.
+struct MountRest {
+    plugins: Vec<Value>,
+    services: Value,
+    forwarded_names: Vec<String>,
+    emits: Vec<String>,
+    provided: serde_json::Map<String, Value>,
 }
 
-impl Child {
-    fn watch(mut child: tokio::process::Child) -> Self {
-        let (kill, killed) = oneshot::channel::<()>();
-        let (report, exit) = watch::channel(None);
-        let ended = Arc::new((Mutex::new(None), Condvar::new()));
-        if let Some(pid) = child.id() {
-            let record = ended.clone();
-            let _ = std::thread::Builder::new()
-                .name("rutis-interop-exit".into())
-                .spawn(move || {
-                    if let Some(status) = peek_exit(pid) {
-                        record_exit(&record, describe(Ok(status)));
-                    }
-                });
-        }
-        let record = ended.clone();
-        tokio::spawn(async move {
-            let status = tokio::select! {
-                status = child.wait() => status,
-                _ = killed => {
-                    let _ = child.start_kill();
-                    child.wait().await
-                }
-            };
-            let status = describe(status);
-            record_exit(&record, status.clone());
-            report.send_replace(Some(status));
-        });
-        Self {
-            exit,
-            ended,
-            _kill: kill,
-        }
-    }
-
-    /// How the process ended, once it has.
-    fn status(&self) -> Option<String> {
-        self.exit.borrow().clone()
-    }
-
-    async fn exited(&self) -> String {
-        let mut exit = self.exit.clone();
-        let status = exit.wait_for(Option::is_some).await;
-        status.map_or_else(|_| "is gone".to_owned(), |status| status.clone().unwrap())
-    }
-
-    /// The error that ends a session whose peer went away: waits briefly for
-    /// the process to end so the error can say how.
-    fn disconnected(&self) -> impl FnOnce() -> Error + Send {
-        let ended = self.ended.clone();
-        move || {
-            let (status, changed) = &*ended;
-            let status = changed
-                .wait_timeout_while(status.lock().unwrap(), Duration::from_secs(1), |status| {
-                    status.is_none()
-                })
-                .unwrap()
-                .0
-                .clone();
-            Error::Transport(match status {
-                Some(status) => format!("Cordis process {status}"),
-                None => "peer disconnected".to_owned(),
-            })
-        }
-    }
+/// A mount's parts, once split from where the process comes from.
+struct Started {
+    plugins: Vec<(std::path::PathBuf, Value)>,
+    services: Value,
+    events: Option<Arc<dyn ServiceEvents>>,
+    hosts: HashMap<String, HostEntry>,
+    forwarded: Option<Arc<dyn EventSink>>,
+    forwarded_names: Vec<String>,
+    emits: Vec<String>,
+    provided: serde_json::Map<String, Value>,
 }
 
-fn describe(status: std::io::Result<std::process::ExitStatus>) -> String {
-    match status {
-        Ok(status) if status.success() => "exited normally".to_owned(),
-        Ok(status) => format!("exited with {status}"),
-        Err(error) => format!("cannot be waited for: {error}"),
-    }
-}
-
-fn record_exit(ended: &(Mutex<Option<String>>, Condvar), status: String) {
-    ended.0.lock().unwrap().get_or_insert(status);
-    ended.1.notify_all();
-}
-
-/// Waits until the process `pid` ends and reports its status without reaping
-/// it (tokio still does), independently of any runtime.
-fn peek_exit(pid: u32) -> Option<std::process::ExitStatus> {
-    use std::os::unix::process::ExitStatusExt;
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    loop {
-        // SAFETY: `info` is a valid, writable siginfo_t.
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                pid as libc::id_t,
-                &mut info,
-                libc::WEXITED | libc::WNOWAIT,
-            )
+impl Started {
+    /// The parts, and the plugins as given (the first names what to start).
+    fn from(mount: Mount<'_>) -> (Self, Vec<(&Path, Value)>) {
+        let Mount {
+            plugins,
+            services,
+            observer: events,
+            hosts,
+            events: forwarded,
+            emits,
+            anchor: _,
+            launcher: _,
+        } = mount;
+        let (forwarded_names, forwarded) = match forwarded {
+            Some((names, sink)) => (names, Some(sink)),
+            None => (Vec::new(), None),
         };
-        if result == 0 {
-            break;
-        }
-        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-            return None; // already reaped: the runtime reports it
-        }
+        let provided = hosts
+            .iter()
+            .map(|host| (host.name.clone(), host.methods.clone()))
+            .collect();
+        let hosts = hosts
+            .into_iter()
+            .map(|host| {
+                let entry = HostEntry {
+                    dispatch: host.dispatch,
+                    leases: 1,
+                };
+                (host.name, entry)
+            })
+            .collect();
+        let started = Self {
+            plugins: plugins
+                .iter()
+                .map(|(entry, config)| (entry.to_path_buf(), config.clone()))
+                .collect(),
+            services,
+            events,
+            hosts,
+            forwarded,
+            forwarded_names,
+            emits,
+            provided,
+        };
+        (started, plugins)
     }
-    // SAFETY: waitid filled a SIGCHLD siginfo_t.
-    let status = unsafe { info.si_status() };
-    // Rebuild the raw wait status so it formats like `ExitStatus`.
-    let raw = match info.si_code {
-        libc::CLD_EXITED => (status & 0xff) << 8,
-        libc::CLD_DUMPED => status | 0x80,
-        _ => status,
-    };
-    Some(std::process::ExitStatus::from_raw(raw))
 }
 
 /// Owns one native Cordis process and its generated service bindings.
@@ -306,7 +283,8 @@ pub struct Process {
     peer: Connection,
     imports: Arc<Imports>,
     runtime: tokio::runtime::Handle,
-    child: Child,
+    /// The process this side started; `None` for an attached runtime.
+    child: Option<crate::spawn::Child>,
     /// Reported by the runner when mounting.
     features: std::sync::OnceLock<Vec<String>>,
     /// The services each loaded row exports, by row key.
@@ -315,7 +293,10 @@ pub struct Process {
     /// once its service is registered on the Node side, and a withdrawal
     /// never overtakes the registration it undoes.
     host_changes: tokio::sync::Mutex<()>,
-    _directory: tempfile::TempDir,
+    _directory: Option<tempfile::TempDir>,
+    /// For a runtime on a session something else owns (a link): what routes
+    /// the runtime's calls here. The session is not this process's to close.
+    routed: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 /// What a plugin module declares, for rutis-loader (see
@@ -409,34 +390,8 @@ impl Process {
 
     /// Launch a mount: see [`Mount`].
     pub async fn mount(node_package: &Path, mount: Mount<'_>) -> Result<Arc<Self>, Error> {
-        let Mount {
-            plugins,
-            services,
-            observer: events,
-            hosts,
-            events: forwarded,
-            emits,
-            anchor,
-            launcher,
-        } = mount;
-        let (forwarded_names, forwarded) = match forwarded {
-            Some((names, sink)) => (names, Some(sink)),
-            None => (Vec::new(), None),
-        };
-        let provided: serde_json::Map<String, Value> = hosts
-            .iter()
-            .map(|host| (host.name.clone(), host.methods.clone()))
-            .collect();
-        let hosts = hosts
-            .into_iter()
-            .map(|host| {
-                let entry = HostEntry {
-                    dispatch: host.dispatch,
-                    leases: 1,
-                };
-                (host.name, entry)
-            })
-            .collect();
+        let (anchor, launcher) = (mount.anchor, mount.launcher);
+        let (started, plugins) = Started::from(mount);
         let plugin = match (plugins.first(), anchor) {
             (Some((plugin, _)), _) => *plugin,
             (None, Some(anchor)) => anchor,
@@ -446,71 +401,63 @@ impl Process {
                 ))
             }
         };
+        let (command, connect) = crate::spawn::command(launcher, node_package)?;
+        let spawned = crate::spawn::spawn(command, plugin, connect).await?;
+        Self::start(
+            spawned.channel,
+            Some(spawned.child),
+            spawned.directory,
+            started,
+            crate::rpc::Format::Compat,
+        )
+        .await
+    }
+
+    /// Run a mount on a runtime that is already connected: `channel` leads
+    /// to a runtime process this side did not start (for example one that
+    /// listens on a WebSocket and was dialed). [`Mount::launcher`] and
+    /// [`Mount::anchor`] do not apply: that process was started with its own.
+    /// It has no exit status here, and its end is the session's end.
+    ///
+    /// Network sessions use the endpoint [`Format`](crate::rpc::Format).
+    pub async fn attach(
+        channel: rutis_channel::Channel,
+        mount: Mount<'_>,
+        format: crate::rpc::Format,
+    ) -> Result<Arc<Self>, Error> {
+        let (started, _) = Started::from(mount);
+        Self::start(channel, None, None, started, format).await
+    }
+
+    async fn start(
+        channel: rutis_channel::Channel,
+        child: Option<crate::spawn::Child>,
+        directory: Option<tempfile::TempDir>,
+        started: Started,
+        format: crate::rpc::Format,
+    ) -> Result<Arc<Self>, Error> {
+        let (imports, rest) = Self::imports(started);
+        let peer = Connection::open_with(channel, imports.clone(), format)?;
+        peer.ready().await?;
+        Self::finish(peer, imports, child, directory, None, rest).await
+    }
+
+    /// What serves the runtime's calls into rutis, and the rest of the mount.
+    fn imports(started: Started) -> (Arc<Imports>, MountRest) {
+        let Started {
+            plugins,
+            services,
+            events,
+            hosts,
+            forwarded,
+            forwarded_names,
+            emits,
+            provided,
+        } = started;
         let plugins: Vec<Value> = plugins
             .iter()
             .map(|(entry, config)| json!({ "entry": entry, "config": config }))
             .collect();
-        let directory = tempfile::Builder::new()
-            .prefix("rutis-mount-")
-            .tempdir()
-            .map_err(|error| Error::Transport(error.to_string()))?;
-        let socket = directory.path().join("peer.sock");
-        let listener = tokio::net::UnixListener::bind(&socket)
-            .map_err(|error| Error::Transport(error.to_string()))?;
-        let mut command = match launcher {
-            Some(launcher) => {
-                let mut command = tokio::process::Command::new(&launcher.program);
-                command
-                    .args(&launcher.args)
-                    .envs(launcher.env.iter().map(|(name, value)| (name, value)));
-                // Without a directory of its own, it runs where the
-                // application does.
-                if let Some(cwd) = &launcher.cwd {
-                    command.current_dir(cwd);
-                }
-                command
-            }
-            #[cfg(not(feature = "node"))]
-            None => {
-                let _ = node_package;
-                return Err(Error::Value(
-                    "no launcher given, and the Node runtime needs the `node` feature".into(),
-                ));
-            }
-            #[cfg(feature = "node")]
-            None => {
-                let mut command = tokio::process::Command::new("node");
-                command
-                    .arg("--import")
-                    .arg("tsx")
-                    .arg(node_package.join("src/runner.mjs"))
-                    .current_dir(node_package);
-                command
-            }
-        };
-        let mut child = command
-            .arg(&socket)
-            .arg(plugin)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| Error::Transport(error.to_string()))?;
-        let stream = tokio::select! {
-            accepted = listener.accept() => accepted
-                .map_err(|error| Error::Transport(error.to_string()))?.0,
-            status = child.wait() => return Err(Error::Transport(match status {
-                Ok(status) => format!("Cordis process exited before connecting: {status}"),
-                Err(error) => format!("Cordis process exited before connecting: {error}"),
-            })),
-        };
-        let stream = stream
-            .into_std()
-            .map_err(|error| Error::Transport(error.to_string()))?;
-        stream
-            .set_nonblocking(false)
-            .map_err(|error| Error::Transport(error.to_string()))?;
         let imports = Arc::new(Imports {
             slots: Slots::default(),
             events,
@@ -518,10 +465,52 @@ impl Process {
             hosts: Mutex::new(hosts),
             forwarded,
         });
-        let child = Child::watch(child);
-        let peer =
-            Connection::connect_with(stream, imports.clone(), Box::new(child.disconnected()))?;
-        peer.ready().await?;
+        let rest = MountRest {
+            plugins,
+            services,
+            forwarded_names,
+            emits,
+            provided,
+        };
+        (imports, rest)
+    }
+
+    /// Run a mount on `session`, a runtime session something else owns:
+    /// its calls into rutis are routed here while the process lives, and
+    /// disposing or dropping the process leaves the session open.
+    pub async fn over(
+        session: Arc<dyn RuntimeSession>,
+        mount: Mount<'_>,
+    ) -> Result<Arc<Self>, Error> {
+        let (started, _) = Started::from(mount);
+        let (imports, rest) = Self::imports(started);
+        let routed = session.route(imports.clone())?;
+        Self::finish(
+            session.connection(),
+            imports,
+            None,
+            None,
+            Some(routed),
+            rest,
+        )
+        .await
+    }
+
+    async fn finish(
+        peer: Connection,
+        imports: Arc<Imports>,
+        child: Option<crate::spawn::Child>,
+        directory: Option<tempfile::TempDir>,
+        routed: Option<Box<dyn std::any::Any + Send + Sync>>,
+        rest: MountRest,
+    ) -> Result<Arc<Self>, Error> {
+        let MountRest {
+            plugins,
+            services,
+            forwarded_names,
+            emits,
+            provided,
+        } = rest;
         let process = Arc::new(Self {
             peer,
             imports,
@@ -531,6 +520,7 @@ impl Process {
             exports: Mutex::default(),
             host_changes: tokio::sync::Mutex::new(()),
             _directory: directory,
+            routed,
         });
         let mounted = process
             .call_async(
@@ -616,11 +606,30 @@ impl Process {
         loaded.map(|_| ())
     }
 
+    /// Stop following the services row `key` exported, withdrawing them
+    /// first. The runtime withdraws them before it answers `rows.unload`,
+    /// but its notification runs as a task of its own and may reach the
+    /// observer only after this: without the withdrawal here, a late one
+    /// finds no observer and the service stays projected.
     fn forget_exports(&self, key: &str) {
         let names = self.exports.lock().unwrap().remove(key);
-        let mut exported = self.imports.exported.lock().unwrap();
-        for name in names.into_iter().flatten() {
-            exported.remove(&name);
+        let observers: Vec<_> = {
+            let mut exported = self.imports.exported.lock().unwrap();
+            names
+                .into_iter()
+                .flatten()
+                .filter_map(|name| exported.remove(&name).map(|observer| (name, observer)))
+                .collect()
+        };
+        for (name, observer) in observers {
+            let version = self
+                .imports
+                .slots
+                .lock()
+                .unwrap()
+                .get(&name)
+                .map_or(0, |(_, version)| *version);
+            observer.changed(&name, None, version);
         }
     }
 
@@ -826,10 +835,18 @@ impl Process {
     }
 
     pub async fn dispose(&self) -> Result<(), Error> {
+        // A session something else owns stays, and so does its runtime; its
+        // rows were unloaded one by one.
+        if self.routed.is_some() {
+            return Ok(());
+        }
         let result = self.call_async("", "dispose", Value::Null).await;
         self.peer
             .close(Error::Transport("plugin has been disposed".into()));
-        let status = self.child.exited().await;
+        let Some(child) = &self.child else {
+            return result.map(|_| ());
+        };
+        let status = child.exited().await;
         result?;
         if status != "exited normally" {
             return Err(Error::Transport(format!("Cordis process {status}")));
@@ -840,7 +857,7 @@ impl Process {
     /// How the Node process ended (for example `exited with signal: 9
     /// (SIGKILL)`), or `None` while it runs.
     pub fn exit_status(&self) -> Option<String> {
-        self.child.status()
+        self.child.as_ref().and_then(|child| child.status())
     }
 
     /// Resolves once the session with the Node process has ended, whether
@@ -852,6 +869,9 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        self.peer.close(Error::Transport("process dropped".into()));
+        // A session something else owns stays; only the routing goes.
+        if self.routed.is_none() {
+            self.peer.close(Error::Transport("process dropped".into()));
+        }
     }
 }

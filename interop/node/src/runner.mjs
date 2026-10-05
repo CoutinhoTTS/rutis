@@ -1,10 +1,30 @@
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isAbsolute } from 'node:path'
 import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { isLeaf, toCordis } from './plugin.mjs'
 
-const [socketPath, pluginPath] = process.argv.slice(2)
+// `<channel> [--id <endpoint>] [--peer <endpoint>] [--format endpoint] <first plugin or anchor>`.
+// Local channels (`fd:3`, a socket path) speak the compat protocol unless
+// `--format endpoint`; network channels (`ws://`, `wss://`) the endpoint
+// format, as `--id`, expecting `--peer` as the controller when given.
+// `listen:…` serves controllers one session at a time (serve.mjs).
+const { channelSpec, pluginPath, endpoint, flags } = (() => {
+  const [channelSpec, ...rest] = process.argv.slice(2)
+  const flags = {}
+  while (rest[0]?.startsWith('--')) flags[rest.shift().slice(2)] = rest.shift()
+  const network = /^(wss?|listen):/.test(channelSpec) || flags.format === 'endpoint'
+  if (network && !flags.id) throw new Error(`a network channel needs --id <endpoint>: ${channelSpec}`)
+  // A runner is a runtime: the controller manages its rows.
+  const endpoint = network ? { local: flags.id, expected: flags.peer, declare: ['runtime'] } : undefined
+  return { channelSpec, pluginPath: rest[0], endpoint, flags }
+})()
+
+if (channelSpec.startsWith('listen:')) {
+  const { serve } = await import('./serve.mjs')
+  await serve({ spec: channelSpec.slice('listen:'.length), id: flags.id, peer: flags.peer, anchor: pluginPath })
+}
 
 // The plugins' Service classes must come from the same Cordis instance as the
 // Context, so prefer the Cordis that the (first) plugin itself resolves.
@@ -124,7 +144,24 @@ function dispose() {
 
 // A plugin module: an `apply` export is a function plugin; otherwise the
 // default export, which is how packaged plugins ship their Service class.
+// A plugin path, from a row's entry: a file path, a file URL, or (for a
+// controller elsewhere, which cannot see this machine's files) an npm name
+// or subpath resolved from this runtime's anchor. An unknown name is a
+// NotFound the controller reports as unresolved.
+function located(entry) {
+  if (entry.startsWith('file:')) return fileURLToPath(entry)
+  if (isAbsolute(entry)) return entry
+  try { return createRequire(pluginPath).resolve(entry) }
+  catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND' && error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error
+    const missing = new Error(`no plugin ${entry} here`)
+    missing.name = 'NotFound'
+    throw missing
+  }
+}
+
 async function pluginOf(entry) {
+  entry = located(entry)
   const declared = await declaredOf(entry)
   return isLeaf(declared) ? toCordis(declared) : declared
 }
@@ -202,6 +239,7 @@ async function unloadRow(key) {
 // services it injects (all required in Cordis), and the services it provides
 // to rutis with their method kinds, from `rutis.provides` in its package.json.
 async function describe(entry) {
+  entry = located(entry)
   const declared = await declaredOf(entry)
   // A leaf plugin declares everything in code.
   if (isLeaf(declared)) return { config: declared.config ?? null, inject: declared.inject, provides: declared.provides }
@@ -409,7 +447,7 @@ function dispatch(target, method, args) {
 }
 
 // Calls on exported objects and functions may replace services too.
-peer = await Process.connect(socketPath, dispatch, () => { if (slots.size && !closing) refresh() })
+peer = await Process.connect(channelSpec, dispatch, () => { if (slots.size && !closing) refresh() }, endpoint)
 await peer.closed()
 closing = true
 await dispose()

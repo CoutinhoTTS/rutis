@@ -189,7 +189,7 @@ async fn row_services_reach_rutis_and_hosts_are_leased() {
         .unwrap();
     assert_eq!(later.json().unwrap(), json!("Oslo later"));
     assert_eq!(weather.methods(), Some(provides["weather"].clone()));
-    assert!(std::ptr::eq(weather.origin().unwrap(), &*process));
+    assert_eq!(weather.origin(), Some(process.connection().tag()));
     assert!(weather.invoke("tomorrow", json!([]).into()).is_err());
     drop(weather);
 

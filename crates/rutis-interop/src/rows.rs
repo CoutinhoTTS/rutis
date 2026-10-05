@@ -65,8 +65,8 @@ impl HostDispatch for RowService {
         Some(self.methods.clone())
     }
 
-    fn origin(&self) -> Option<&Process> {
-        Some(&self.process)
+    fn origin(&self) -> Option<&str> {
+        Some(self.process.connection().tag())
     }
 }
 

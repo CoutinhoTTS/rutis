@@ -46,6 +46,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # WebSocket channels of the Python runtime (rutis-runtime[network]).
+      - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
         working-directory: interop/python
 
@@ -54,7 +56,14 @@ jobs:
 
       # JavaScript plugins as rutis-loader rows (needs the interop runtime).
       - name: cargo test (rutis-loader interop rows)
-        run: cargo test -p rutis-loader --features interop
+        run: cargo test -p rutis-loader --features interop,peer
+
+      # Both runtimes, every channel, and the conformance suites.
+      - name: cargo test (rutis-interop, all features)
+        run: cargo test -p rutis-interop --all-features
+
+      - name: cargo test (rutis-bridge, node conformance)
+        run: cargo test -p rutis-bridge --features conformance
 
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets

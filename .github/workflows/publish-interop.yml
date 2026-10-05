@@ -46,6 +46,19 @@ jobs:
           npm ci
           npm test
 
+      # rutis-interop depends on the channel contract crate; publish its
+      # version first when crates.io does not have it yet.
+      - name: Publish rutis-channel when new
+        run: |
+          channel_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rutis-channel") | .version')
+          if curl -sf -A "rutis release (github.com/arcships/rutis)" "https://crates.io/api/v1/crates/rutis-channel/$channel_version" >/dev/null; then
+            echo "rutis-channel $channel_version is already published"
+          else
+            cargo publish --locked -p rutis-channel
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+
       # Both packages are checked before either is published; the crate
       # dry run also builds it against the rutis release it depends on.
       - name: Dry runs

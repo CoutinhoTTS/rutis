@@ -5,6 +5,14 @@ use crate::Error;
 
 pub(crate) const VERSION: u32 = crate::PROTOCOL;
 
+/// Who speaks at the far end, for diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Implementation {
+    pub name: String,
+    pub version: String,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
@@ -88,8 +96,17 @@ impl From<Failure> for Error {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Frame {
+    /// Opens a session. Version 2 (compat) carries only the version; the
+    /// endpoint format (3) also names the endpoint, its implementation and
+    /// its capabilities.
     Hello {
         version: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        implementation: Option<Implementation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<Vec<String>>,
     },
     Invoke {
         id: String,
