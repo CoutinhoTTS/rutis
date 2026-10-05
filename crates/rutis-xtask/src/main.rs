@@ -1208,6 +1208,12 @@ fn write_cargo_config(bundle: &Path, sdk_name: &str) -> Result<(), String> {
     let sdk = read_toml(&bundle.join("sdk.toml"))?;
     let sdk_table = table(&sdk, "sdk")?;
     let sdk_hash = string(sdk_table, "artifact_sha256")?;
+    // TOML strings treat \ as an escape; Windows paths must use /, which
+    // both TOML and the Windows loader accept.
+    let forward_slashes = |path: &Path| {
+        path.to_string_lossy()
+            .replace('\\', "/")
+    };
     let content = format!(
         "# Copy this file to the plugin workspace as .cargo/config.toml and\n\
          # adjust the two paths below to where you unpacked the bundle.\n\
@@ -1220,8 +1226,8 @@ fn write_cargo_config(bundle: &Path, sdk_name: &str) -> Result<(), String> {
          [env]\nRUTIS_SDK_ARTIFACT_SHA256 = \"{2}\"\n\n\
          # macOS: keep the plugin's deployment target equal to the SDK's.\n\
          # [env]\n# MACOSX_DEPLOYMENT_TARGET = \"13.0\"\n",
-        bundle.join("lib").join(sdk_name).display(),
-        bundle.join("deps").display(),
+        forward_slashes(&bundle.join("lib").join(sdk_name)),
+        forward_slashes(&bundle.join("deps")),
         sdk_hash
     );
     fs::write(bundle.join("cargo-config.toml"), content).map_err(|e| e.to_string())
