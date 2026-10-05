@@ -60,3 +60,5 @@ root.plugin(RuntimeRowsPlugin::new(resolver));
 ```
 
 `RuntimeRowsPlugin` 在运行时启动后先重新解析运行时启动前解析的行（以及包版本变了的行），拿到插件声明的依赖，然后才提供 `CordisRuntimeRows`，所以行启动时依赖声明是完整的。
+
+解析结果按包的 `version` 判断是否过期。包内容变了但版本号没变时（例如开发中 link 的包），用 `InteropResolver::invalidate(名字)` 或 `invalidate_all()` 手动失效：只改了声明（`rutis.provides`）时接着 `Loader::reload`；改了代码时重启运行时的 fiber，Node 会在新进程里导入新代码，失效的行在启动前重新解析。

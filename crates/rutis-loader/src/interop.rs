@@ -75,6 +75,33 @@ impl InteropResolver {
         self
     }
 
+    /// Forget what is known about the row module `name`, for a package whose
+    /// content changed without a new `version` (a linked package during
+    /// development). Its next resolution asks the runtime again: at once
+    /// with `Loader::reload`, or when the runtime restarts, through
+    /// [`RuntimeRowsPlugin`].
+    ///
+    /// Node keeps the module code it has imported, so after a code change
+    /// restart the runtime (`FiberView::restart` on its fiber): the new
+    /// process imports the new code, and the invalidated rows are resolved
+    /// again before they start.
+    pub fn invalidate(&self, name: &str) {
+        self.resolved.lock().unwrap().remove(name);
+        self.offline.lock().unwrap().insert(name.to_owned());
+    }
+
+    /// [`InteropResolver::invalidate`] every row module resolved so far.
+    pub fn invalidate_all(&self) {
+        let names: Vec<String> = self
+            .resolved
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(name, _)| name)
+            .collect();
+        self.offline.lock().unwrap().extend(names);
+    }
+
     /// Names whose resolution is out of date: resolved without the runtime,
     /// or whose package version changed since. Their cached resolution is
     /// dropped, so the next resolution asks the runtime again.
@@ -512,6 +539,30 @@ mod tests {
         assert!(!resolver.resolved.lock().unwrap().contains_key("older"));
         // A refresh that never finished leaves them stale for the next one.
         assert_eq!(resolver.take_stale(), stale);
+    }
+
+    #[test]
+    fn invalidated_rows_are_stale_until_resolved_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("p.mjs");
+        let resolver = InteropResolver::new(
+            rutis_interop::CordisRuntimePlugin::new(dir.path(), dir.path().join("package.json"))
+                .handle(),
+        );
+        {
+            let mut resolved = resolver.resolved.lock().unwrap();
+            resolved.insert("a".into(), cached(&entry, None));
+            resolved.insert("b".into(), cached(&entry, None));
+        }
+        assert!(resolver.take_stale().is_empty());
+        resolver.invalidate("a");
+        assert_eq!(resolver.take_stale(), HashSet::from(["a".to_owned()]));
+        resolver.invalidate_all();
+        assert_eq!(
+            resolver.take_stale(),
+            HashSet::from(["a".to_owned(), "b".to_owned()])
+        );
+        assert!(resolver.resolved.lock().unwrap().is_empty());
     }
 
     #[test]

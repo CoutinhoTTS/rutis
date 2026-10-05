@@ -5,7 +5,8 @@
 | 包 | 版本 | 要不要改代码 |
 | --- | --- | --- |
 | `rutis-interop`（crate）与 `@arcships/rutis-interop`（npm） | 0.2.0 → 0.3.0 | 两者必须一起升级 |
-| `rutis-loader` | 下一个次版本 | 用 `InteropResolver` 的应用要改，见下文 |
+| `rutis-loader` | 0.1.0 → 0.2.0 | 用 `InteropResolver` 的应用要改，见下文 |
+| `rutis-dylib`（`loader` feature）、`rutis-dev` | 依赖改为 `rutis-loader` 0.2；它们的公开接口用到 rutis-loader 的类型，发布时随之升次版本 | 不用改代码 |
 
 只用构建期生成的静态挂载（`include_mounts!`）的应用，升级版本号即可，代码不用改：静态挂载仍在启动时一次注册宿主服务。
 
@@ -50,4 +51,4 @@ rutis-interop = "0.3"
 - `Process::lease_host` / `HostLease`：按行注册宿主服务，计数，最后一个释放时撤销。
 - `HostDispatch::methods`、`HostDispatch::origin`：都有默认实现，现有实现不用改。
 - `Projection::service_keyed`：投影到任意键。
-- rutis-loader：`ServiceCatalog::register_shared` / `is_shared`、`InteropResolver::with_catalog`、`Chain::with_shared`、`RuntimeRowsPlugin`、`CordisRuntimeRows`。
+- rutis-loader：`ServiceCatalog::register_shared` / `is_shared`、`InteropResolver::with_catalog`、`InteropResolver::invalidate` / `invalidate_all`（包内容变了但版本号没变时手动失效，例如开发中 link 的包）、`Chain::with_shared`、`RuntimeRowsPlugin`、`CordisRuntimeRows`。
