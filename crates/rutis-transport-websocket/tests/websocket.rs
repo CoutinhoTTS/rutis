@@ -219,6 +219,11 @@ fn pki() -> Pki {
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    // Distinct names: OpenSSL takes a certificate whose issuer is its own
+    // subject for self-signed.
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "rutis test CA");
     let ca = ca_params.self_signed(&ca_key).unwrap();
     let issuer = Issuer::new(ca_params, ca_key);
     let server_key = KeyPair::generate().unwrap();

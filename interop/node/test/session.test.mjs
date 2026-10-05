@@ -123,3 +123,25 @@ test('objects with behaviour cross as live object references', async () => {
   assert.equal(fault(), undefined)
   peer.close()
 })
+
+test('an object reference goes only to a far end that declared objects', async () => {
+  for (const [capabilities, expected] of [[['signals'], 'throw'], [['objects'], 'return']]) {
+    const sent = []
+    const session = new Session({
+      dispatch: () => ({ today() { return 'monday' } }),
+      send: line => sent.push(JSON.parse(line)),
+      pump: () => {},
+      endpoint: { local: 'node', expected: 'main' },
+    })
+    session.start()
+    session.receive({ op: 'hello', version: 3, endpoint: 'main', capabilities })
+    await session.ready
+    session.receive({ op: 'invoke', id: 'main:1', path: [], target: 'svc', method: 'get', args: data([]) })
+    await Promise.resolve()
+    const reply = sent.at(-1)
+    assert.equal(reply.op, expected, JSON.stringify(reply))
+    if (expected === 'throw') assert.match(reply.error.message, /cannot receive object references/)
+    else assert.equal(reply.value.value.kind, 'object')
+    session.close()
+  }
+})

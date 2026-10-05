@@ -308,3 +308,98 @@ async fn a_remote_node_runtime_resolves_and_runs_npm_rows() {
     child.start_kill().unwrap();
     root.shutdown().await.unwrap();
 }
+
+/// The rows of a remote runtime share its one control session: both
+/// services come from the same session, and unloading one row leaves the
+/// session and the other row's service.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_rows_share_the_runtime_session() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("weather_plugin.py"), WEATHER).unwrap();
+    std::fs::write(
+        project.path().join("second_plugin.py"),
+        "class Second:\n    def ping(self):\n        return 'pong'\n\n\nprovides = {\"second\": Second}\n\n\ndef apply(ctx, config):\n    ctx.provide(\"second\", Second())\n",
+    )
+    .unwrap();
+    let (_runtime_process, address) = remote_python(project.path()).await;
+
+    let root = Ctx::root().unwrap();
+    root.provide_as::<dyn HostDispatch>(host_key("clock"), Arc::new(Clock::default()))
+        .unwrap();
+    (&root.plugin(WebSocketPlugin::new(Config::new()).unwrap()))
+        .await
+        .unwrap();
+    root.plugin(IdentityPlugin::new(
+        "main",
+        StaticIdentity::new(id("main")).present(id("gpu"), Credential::Bearer("main-token".into())),
+    ));
+    root.plugin(LinkPlugin::new(
+        LinkConfig::dial(id("gpu"), "websocket", "main", &address).require("runtime"),
+    ));
+    root.plugin(RuntimeAccessPlugin::new(id("gpu"), "py"));
+    let python = RuntimePlugin::remote("py");
+    let rows = Arc::new(InteropResolver::modules(python.handle()));
+    root.plugin(python);
+    let plugin_loader = LoaderPlugin::new(
+        Chain::new().with_shared(rows.clone()),
+        LoaderOptions::default(),
+    );
+    let loader = plugin_loader.handle();
+    root.plugin(plugin_loader).await.unwrap();
+    root.plugin(RuntimeRowsPlugin::new(rows));
+    let layer = |rows: Value| -> Vec<Layer> {
+        let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+        vec![Layer::new("rows", patches)]
+    };
+    loader
+        .reconcile(
+            layer(json!([
+                { "id": "w", "name": "py:weather_plugin", "config": {} },
+                { "id": "s", "name": "py:second_plugin", "config": {} }
+            ])),
+            None,
+        )
+        .await
+        .unwrap();
+    let weather = eventually(
+        || root.get_as::<dyn HostDispatch>(host_key("weather")),
+        "weather",
+    )
+    .await;
+    let second = eventually(
+        || root.get_as::<dyn HostDispatch>(host_key("second")),
+        "second",
+    )
+    .await;
+    assert_eq!(
+        weather.origin(),
+        second.origin(),
+        "both rows run on one session"
+    );
+    let session = weather.origin().unwrap().to_owned();
+    drop(weather);
+
+    loader
+        .reconcile(
+            layer(json!([{ "id": "s", "name": "py:second_plugin", "config": {} }])),
+            None,
+        )
+        .await
+        .unwrap();
+    eventually(
+        || {
+            root.get_as::<dyn HostDispatch>(host_key("weather"))
+                .is_none()
+                .then_some(())
+        },
+        "weather unloaded",
+    )
+    .await;
+    assert_eq!(second.origin(), Some(session.as_str()), "the session stays");
+    let pong = tokio::task::spawn_blocking(move || second.invoke("ping", json!([]).into()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pong.json().unwrap(), json!("pong"));
+    root.shutdown().await.unwrap();
+}

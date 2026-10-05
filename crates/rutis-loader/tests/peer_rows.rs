@@ -356,3 +356,130 @@ async fn loader_rows_compose_links_and_change_features_in_place() {
     assert!(Arc::ptr_eq(&session, &still), "the link kept its session");
     assert_eq!(greeting(&mac).as_deref(), Some("composed"));
 }
+
+/// Hosted rows share the link's one session: loading one creates no
+/// session, unloading one closes none, and the others keep running.
+#[tokio::test(flavor = "multi_thread")]
+async fn hosted_rows_share_the_session_of_their_link() {
+    let nodes = nodes(json!([
+        { "id": "g1", "name": "peer:mac/greeter", "config": { "text": "one" } },
+        { "id": "g2", "name": "peer:mac/greeter", "config": { "text": "two" } }
+    ]))
+    .await;
+    eventually(
+        || (nodes.starts.load(Ordering::SeqCst) == 2).then_some(()),
+        "both hosted rows",
+    )
+    .await;
+    let session = nodes.main.get_as::<Peer>(peer_key(&id("mac"))).unwrap();
+    assert_eq!(session.generation(), 1, "one session carries both rows");
+
+    // Unload one: the session and the other row stay.
+    let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
+        { "id": "g2", "name": "peer:mac/greeter", "config": { "text": "two" } }
+    ] }]))
+    .unwrap();
+    nodes
+        .loader
+        .reconcile(vec![Layer::new("rows", patches)], None)
+        .await
+        .unwrap();
+    eventually(
+        || (greeting(&nodes.mac)? == "two").then_some(()),
+        "the other row running",
+    )
+    .await;
+    let still = nodes.main.get_as::<Peer>(peer_key(&id("mac"))).unwrap();
+    assert!(
+        Arc::ptr_eq(&session, &still),
+        "unloading a row closes no session"
+    );
+    assert!(still.connection().greeting().is_some());
+}
+
+/// Two nodes host rows for each other, start together, and reconnect,
+/// without either waiting on the other's rows: a host never waits for rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn nodes_hosting_for_each_other_start_and_reconnect_without_deadlock() {
+    let transport = Arc::new(MemoryTransport::default());
+    transport.endpoint("a-in", id("a"));
+    let quick = Retry {
+        initial: Duration::from_millis(20),
+        max: Duration::from_millis(200),
+        ..Retry::default()
+    };
+    async fn node(
+        transport: &Arc<MemoryTransport>,
+        me: &str,
+        other: &str,
+        link: LinkConfig,
+        identity: StaticIdentity,
+    ) -> (Ctx, Arc<AtomicUsize>, FiberView) {
+        let root = Ctx::root().unwrap();
+        let rows = Arc::new(PeerResolver::new());
+        let plugin = LoaderPlugin::new(
+            Chain::new().with_shared(rows.clone()),
+            LoaderOptions::default(),
+        );
+        let loader = plugin.handle();
+        (&root.plugin(plugin)).await.unwrap();
+        // Each node's rows run on the other, from the start.
+        let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
+            { "id": "r", "name": format!("peer:{other}/greeter"), "config": { "text": format!("for {me}") } }
+        ] }]))
+        .unwrap();
+        loader
+            .reconcile(vec![Layer::new("rows", patches)], None)
+            .await
+            .unwrap();
+        (&root.plugin(MemoryPlugin::with_transport(transport.clone())))
+            .await
+            .unwrap();
+        root.plugin(IdentityPlugin::new(me, identity));
+        let link = root.plugin(LinkPlugin::new(link));
+        root.plugin(PeerRowsPlugin::new(id(other), rows));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let catalog =
+            StaticCatalog::new().with("greeter", Described::default(), Greeter(starts.clone()));
+        root.plugin(HostPlugin::new(id(other), Arc::new(catalog)));
+        std::mem::forget(loader);
+        (root, starts, link)
+    }
+    let (a, a_hosts, _a_link) = node(
+        &transport,
+        "a",
+        "b",
+        LinkConfig::listen(id("b"), "memory", "a", "a-in").retry(quick.clone()),
+        StaticIdentity::new(id("a")).accept_token("b-token", id("b")),
+    )
+    .await;
+    let (b, b_hosts, _b_link) = node(
+        &transport,
+        "b",
+        "a",
+        LinkConfig::dial(id("a"), "memory", "b", "a-in").retry(quick),
+        StaticIdentity::new(id("b")).present(id("a"), Credential::Bearer("b-token".into())),
+    )
+    .await;
+    eventually(|| (greeting(&a)? == "for b").then_some(()), "b's row on a").await;
+    eventually(|| (greeting(&b)? == "for a").then_some(()), "a's row on b").await;
+
+    // A reconnect: both rows stop and start again on the new session.
+    let session = a.get_as::<Peer>(peer_key(&id("b"))).unwrap();
+    session
+        .connection()
+        .close(rutis_interop::Error::Transport("cut".into()));
+    drop(session);
+    eventually(
+        || (a_hosts.load(Ordering::SeqCst) >= 2).then_some(()),
+        "b's row again on a",
+    )
+    .await;
+    eventually(
+        || (b_hosts.load(Ordering::SeqCst) >= 2).then_some(()),
+        "a's row again on b",
+    )
+    .await;
+    eventually(|| greeting(&a), "b's row running on a").await;
+    eventually(|| greeting(&b), "a's row running on b").await;
+}

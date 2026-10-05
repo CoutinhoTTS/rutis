@@ -139,3 +139,86 @@ async fn a_reexported_service_calls_back_into_a_waiting_node_runtime() {
     let status = child.wait().await.unwrap();
     assert!(status.success());
 }
+
+/// While Node's main thread waits in a synchronous call longer than the
+/// heartbeat timeout, its I/O worker keeps answering pings: the connection
+/// survives.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_answers_heartbeats_while_its_main_thread_waits() {
+    use rutis_bridge::{Registration, Transport};
+    use rutis_interop::rpc::{Connection, Dispatch, Endpoint, Format};
+    use rutis_transport_websocket::{Limits, WebSocketTransport};
+
+    struct Sleeper;
+    impl Dispatch for Sleeper {
+        fn invoke(&self, _: &Connection, _: &str, method: &str, args: Value) -> Reply {
+            assert_eq!(method, "sleep");
+            let [ms]: [u64; 1] = rutis_interop::decode_value(args)?;
+            std::thread::sleep(Duration::from_millis(ms));
+            Ok(json!(ms).into())
+        }
+    }
+
+    let quick = Limits {
+        ping: Duration::from_millis(100),
+        timeout: Duration::from_millis(400),
+        ..Limits::default()
+    };
+    let transport = WebSocketTransport::start(
+        Config::new()
+            .listener(ListenerConfig::new(
+                "public",
+                "127.0.0.1:0".parse().unwrap(),
+                id("main"),
+            ))
+            .limits(quick),
+    )
+    .unwrap();
+    let (sender, accepted) = std::sync::mpsc::channel();
+    let sender = std::sync::Mutex::new(sender);
+    let _registered = transport
+        .register(Registration {
+            listener: "public".into(),
+            peer: id("node"),
+            identity: Arc::new(
+                StaticIdentity::new(id("main")).accept_token("node-token", id("node")),
+            ),
+            protocol: rutis_bridge::protocol(),
+            deliver: Box::new(move |channel| {
+                let _ = sender.lock().unwrap().send(channel);
+            }),
+        })
+        .unwrap();
+    let address = format!("ws://{}/rutis", transport.local_addr("public").unwrap());
+    let node = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/node");
+    let mut child = tokio::process::Command::new("node")
+        .args(["--import", "tsx"])
+        .arg(node.join("test/fixtures/sync-heartbeat.mjs"))
+        .arg(&address)
+        .env("RUTIS_INTEROP_TOKEN", "node-token")
+        .env("RUTIS_INTEROP_HEARTBEAT", "100,400")
+        .current_dir(&node)
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let channel =
+        tokio::task::spawn_blocking(move || accepted.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .unwrap();
+    let session = Connection::open_with(
+        channel,
+        Arc::new(Sleeper),
+        Format::Endpoint(Endpoint::rust(id("main")).expect(id("node"))),
+    )
+    .unwrap();
+    session.ready().await.unwrap();
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("the call returned")
+        .unwrap()
+        .unwrap();
+    assert_eq!(line, "survived 1500");
+}

@@ -88,7 +88,13 @@ function wrap(socket, { message, closed }, limits) {
 // certificate and key.
 export function optionsFromEnvironment(env = process.env) {
   const read = name => env[name] ? readFileSync(env[name]) : undefined
-  return { token: env.RUTIS_INTEROP_TOKEN, ca: read('RUTIS_INTEROP_CA'), cert: read('RUTIS_INTEROP_CERT'), key: read('RUTIS_INTEROP_KEY') }
+  const options = { token: env.RUTIS_INTEROP_TOKEN, ca: read('RUTIS_INTEROP_CA'), cert: read('RUTIS_INTEROP_CERT'), key: read('RUTIS_INTEROP_KEY') }
+  // Tests shorten the heartbeat: RUTIS_INTEROP_HEARTBEAT=<ping ms>,<timeout ms>.
+  if (env.RUTIS_INTEROP_HEARTBEAT) {
+    const [ping, timeout] = env.RUTIS_INTEROP_HEARTBEAT.split(',').map(Number)
+    options.limits = { ...LIMITS, ping, timeout }
+  }
+  return options
 }
 
 // Dial `spec` (ws:// or wss://) once.
