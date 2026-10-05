@@ -3,7 +3,9 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use rutis_channel::{lines, Channel, ChannelInfo, Closer, ConnectError};
+use rutis_channel::{Channel, ChannelInfo, Closer, ConnectError};
+
+use crate::lines;
 
 struct Shut(UnixStream);
 impl Closer for Shut {

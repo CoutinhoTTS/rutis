@@ -7,12 +7,12 @@
 use std::io::{BufRead, BufReader, IoSlice, Read, Write};
 use std::sync::Arc;
 
-use crate::{Channel, ChannelError, ChannelInfo, Closer, Receiver, Sender};
+use rutis_channel::{Channel, ChannelError, ChannelInfo, Closer, Receiver, Sender};
 
 /// Frame a byte stream as a [`Channel`]. `read` and `write` are the two
 /// directions of one stream (for a socket, two handles of it); `closer`
 /// must wake a thread blocked on either.
-pub fn channel(
+pub(crate) fn channel(
     read: impl Read + Send + 'static,
     write: impl Write + Send + 'static,
     closer: Arc<dyn Closer>,

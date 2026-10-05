@@ -11,6 +11,8 @@ use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
 use rutis_bridge::{transport_key, Transport};
 use rutis_channel::{Channel, ConnectError};
 
+#[cfg_attr(not(unix), allow(dead_code))]
+mod lines;
 #[cfg(unix)]
 mod unix;
 

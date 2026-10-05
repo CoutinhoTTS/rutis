@@ -4,13 +4,11 @@
 //! A [`Channel`] is one ordered, reliable, duplex stream of messages: every
 //! message sent arrives once, in order, with its boundaries kept. It moves
 //! opaque bytes and knows nothing of protocol frames or their encoding.
-//! Implementations live in the transport crates (`rutis-transport-*`); this
-//! crate holds only the contract, the connection errors and the
-//! [`lines`] framing that byte-stream transports share.
+//! Implementations, with their framing, limits and liveness, live in the
+//! transport crates (`rutis-transport-*`); this crate holds only the
+//! contract and the connection errors.
 
 use std::sync::Arc;
-
-pub mod lines;
 
 /// One established channel. The sender and receiver are used from one
 /// thread each; the closer may be called from anywhere.
@@ -84,16 +82,14 @@ impl std::fmt::Display for PeerId {
 #[error("invalid endpoint id {0:?}: use lowercase letters, digits and `-`")]
 pub struct InvalidPeerId(pub String);
 
-/// How an established channel failed. The reason is for diagnostics only:
-/// no code branches on it.
+/// How an established channel ended. The reason is for diagnostics only:
+/// no code branches on it. Why a transport ends a channel (a lost peer, a
+/// message over its size limit, a failed heartbeat) is the transport's own
+/// business.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ChannelError {
     #[error("{reason}")]
     Closed { reason: String },
-    /// Sending too large a message leaves the channel open; receiving one
-    /// closes it.
-    #[error("message of {size} bytes exceeds the limit of {limit}")]
-    TooLarge { limit: usize, size: usize },
 }
 
 /// Why a channel could not be established. The category decides what a
