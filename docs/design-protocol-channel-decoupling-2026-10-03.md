@@ -132,6 +132,8 @@ Node 通道在 I/O worker 内提供等价接口：
 
 ## 逻辑通道与物理连接
 
+上层多个插件共享 Session：一个 Runtime 实例的多个插件共用其活动控制 Session；一个节点 link 的桥功能及其代装插件共用该 link 的活动 Session。插件按实例 key 和资源 ID 区分，装卸单个插件不创建或关闭 Session。该共享模型与 Adapter 的物理连接复用互相独立，资源清理范围见远程稿“Session 共享与资源归属”。
+
 - Adapter 决定一个逻辑 Channel 独占物理连接，或多个 Channel 共享物理连接；Session 和 link 不访问物理连接句柄。
 - send/recv、顺序、背压、大小限制和 close 契约均以逻辑 Channel 为单位。复用实现隔离消息边界与流控，不允许一个通道的阻塞导致其他通道无界积压。
 - 关闭或替换会话只释放其逻辑 Channel；共享物理连接及其他 Channel 保持有效。Adapter 决定空闲连接保留与回收。
