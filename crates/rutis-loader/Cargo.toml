@@ -2,7 +2,7 @@
 name = "rutis-loader"
 description = "Data-driven plugin management for rutis: layered desired state, reconcile, editable layer and persistence hook"
 edition.workspace = true
-version = "0.1.0"
+version = "0.2.0"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true

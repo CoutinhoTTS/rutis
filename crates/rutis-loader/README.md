@@ -95,3 +95,5 @@ export default definePlugin({
 它装进 Node 运行时的 Cordis Context，和 Cordis 插件在同一个进程里，互相用服务不走进程间通信。
 
 行卸载时，先撤销它投到 rutis 的服务、等用到这些服务的插件都停下，再卸载插件本身，所以提供者总是比它的使用者后停。
+
+解析结果按包的 `version` 判断是否过期。包内容变了但版本号没变时（例如开发中 link 的包），用 `InteropResolver::invalidate(名字)` 或 `invalidate_all()` 手动失效：只改了声明（`rutis.provides`）时接着 `Loader::reload`；改了代码时重启运行时的 fiber，Node 会在新进程里导入新代码（Python 插件的代码改动 `Loader::reload` 就会生效，见 interop/python/README.md），失效的行在启动前重新解析。

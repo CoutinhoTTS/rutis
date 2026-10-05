@@ -348,6 +348,11 @@ impl HostLease {
     }
 }
 
+/// A lease dropped without [`HostLease::release`] is released by a task on
+/// the process's runtime, best effort: while that runtime shuts down the task
+/// may never run, and the count stays raised. That is harmless only because
+/// the count lives in the process, which goes away with the runtime. A lease
+/// that may outlive its process's runtime must be released explicitly.
 impl Drop for HostLease {
     fn drop(&mut self) {
         if let Some(process) = self.process.take() {
@@ -696,8 +701,11 @@ impl Process {
             let mut hosts = self.imports.hosts.lock().unwrap();
             match hosts.get_mut(name) {
                 Some(entry) => {
+                    entry.leases = entry
+                        .leases
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Value(format!("host lease overflow for {name}")))?;
                     entry.dispatch = dispatch.clone();
-                    entry.leases += 1;
                     false
                 }
                 None => {
