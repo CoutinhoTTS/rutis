@@ -1,307 +1,280 @@
 # 网络栈：协议与通道解耦（设计稿）
 
-状态：设计稿，未实现。日期：2026-10-03。
-依据：[兼容层设计](design-protocol-plugin-mount.md)（§3 线协议）、[挂载 Cordis 插件：需求](requirements-protocol-plugins.md)。
-使用方：[远程插件：跨框架节点与对称协议](design-remote-plugins-2026-10-03.md)（下称"节点稿"）。
-基准：`main` `d68471f`。
+状态：设计稿，未实现。修订日期：2026-10-05。
+依据：[兼容层设计](design-protocol-plugin-mount.md)、[挂载 Cordis 插件：需求](requirements-protocol-plugins.md)。
+使用方：[远程插件设计](design-remote-plugins-2026-10-03.md)（下称“远程稿”）。
 
-## 一、要解决什么
+## 范围与边界
 
-节点稿把整件事看成：
+本文规定跨语言通道契约、连接器、分帧与编码边界、WebSocket 绑定及实施验收。Rust、JS、其他语言的实现遵守相同契约。
 
-```text
-rutis ── 网络栈 ── rutis / cordis / pydis / …
-```
+- 协议只依赖有序、可靠、保持消息边界的双向通道；通道只搬运不透明字节。
+- 一个 Session 使用一个逻辑 Channel；逻辑 Channel 与物理连接的映射由 Transport Adapter 决定，不要求一一对应。连接池、连接复用和多路复用不进入会话协议；框架节点组合在框架层完成。
+- 支持两种远程端点：A 为完整框架节点，两端各自管理插件，按需配置 `export`、`import`、`host`、`events`；B 为叶子语言运行时，由本地 rutis 与 loader 管理，远端不运行 rutis。
+- 两种端点共享承载、身份、link 与 Session；运行时接入独立于节点桥功能，不要求叶子运行时实现完整框架节点能力。
+- 会话握手与能力格式、端点操作契约、权限与框架节点组合由远程稿规定；rutis 内核和 Cordis 不改。
+- rutis-dev 开发协议、Windows 命名管道实现不在本文范围。
 
-本文讲中间那一层。**协议不能依赖承载它的通道**：协议层只知道"有一条有序、可靠的消息通道"；通道层只搬运不透明的消息，不认识帧。两边可以单独替换。
+## 分层与插件结构
 
-每个框架都要有自己的网络栈实现：Rust 是新 crate `rutis-channel`，JS 放在 cordis 桥的包里，库外的框架（例如以后的 pydis）各自实现。所以本文既是 Rust 侧的设计，也是一份跨语言规范：通道契约（§五）和 WebSocket 绑定（§九）。不同语言的实现按这份规范互通。
+| 层 | 职责 | 实现与约束 |
+| --- | --- | --- |
+| 连接器 | 单次拨号、接收连接、拉起子进程端点、执行承载适用的身份验证 | Rust 契约归 `rutis-channel`，实现归具体 `rutis-transport-*` crate；JS 位于 I/O worker；不负责重连 |
+| Channel | 有序可靠消息流、分帧、背压、存活检测、关闭 | Rust 契约归 `rutis-channel`，实现归具体承载 crate；JS 位于桥包 `src/channel/*.mjs`；不认识协议帧和编码 |
+| codec | 协议帧与字节互转 | Rust 位于 `rutis-interop` 内部；JS 为 `src/codec.mjs`；不依赖通道种类 |
+| Session | 协议握手、调用、引用、取消、调用链和错误 | Rust 为 `rpc.rs`；JS 为 `session.mjs`；不依赖通道种类或身份验证机制，按端点契约接入操作封装 |
+| 端点操作 | 完整框架节点的服务公告、代装插件、事件转发；叶子运行时的运行时操作 | 节点操作归 `rutis-bridge`，运行时契约归 `rutis-interop`；各语言提供对应适配；不依赖通道种类，不强行合并 `rows.*` / `hosts.*` 与 `plugins.*` / `services.*` |
+| 接入与功能插件 | 共享承载、身份、link；节点桥功能与运行时接入分别配置 | 按下表分工 |
 
-现状是协议和"Unix socket + 换行分帧 + JSON + 拉起进程后回拨"绑在一起（§三），后果有这些：
+`rutis-interop` 只通过 `Channel` 使用通道；`rutis-channel` 不依赖任何协议 crate。`Channel`、`Session`、codec 是机制库，不要求分别插件化。
 
-- **远程**：节点之间走网络，就得先把网络连接伪装成 Unix 字节流（远程稿第一版就是这么做的，见 §十四）。
-- **库外的框架**：其他语言不进 rutis（#107），但库外的实现要接入时，也得照抄"临时目录 socket + 回拨"的启动方式。
-- **测试**：没有进程内通道，也没有可注入故障的通道，半开连接、慢链路都测不了。
-- **平台**：会话代码直接引用 `std::os::unix::net::UnixStream`，整个会话层只能在 Unix 上编译。
-
-不在本文范围：
-
-- 协议本身（会话层的对称化、框架操作）：见节点稿 §五。
-- rutis-dev 的开发通道（另一个协议）。以后可以改用本文的通道层，本文不展开。
-- Windows 上的通道实现（命名管道）。解耦之后它只是多一种通道。
-
-## 二、结论先说
-
-1. **分层，依赖只能向下**：连接器 → 通道 → 编码 → 会话 → 框架操作 → 桥（§四）。本文管前两层和编码层的边界。
-2. **新 crate `rutis-channel`** 放通道契约、通道实现、连接器和装饰器，不依赖任何协议 crate。`rutis-interop` 只通过 `Channel` 使用通道，解耦由编译器保证。这些都是库；在框架里，连接器由传输插件包成服务，交给链接插件使用（节点稿 §4.3）。
-3. **Rust 的通道接口是阻塞式的**，因为会话的同步调用要在任意线程上阻塞等待，读线程也刻意不依赖调用方的运行时。通道必须独立于调用方执行器推进；内部用异步栈的实现（WebSocket、TLS）自带线程（§5.3）。Node 的通道跑在 I/O worker 里，Python 跑在自己的线程里，是同一条约束。
-4. **一帧对应一条通道消息**。分帧归通道（字节流用换行，以后二进制编码用长度前缀），编码归协议（JSON）。Node 的 `wire.encode` 不再附带换行（§六）。
-5. **结束原因归通道**：进程退出状态、心跳超时、对端关闭时给出的原因，都作为通道的结束原因交给会话。会话不再接收 `disconnected` 闭包。
-6. **身份来自连接器**：`ChannelInfo` 带连接器验证过的对端节点 id；握手里自报的节点 id 必须与它一致（节点稿 §5.1）。
-7. **本机子节点用继承的 fd 连接**：把 socketpair 的一端作为 fd 3 交给子进程，去掉临时目录 socket；路径方式保留。Node 侧已验证可行（§七）。
-8. **WebSocket 绑定是一份跨语言规范**（§九）：URL、子协议、鉴权、一帧一消息、心跳、关闭码、重连。Rust 和 JS 的实现按它互通。
-9. **D1 是纯重构**：线格式不变（Unix socket 上仍是逐行 JSON），`rutisProtocol` 不变，现有测试全部通过，性能不退化。
-10. **测试按矩阵组织**：通道契约测试跑遍每种通道实现；会话测试跑遍每种通道；WebSocket 绑定做跨实现测试（§十一）。
-
-**完成的判据**：
-
-- `rpc.rs`、`protocol.rs` 不再引用 `std::os::unix`，去掉 `cfg(unix)` 后能编译（`rpc.rs` 现在借用的 `server::native_error` 要挪出冻结的 `server.rs`）；
-- 新增一种通道，不需要改 `rutis-interop` 的任何文件；
-- 同一组会话测试在所有通道上通过；
-- Rust 和 JS 的 WebSocket 实现能互相连通（Rust 监听、JS 拨号，以及反过来）；
-- Unix 上的线格式不变。
-
-## 三、现状：耦合点清单
-
-| 位置 | 现在做什么 | 属于哪层 | 解耦后 |
-| --- | --- | --- | --- |
-| `rpc.rs` `Peer.writer: Mutex<UnixStream>`、`closer: UnixStream`、`Drop` 里 `shutdown` | 发送；从别的线程打断阻塞的写；结束 | 通道 | `Box<dyn Sender>`、`Arc<dyn Closer>` |
-| `rpc.rs` 读线程：`BufReader::lines()` + `serde_json::from_str` | 按行切分并解码 | 分帧 + 编码 | `Receiver::recv()` + 编码层解码 |
-| `rpc.rs` `write_locked`：`serde_json::to_vec` + `\n` + `write_all` | 编码、加换行、写出 | 编码 + 分帧 + 通道 | 编码层编码 + `Sender::send` |
-| `rpc.rs` `Connection::connect(UnixStream)`、`connect_with(UnixStream, disconnected)` | 会话入口 | 入口 | `Connection::open(Channel, dispatch)`；`connect` 保留为 `Channel::unix(stream)` 的简写 |
-| `process.rs` `Process::mount` | 建临时目录、`UnixListener::bind`、拉起 `node … runner.mjs <socket>`、`accept` | 连接器 | 本机子节点的 `spawn` 连接器，返回 `Channel` + 子进程句柄 |
-| `process.rs` `Child::disconnected` | 断开时最多等 1 秒取得退出状态，拼成错误 | 结束原因 | 由 `spawn` 连接器的 `Receiver` 在 EOF 时给出 |
-| `process.rs` `Process` | 会话、控制操作、子进程三者合一 | 混合 | 拆成会话部分 + 子进程句柄（§十） |
-| `server.rs` `serve`（冻结的反方向） | 从 argv 取 socket 路径，`UnixStream::connect` | 连接器 | unix 连接器；行为不变 |
-| 生成代码 | 代理里持有 `Arc<Process>`；调用 `Process::mount` | 使用方 | D1 不改（`Process` 外观保留） |
-| `runtime.rs` `CordisRuntimePlugin`（#109） | 用 `Process::mount` 的 anchor 模式拉起运行时，提供 `CordisRuntime` | 使用方 | D1 不改（`Process` 外观保留） |
-| `wire.mjs` `encode` | `JSON.stringify` + `'\n'` | 编码里混进了分帧 | 编码不带换行；字节流通道写出时加 |
-| `io-worker.mjs` | `createConnection(socketPath)`，或监听后拉起；`createInterface` 按行切；`JSON.parse` | 连接器 + 通道 + 分帧 + 解码 | 通用 worker + 通道模块 |
-| `client.mjs` `Process` | 把 `{ executable, socketPath }` 交给 worker | 连接器参数 | 改为通道规格（§5.4） |
-| `runner.mjs` | argv 为 `<socket> <插件或 anchor>` | 启动参数 | `<通道> --id <id> <…>`，裸路径保持兼容（§十） |
-| `peer.mjs` | 经 `send` / `receive` / `pump` 收发，与传输无关 | 会话 | 把 `encode` 换成不带换行的版本；文件改名为 `session.mjs`，避免和节点稿的 `Peer` 混淆 |
-| `rpc.rs` 的 `struct Peer` | 一个会话的内部状态 | 会话 | 改名（例如 `SessionState`），理由同上 |
-| `rpc/tests.rs`、`tests/rpc_callbacks.rs` | 直接用 `UnixStream::pair()`、手写逐行 JSON，或自己 bind `UnixListener` | 测试 | 改用 memory 通道和连接器 |
-
-会话的核心逻辑（调用表、引用表、调用链路由、`SyncWaitCycle`）不需要动，Node 的 `Peer` 也早已和传输无关。要改的集中在会话的边缘，以及 `Process` 和 `io-worker`。
-
-## 四、分层
-
-| 层 | 职责 | 不得知道 | Rust | Node |
-| --- | --- | --- | --- | --- |
-| L0 连接器 | 建立通道：拉起子节点、监听、拨号、鉴权、重连；给出对端身份 | 帧、编码 | `rutis-channel`（网络连接器在 `websocket` 特性里），由传输插件对外提供 | worker 里的连接代码，由 cordis 的传输插件对外提供 |
-| L1 通道 | 有序、可靠、保持边界的双向消息流；分帧、背压、存活、结束原因 | 帧、编码 | `rutis-channel` | cordis 桥包里的 `src/channel/*.mjs`（在 worker 里运行） |
-| L2 编码 | 帧 ↔ 字节（JSON） | 通道种类 | `rutis-interop` 内部 | `src/codec.mjs` |
-| L3 会话 | 握手、调用、引用、取消、调用链、错误 | 通道种类、身份来源 | `rpc.rs` | `session.mjs`（现在的 `peer.mjs`） |
-| L4 框架操作 | 服务公告、代装插件、事件转发（节点稿 §5.2，对称） | 通道种类 | `rutis-interop` | cordis 桥 |
-| L5 桥 | 一组插件：传输、身份、链接、导出、导入、代装、事件（节点稿 §4.3） | 通道种类（传输插件除外） | rutis 的桥插件 | cordis 的桥插件 |
-
-```text
-             rutis-loader · 生成代码 · 应用
-                          │
-                    rutis-interop
-              L5 桥 · L4 框架操作 · L3 会话 · L2 编码
-                          │  只经 Channel
-                    rutis-channel
-              L1 通道契约与实现 · 装饰器 · L0 连接器
-
-  JS（cordis 桥包）、Python（pydis）各自实现 L0–L5，按本文和节点稿的规范互通
-```
-
-## 五、通道契约
-
-### 5.1 协议对通道的要求
-
-| 要求 | 协议依赖它的地方 |
+| 插件 | 契约 |
 | --- | --- |
-| 有序 | 双方都校验调用号单调递增（"invalid or repeated invocation identity"）；读线程按到达顺序先登记帧里授予的引用，再处理后面的 `release`（`rpc/tests.rs` 的 `admitted_call_pins_its_target_before_a_following_counted_release`） |
-| 可靠且不重复 | 引用按授予次数归还：丢一条 `release` 就泄漏，重复一条就会误删 |
-| 保持消息边界 | 一帧对应一条消息，通道不得拆分或合并 |
-| 全双工 | 同步调用等待回复期间，还要接收并执行反向调用 |
-| 结束可观察，并带原因 | 在途调用要以 `Transport` 失败，并说明对端是怎么结束的 |
-| 不依赖调用方执行器 | `current_thread` 运行时可能正被一次同步调用阻塞（`rpc.rs` 的读线程和 `process.rs` 的退出状态线程都基于这条约束） |
-| 有背压，不无限缓冲 | 协议本身没有流控 |
-| 能在有限时间内发现失联 | 可能静默失效的介质（网络）必须自带心跳；本机 socket 靠 EOF 就够了 |
+| 承载 | 提供 `Transport#<种类>` 服务；包装连接器，持有监听器，执行承载特有的鉴权与心跳，向 link 交付通道 |
+| 身份 | 提供凭据、对端身份映射和验证规则；身份撤销触发依赖 link 的清理 |
+| link | 依赖承载；网络链接依赖 Identity，本机子进程端点身份由启动方指定；持有监听注册；仅负责连接、会话身份核对与协议握手、重连退避、会话替换、会话就绪及相关清理；不认识 loader、schema 或行，不负责 `PeerRows` / `RuntimeRows` |
+| 节点桥功能 | 完整框架节点按需分别配置 `export`、`import`、`host`、`events`；权限由两端为对方安装的功能插件决定，与拨号方向无关 |
+| 运行时接入 | interop 的 RuntimePlugin 与 bridge 的接入 Adapter 负责会话接入；loader 侧配套插件按端点契约管理 `PeerRows` / `RuntimeRows` 和第二阶段行就绪，处理会话替换与撤销；不要求安装节点桥功能 |
+| `peer` 组合 | 只组合已有插件，不另实现连接、鉴权、心跳或 link 生命周期 |
 
-不满足这些要求的介质（UDP、不保序的消息队列），要先在通道实现里补上序号、确认和重传，才能当通道用。
+承载以独立 crate 中的原生 rutis 插件交付：`rutis-transport-local` 导出 LocalPlugin，`rutis-transport-websocket` 导出 WebSocketPlugin，`rutis-transport-memory` 导出 MemoryPlugin。插件配置名保留 `rutis-bridge/local`、`rutis-bridge/websocket`、`rutis-bridge/memory`；crate 名不等于插件名。每个 crate 同时持有通道实现与插件生命周期包装，不另设附属的 `plugin` feature。
 
-### 5.2 通道对协议的承诺
+插件校验配置、提供 Transport 服务、管理监听器/连接/子进程，卸载时撤销服务并清理资源，使用它的 link 通过原生门控停止。local 内部包含 Unix、fd、spawn；memory 也可用于进程内互联。
 
-- 不解析、不修改、不注入、不丢弃消息；消息是不透明的字节；
-- 关闭原因是给人看的文字，协议不根据它走不同分支；
-- 身份信息只经 `ChannelInfo` 提供，不写进消息流。
+`rutis-bridge` 定义 Transport 公共服务接口，持有 identity、link 和节点功能插件；具体承载依赖 bridge 和 channel，bridge 不反向依赖具体承载。应用装配层选择承载并完成需要自建承载的组合。运行时通用会话入口归 interop，Peer 到该入口的 Adapter 归 bridge；loader 只负责行侧集成，bridge/interop 不依赖 loader。所有 crate 留在同仓库，核心 `rutis` 不变；不用网络不引入 WebSocket 依赖。
 
-### 5.3 Rust 接口
+WebSocket 仅是一种承载。新增承载不修改 link 或协议层，不强制其他承载采用 WebSocket 的认证方式，也不放宽其安全规则。
+
+## Channel 契约
+
+### 消息与执行
+
+| 项 | 规定 |
+| --- | --- |
+| 顺序与交付 | 按发送顺序交付，不丢失、不重复；不满足要求的介质须在通道内部补齐序号、确认和重传 |
+| 消息边界 | 一帧对应一条消息；不得拆分、合并、解析、修改或注入消息 |
+| 双向通信 | 全双工；同步调用等待回复期间仍能接收反向调用 |
+| 背压 | 有界缓冲；发送方在背压下等待，不无限积压 |
+| 独立推进 | 不依赖调用方执行器；Rust 接口阻塞式，异步承载自带线程和运行时；Node 在 I/O worker 推进，其他语言使用独立线程等等价机制 |
+| 存活 | 静默失效的网络介质须在有限时间内发现失联；本机 socket 使用 EOF |
+| 身份 | 仅经 `ChannelInfo` 交付，不注入消息流；会话握手中的端点 id 必须与连接器确认的对端身份一致 |
+| 结束 | 可观察并带诊断原因；在途调用以 `Transport` 失败；关闭原因仅供诊断，不用于程序分支 |
+
+### Rust 接口
 
 ```rust
-// rutis-channel（示意）
+// rutis-channel，设计接口
 pub struct Channel {
-    pub sender: Box<dyn Sender>,      // 会话在自己的发送锁里使用
-    pub receiver: Box<dyn Receiver>,  // 归会话的读线程所有
-    pub closer: Arc<dyn Closer>,      // 任何线程、任何时候都可以调用
+    pub sender: Box<dyn Sender>,
+    pub receiver: Box<dyn Receiver>,
+    pub closer: Arc<dyn Closer>,
     pub info: ChannelInfo,
 }
 
 pub trait Sender: Send {
-    /// 发送一条消息；通道施加背压时阻塞。
+    // 发送一条消息；背压下阻塞。
     fn send(&mut self, message: &[u8]) -> Result<(), ChannelError>;
 }
 
 pub trait Receiver: Send {
-    /// 阻塞到下一条消息；`Ok(None)` 表示对端正常结束。
+    // 阻塞到下一条消息；Ok(None) 表示对端正常结束。
     fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError>;
 }
 
 pub trait Closer: Send + Sync {
-    /// 幂等；必须唤醒正阻塞在 send 和 recv 上的线程。
+    // 幂等；唤醒阻塞在 send 和 recv 上的线程。
     fn close(&self, reason: &str);
 }
 
 pub struct ChannelInfo {
-    pub transport: &'static str,    // "unix" | "fd" | "memory" | "websocket" …
-    pub peer: Option<PeerId>,       // 连接器验证过的对端节点 id；本机子节点由父节点指定
-    pub label: String,              // 用在错误信息里的名字，例如 "peer mac"
+    pub transport: &'static str, // "unix" | "fd" | "memory" | "websocket" …
+    pub peer: Option<PeerId>,    // 经连接器确认；本机子进程端点由启动方指定
+    pub label: String,          // 诊断标签，例如 "peer mac"
 }
 
 pub enum ChannelError {
-    /// 通道已结束，包括对端异常退出、心跳超时、被对端或本端关闭。
     Closed { reason: String },
-    /// 消息超出上限。发送方遇到时通道不关闭；接收方遇到时通道关闭。
+    // 发送超限不关闭通道；接收超限关闭通道。
     TooLarge { limit: usize, size: usize },
 }
 ```
 
-三个对象分开，对应现在 `UnixStream` 的三个克隆（写端、读端、`closer`），会话现有的锁设计因此保持不变：
+- 会话在发送锁内完成编码和发送，保持引用表变化与发送顺序一致。
+- `close` 先在发送锁外打断阻塞发送，再取得锁清理表。
+- 读线程循环 `recv()`，解码后交给会话；`Closed { reason }` 映射为 `Error::Transport("<label>: <reason>")`。移除会话入口的 `disconnected` 闭包。
+- 发送超限按编码失败处理：请求向调用方返回错误，应答改发错误帧。
+- 会话入口为 `Connection::open(Channel, dispatch)`；已有 `connect` 可保留为 Unix 通道的兼容简写。
+- `PeerId` 表示会话端点 ID，不要求对端是完整框架节点。`ChannelInfo.peer` 的可选类型兼容无需端点身份的通道用途；link 不得将缺少已确认对端身份的通道标为会话就绪。
 
-- 会话持有发送锁时完成"编码 + 发送"，引用表的变化和发送顺序保持一致；
-- `close` 先在锁外打断阻塞中的发送，再拿锁清理表（`rpc.rs` 现有的写法）。
+### Node 与其他语言
 
-**为什么是阻塞式**：会话的同步调用会在任意线程上阻塞等待回复，包括 `current_thread` 运行时自己的线程；读线程也刻意不依赖任何运行时。如果用 async 接口，就必须指定一个执行器来推进，这正好和同步等待冲突。内部基于异步栈的实现（WebSocket、TLS）自带一个线程和运行时，对外仍然提供阻塞接口；`rutis-channel` 提供把异步实现包成阻塞接口的适配器。
-
-**会话侧的变化**：
-
-- 读线程循环调用 `recv()`，解码后交给现有的 `receive`。`Closed { reason }` 映射为 `Error::Transport("<label>: <reason>")`。
-- 发送超限按编码失败处理：请求直接向调用方返回错误；应答改发错误帧，现在的 `respond` 已经有这条路径。
-
-### 5.4 Node 接口
+Node 通道在 I/O worker 内提供等价接口：
 
 ```js
-// cordis 桥包 src/channel/*.mjs（示意），在 I/O worker 里运行
 // open(spec, { message(bytes), closed(reason) }) → { send(bytes), close(reason) }
+// 建立失败另行返回结构化 ConnectError，不通过 closed(reason) 推断。
 ```
 
-- 规格：`unix:<path>`、`fd:<n>`、`wss://…`（拨号），以及裸路径（等同 `unix:`，兼容现状）。冻结反方向用的"监听后拉起"模式保留为一个连接器。cordis 节点要接受网络连接时，WebSocket 服务端需要 `ws` 这类依赖（Node 只内置了客户端）；节点通常是拨号方，这不是必需的。
-- 主线程与 worker 之间沿用现有的 MessagePort + `Atomics` 交接。同步等待时主线程被阻塞，所以通道必须在 worker 里推进。这是 Node 版的"不依赖调用方执行器"，同一个 worker 也负责应答 WebSocket 心跳。
-- 编码：会话模块用 `codec.encode`（不带换行），worker 用 `codec.decode`。在 worker 里解码是现有的性能安排，可以保留；关键是通道模块只负责分帧，不决定编码。
+- 通道规格：`unix:<path>`、`fd:<n>`、`wss://…`；裸路径等同 `unix:`。
+- 主线程与 worker 沿用 MessagePort + `Atomics` 交接；主线程同步等待时，worker 继续收发和处理心跳。
+- 会话使用不带换行的 `codec.encode`；worker 可调用 `codec.decode`，通道模块不决定编码。
+- JS 接受 WebSocket 连接时使用支持服务端的依赖（如 `ws`）；仅拨号不要求服务端能力。
+- 其他语言遵守相同契约；Python 本机子进程端点可用 `socket.socket(fileno=3)` 打开继承 fd。
 
-### 5.5 其他语言
+## 分帧与编码
 
-契约相同：通道在独立线程上推进，字节流按换行分帧，WebSocket 按 §九。例如 pydis 作为本机子节点时，用 `socket.socket(fileno=3)` 打开继承的 fd。
+| 项 | 规定 |
+| --- | --- |
+| 编码 | 协议层使用紧凑 JSON；字符串内换行转义；codec 为内部接口，当前不开放替换 |
+| 字节流 | Unix socket、继承 fd 按换行分帧；发送时由通道加换行，接收时由通道移除分隔符 |
+| WebSocket | 一条文本消息对应一帧 UTF-8 JSON，不附带换行 |
+| 后续二进制编码 | 字节流使用长度前缀，WebSocket 使用二进制消息；由连接器在会话建立前确定两端编码，不在协议帧内协商 |
 
-## 六、分帧与编码
+## 逻辑通道与物理连接
 
-- **编码（协议层）**：JSON，紧凑输出。字符串里的换行在 JSON 中已经转义，所以按行分帧是安全的。编码先做成内部接缝，不开放替换，因为现在只有 JSON 一种。
-- **分帧（通道层）**：字节流通道（Unix socket、继承的 fd）按换行分帧，与 v1 线格式一致。消息型通道（WebSocket）一条消息就是一帧，不加换行。
-- **以后的二进制编码**：字节流通道改用长度前缀分帧，WebSocket 改用二进制消息。编码由连接器在建立会话时告诉两端，不在帧里协商，因为 `hello` 本身必须先能解码。
+上层多个插件共享 Session：一个 Runtime 实例的多个插件共用其活动控制 Session；一个节点 link 的桥功能及其代装插件共用该 link 的活动 Session。插件按实例 key 和资源 ID 区分，装卸单个插件不创建或关闭 Session。该共享模型与 Adapter 的物理连接复用互相独立，资源清理范围见远程稿“Session 共享与资源归属”。
 
-## 七、连接器
+- Adapter 决定一个逻辑 Channel 独占物理连接，或多个 Channel 共享物理连接；Session 和 link 不访问物理连接句柄。
+- send/recv、顺序、背压、大小限制和 close 契约均以逻辑 Channel 为单位。复用实现隔离消息边界与流控，不允许一个通道的阻塞导致其他通道无界积压。
+- 关闭或替换会话只释放其逻辑 Channel；共享物理连接及其他 Channel 保持有效。Adapter 决定空闲连接保留与回收。
+- 物理连接故障由 Adapter 通知全部受影响的 Channel。无法继续满足有序可靠契约时必须终止 Channel；终止后的 Channel 不得通过换物理连接重新变为可用，也不得自动重放 Session 请求。
+- Adapter 维护物理连接；link 在 Channel 失败后重新申请逻辑 Channel 并建立新 Session。两层不得各自重试同一次会话接入；不新增会话恢复或进程自动重启。
+- `ChannelInfo.peer`、验证结果和接收注册归属于对应逻辑 Channel。只有身份与安全上下文兼容时才可共享物理连接；每个通道仍须独立完成接收授权，禁止因连接复用串用权限。
+- 撤销注册、Identity 或 link 仅清理其逻辑通道与待交付结果；若底层凭据撤销使共享连接整体失效，Adapter 关闭该连接并通知所有受影响通道。
 
-| 连接器 | 产出 | 用途 |
+## 连接建立与 link 生命周期
+
+### 连接器
+
+| 连接器 | 产出与约束 |
+| --- | --- |
+| `spawn`（继承 fd） | `Channel` + 子进程句柄；fd 3 为 socketpair 一端；D2 起作为支持该能力时的默认方式 |
+| `spawn`（路径） | 临时目录 socket、子进程回拨；保留兼容 |
+| `unix::connect` / `unix::listen` | 每次产出一个 `Channel`；用于工具及冻结的反方向 |
+| `memory::pair` | 两条首尾相连的 `Channel`；用于测试或进程内端点 |
+| WebSocket `dial` / `listen` | 每次连接产出 `Channel`，身份放入 `ChannelInfo.peer`；心跳在通道内部；`dial` 只尝试一次 |
+
+连接器每次调用只报告一次逻辑 Channel 建立结果，不自行重试失败的会话接入、不替换会话、不决定 link 会话就绪。Adapter 可内部管理物理连接池与连接维护；单次建立必须可取消，内部维护不得演变为无限等待或另一个会话重连循环。link 完成身份核对和协议握手后才进入会话就绪状态；此状态不表示 loader 的 schema 或行已就绪。两阶段行就绪由 loader 侧配套插件独立完成，不作为 link 的握手或就绪条件。卸载承载或身份依赖时，link 按框架原生门控停止、撤销注册并清理连接；配套插件清理其管理的行。
+
+### 建立阶段错误
+
+连接建立阶段须返回跨语言一致的结构化类别，独立于已建立通道的 `ChannelError`：
+
+```rust
+pub enum ConnectError {
+    Retryable { reason: String },
+    AuthRejected { reason: String },
+    Incompatible { reason: String },
+}
+```
+
+| 类别 | 含义 | WebSocket 拨号侧 link 行为 |
 | --- | --- | --- |
-| `spawn`（继承 fd） | `Channel` + 子进程句柄；fd 3 是 socketpair 的一端；子进程退出状态作为结束原因 | 本机子节点，D2 起作为默认 |
-| `spawn`（路径） | 现状：临时目录里的 socket，子进程回拨 | 保留 |
-| `unix::connect` / `unix::listen` | `Channel` | 冻结的反方向、工具 |
-| `memory::pair` | 两条首尾相连的 `Channel` | 测试；同一进程里的两个节点 |
-| WebSocket `dial` / `listen` | `Channel` + 验证过的对端节点 id；心跳在通道内部；`dial` 负责退避重连 | 节点之间的网络链接（§九） |
+| `Retryable` | 暂时性连接失败，如连接拒绝、超时、临时不可用 | 指数退避后再次调用单次 `dial` |
+| `AuthRejected` | 凭据、证书验证、身份映射或注册授权未通过 | 按 30 秒上限间隔慢重试并持续报告错误，不绕过验证 |
+| `Incompatible` | 子协议或必要承载能力不兼容 | 停止自动重试，等待配置修正或显式重启 link |
 
-**继承 fd**：
+- 连接器和承载适配层从类型、协议状态或验证结果生成类别；不得解析诊断文字分类。
+- JS 等实现使用等价的稳定类别字段；`reason` 仅供诊断，不含凭据。
+- 会话握手发生在通道建立之后；握手的身份拒绝、协议不兼容须以结构化结果交给 link，采用对应慢重试或停止策略，不从 `ChannelError.Closed.reason` 反推类别。
+- `ChannelError` 只表达通道运行期的结束与超限。正常运行期断线按 link 策略恢复；本地子进程不自动重启。
+- link 停止或依赖撤销后不得继续安排重试；已发起的连接结果不得再交付为新会话。
 
-- 好处：没有文件系统路径，所以不会暴露、不会残留，也没有 `accept` 竞争；stdout 仍留给插件输出（兼容层设计 §9 的工程防护照样成立）。
-- 已验证：在 Node 22.13（macOS）上，worker 线程能把继承的 fd 3 打开为 `net.Socket`，双向收发逐行 JSON；主进程的 stdout 不受影响，双方都能正常退出。
-- Rust 侧：用 `UnixStream::pair()`，在 `pre_exec` 里 `dup2` 到 fd 3。只让这一个 fd 被子进程继承，其余照常 `CLOEXEC`。
-- 兼容：cordis 桥包在 `package.json` 里声明支持的通道（例如 `"rutisChannels": ["unix", "fd"]`），构建时和 `rutisProtocol` 一起核对；未声明 `fd` 的旧版本走路径方式。
+### 共享监听器注册与接收路由
 
-**结束原因**：`spawn` 连接器的 `Receiver` 在 EOF 时最多等 1 秒取得退出状态（也就是现在的 `Child::disconnected`），然后返回 `Closed { reason: "Cordis process exited with signal: 9 (SIGKILL)" }`。会话拿到的错误和现在逐字相同。
+网络监听器由承载插件持有，link 通过注册句柄声明允许接收的连接。注册至少绑定：监听器、承载实例、本地端点 id、预期对端 id、有效 Identity 验证规则、所属 link 及本次注册代次。
 
-**在框架里怎么用**：连接器不被业务代码直接调用，而是由传输插件包成 `Transport#<种类>` 服务，链接插件依赖它（节点稿 §4.3）：
+| 环节 | 强制规则 |
+| --- | --- |
+| 注册验证 | link、承载与 Identity 均须有效；端点 id 与身份绑定须一致，验证规则须适用于该承载；同一监听器与本地端点下，同一对端只允许一个有效 link 路由，重复或歧义注册拒绝 |
+| 入站认证 | 承载执行适用的身份验证，以验证得到的对端 id 查找注册；不得以未验证的自报 id 或请求参数直接选定授权目标 |
+| 路由 | 仅交给身份绑定匹配的有效注册；无注册、已撤销或身份不符直接拒绝，不创建隐式 link |
+| 移交复核 | 承载握手完成、移交 link 前，重新核验注册代次、所属 link 和 Identity 仍有效；撤销与移交须有确定的先后顺序，旧握手不能越过撤销完成移交 |
+| 会话接收 | link 再核对会话 `hello` 的端点 id 与 `ChannelInfo.peer` 一致；完成握手前不得就绪；旧会话仅由 link 决定是否替换 |
+| 撤销 | 注册句柄随 link 生命周期释放；link 停止、重建或 Identity 撤销时撤销旧代次，清理相关握手中连接和已移交通道/会话；迟到结果关闭，旧注册不得继续接受连接 |
 
-- `rutis-bridge/local` 包装 `spawn`，`rutis-bridge/websocket` 包装 `dial` 和 `listen`，测试用的 `rutis-bridge/memory` 包装 `memory::pair`。加一种传输，就是多一个传输插件，链接插件和协议层都不用改。
-- 监听由传输插件持有。验证身份后，传输插件把连接交给对应对端的链接插件；没有为这个对端配置链接插件的，直接拒绝。
-- 卸掉一个传输插件，依赖它的链接按原生门控停下。
+撤销一个 link 不关闭共享监听器或其他 link。新 link 必须重新注册，不能复用已撤销句柄；承载卸载时撤销该承载全部注册。
 
-## 八、装饰器
+### WebSocket 重连参数
 
-- `limit(n)`：消息大小上限；
-- `trace`：逐条记录消息，默认关闭，调试用；
-- `fault`（仅测试）：延迟、丢弃后关闭、半开（停止转发但不关闭），用来测心跳和故障语义。
+- 拨号侧 link 唯一负责重连：指数退避，初始 0.5 秒，上限 30 秒，±20% 抖动；连接稳定 60 秒后重置。
+- `AuthRejected` 按 30 秒间隔慢重试并持续报错；`Incompatible` 停止重试。
+- 承载 `dial` 不包含重试循环。子进程退出不触发自动重启。
 
-心跳不做成装饰器：它需要带外的控制消息，只能放在本身就有这种消息的传输里（WebSocket 的 ping/pong）。
+## WebSocket 绑定
 
-一条连接只承载一个会话，所以不做复用；树形组合在框架层完成（节点稿 §4.5），也不需要帧级中继。
-
-## 九、WebSocket 绑定（跨语言规范）
-
-各语言的网络栈按这一节互通。
+以下规则只约束 WebSocket 承载；各语言实现按此互通。此绑定采用一条 WebSocket 物理连接对应一个逻辑 Channel，因此关闭码、心跳和接管作用于该连接；这不是通用 Channel 契约的限制。需要 WebSocket 多路复用时，由 Adapter 定义独立协商的承载分帧与绑定，不修改 Session 操作格式。
 
 | 项 | 规定 |
 | --- | --- |
 | 地址 | 监听方配置，例如 `wss://main.example.com/rutis` |
-| 子协议 | `rutis.<会话协议主版本>`，v2 即 `rutis.2`；不符时在升级握手阶段拒绝 |
-| TLS | 非回环地址必须是 `wss`；可以由前置反向代理终止 TLS，监听方只听回环地址。拨号方校验对方证书（系统根证书或配置的 CA） |
-| 鉴权 | 升级请求带 `Authorization: Bearer <token>`，或者用客户端证书。监听方经身份插件把凭据映射成对端节点 id，放进 `ChannelInfo.peer`。拨号方按配置知道自己连的是哪个节点，握手时核对对方 `hello` 里的节点 id |
-| 消息 | 一帧一条文本消息（UTF-8 JSON，不带换行）；二进制消息留给以后的二进制编码 |
-| 大小上限 | 默认 16 MiB，可配置；收到超限消息时以关闭码 1009 关闭 |
-| 心跳 | 双方都发 ping，默认每 10 秒一次；30 秒内收不到任何消息即判定失联、关闭连接。同时打开 TCP keepalive |
-| 关闭 | 关闭原因写进 close frame 的 reason（UTF-8，不超过 123 字节）。有序关闭用 1001；同一节点 id 的新连接接管旧连接时，旧连接以 4002 关闭，reason 为 "replaced by a new connection" |
-| 重连 | 由拨号方负责：指数退避，从 0.5 秒开始，上限 30 秒，±20% 抖动，连接稳定 60 秒后重置。凭据被拒时按上限间隔重试并持续报错；子协议不符时停止重试 |
+| 子协议 | `rutis.<会话协议主版本>`；使用实际支持的会话格式版本，不符时在升级握手阶段拒绝，返回 `Incompatible`。新增不兼容格式不得复用现有运行时的版本号 |
+| TLS | 非回环地址必须使用 `wss`；允许前置反向代理终止 TLS，此时后端监听器只听回环地址；拨号方用系统根证书或配置 CA 校验证书 |
+| 鉴权 | 升级请求携带 `Authorization: Bearer <token>`，或使用客户端证书；Identity 提供凭据和规则，承载执行验证并映射对端 id；不得将 token 放入 URL、诊断或日志 |
+| 对端身份 | 监听方将验证得到的端点 id 放入 `ChannelInfo.peer`；拨号方在证书验证通过后绑定配置的预期端点 id；双方均核对会话 `hello` 的端点 id |
+| 接收授权 | 按“共享监听器注册与接收路由”执行；通过凭据验证不等于获得 link 接收授权 |
+| 消息 | 一帧一条文本消息，UTF-8 JSON，不带换行；二进制消息保留给后续二进制编码 |
+| 大小上限 | 默认 16 MiB，可配置；发送超限不关闭通道，接收超限以关闭码 1009 关闭 |
+| 心跳 | 双方默认每 10 秒发一次 ping；30 秒内收不到任何消息即判定失联并关闭；启用 TCP keepalive；心跳独立于调用方执行器推进 |
+| 关闭原因 | close frame 的 reason 为 UTF-8，最多 123 字节；只供诊断 |
+| 有序关闭 | 关闭码 1001 |
+| 接管 | link 决定同一端点 id 的新连接接管旧会话后，旧连接以 4002 关闭，reason 为 `replaced by a new connection` |
 
-谁拨号由部署决定，通常是工作节点拨主节点（方便穿过 NAT）。拨号方向和链接两端的权限无关，权限只看两端各自为对方装了哪些功能插件（节点稿 §六）。
+完整框架节点之间的拨号方向由部署配置；远程叶子运行时只监听，由控制方 link 拨号，因为叶子侧没有 link 持有重连退避（见远程稿“远端租约”）。方向不授予功能权限。心跳使用 WebSocket ping/pong，不注入会话协议帧。
 
-## 十、本机子节点：`Session` 与 `Process`
+## 本机子进程端点与兼容接口
 
-- **会话部分**（`rutis-interop` 的 `Session`）= `Connection` + 框架操作，可以建立在任意 `Channel` 上。
-- **`Process`** = `spawn` 连接器给出的子进程句柄 + `Session`。保留现有的全部构造函数和方法作为外观，生成代码和现有测试都不用改。
-- **启动参数**：`<程序> <通道> --id <id> <插件或 project>`。`<通道>` 是 `fd:3`、`unix:/path`，或者裸路径（等同 `unix:`，兼容现状）；`--id` 是父节点给子节点指定的节点 id（节点稿 §5.1）。
-- 在节点模型里，本机子节点由 `rutis-bridge/local` 传输插件拉起；`Process` 是 D1 期间保留的外观，等生成代码改为建立在桥插件上（节点稿 N2）后，就不再需要它。
-- 冻结的反方向（`server.rs`、`client.mjs` 的 `launch`）换用 unix 连接器，行为不变，也不增加能力。
+- `Session` 以 `Connection` 提供会话机制，按端点契约接入操作封装，可建立在任意 `Channel` 上；不要求叶子运行时具备节点桥操作。
+- `Process` = `spawn` 产出的子进程句柄 + `Session`；D1 保留全部已有构造函数和方法，生成代码及 `CordisRuntimePlugin` 继续使用该外观。
+- `rutis-bridge/local` 可拉起完整框架节点或叶子语言运行时；生成代码迁至对应接入插件并完成兼容验收后，才可移除 `Process` 外观，运行时接入不以节点桥功能落地为前提。
+- 启动参数：`<程序> <通道> --id <id> <插件或 project>`；通道为 `fd:3`、`unix:/path` 或裸路径；端点 id 由启动方指定。
+- 继承 fd：Rust 用 `UnixStream::pair()`，在 `pre_exec` 中 `dup2` 到 fd 3；只允许该 fd 作为通道被继承，其余 fd 保持 `CLOEXEC`，标准流按原有用途保留。stdout 不承载协议帧，可供插件输出。
+- cordis 桥包在 `package.json` 声明 `rutisChannels`（如 `["unix", "fd"]`），构建时与 `rutisProtocol` 一并核对；未声明 `fd` 的旧版本使用路径方式。
+- `spawn` 的 Receiver 在 EOF 后最多等 1 秒获取子进程退出状态，再返回 `Closed`；保留已有退出诊断的逐字兼容，例如 `Cordis process exited with signal: 9 (SIGKILL)`。子进程不自动重启。
+- 冻结反方向的 `server.rs` 和 `client.mjs` 的 `launch` 使用 Unix 连接器；保留监听后拉起模式，行为不变、不增加能力。
 
-## 十一、测试
+## 装饰器
 
-- **通道契约测试**（`rutis-channel`，每种实现都要跑）：
-  - 多线程并发发送时，消息仍按发送顺序到达；
-  - 消息边界保持，包括接近上限的大消息；
-  - 关闭能唤醒阻塞中的 send 和 recv；
-  - 关闭原因能传到对端（WebSocket）；
-  - 有背压；关闭是幂等的；
-  - 在一个被同步调用阻塞的 `current_thread` 运行时里，发送和关闭都能完成。
-- **会话矩阵**：
-  - `rpc/tests.rs` 改为在 memory 通道上运行；
-  - 互操作集成测试（真实的 Node 进程）按连接器参数化：路径方式（现状）、继承 fd、回环 WebSocket。
-- **WebSocket 跨实现测试**：Rust 监听 ↔ JS 拨号，JS 监听 ↔ Rust 拨号；覆盖鉴权失败、子协议不符、心跳超时（用 `fault` 装饰器制造半开连接）、接管。
-- **Node**：`peer` 的测试本来就用内存 harness；另外补上字节流通道（路径和 fd）的分帧测试。
-- **性能**：用现有的 bench fixture 对比 D1 前后的 Unix 通道。退化超出噪声范围就回头修改设计。
-
-## 十二、兼容与版本
-
-- D1、D2 都不改线格式：Unix 和继承 fd 的字节流上仍是逐行 JSON，`rutisProtocol` 仍为 1。启动参数兼容裸路径；fd 方式按 §七 的声明启用。
-- WebSocket 子协议跟着会话协议的主版本走（`rutis.2`）。通道层自身的变化不影响会话协议，反之亦然。
-
-## 十三、分阶段
-
-| 阶段 | 内容 | 验收 |
-| --- | --- | --- |
-| D1 | 新建 `rutis-channel`（契约、Unix 字节流、memory）；`rpc.rs` 改用 `Channel`；从 `Process` 拆出会话部分；会话层内部的 `Peer`（`rpc.rs` 的 struct、`peer.mjs`）改名；Node 侧编码去掉换行，worker 的通道代码模块化（路径方式） | 现有测试全部通过；线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 去掉 `cfg(unix)` 后能编译 |
-| D2 | 继承 fd 的 `spawn`（Rust 与 Node）；装饰器；通道契约测试；会话矩阵 | 契约测试与会话矩阵在所有本地通道上通过 |
-| D3 | WebSocket 绑定的 Rust 实现（`rutis-channel` 的 `websocket` 特性）与 JS 实现（cordis 桥包）；`dial` / `listen` 连接器（由节点稿的 WebSocket 传输插件对外提供） | WebSocket 跨实现测试通过；会话矩阵在回环 WebSocket 上通过 |
-
-节点稿的 N 阶段建立在这些阶段之上。
-
-## 十四、不采用的方案
-
-| 方案 | 不采用的原因 |
+| 装饰器 | 契约 |
 | --- | --- |
-| socketpair 桥接（远程稿第一版） | 会话层仍绑定 Unix 字节流和换行分帧；每种新传输都得伪装成 Unix 流，在泵里再分一次帧；会话层永远离不开 Unix |
-| 控制消息和协议帧共用连接，按顶层字段分流（同上） | 通道必须解析载荷，编码也被锁死成 JSON |
-| 远端代理 + 帧级中继 + 复用（远程稿第二版） | 被节点模型取代：远端本身就是一个框架节点，需要转接时在框架层做 |
-| 异步通道接口（async trait） | 会话的同步调用要能在任意线程上阻塞，读线程不能依赖调用方的运行时 |
-| 现在就开放可插拔编码 | 只有 JSON 一种；先留内部接缝，有第二种时再开放 |
-| 把心跳做进会话协议（ping 帧） | 存活是介质的属性：本机 socket 不需要心跳，网络传输自带；放进协议，等于让每种实现都去做 |
-| 用 stdio 做本机通道 | 插件会往 stdout 打印，帧流会被破坏；继承 fd 3 同样不占用路径，又不和 stdout 冲突 |
-| 把会话做成泛型（`Connection<C: Channel>`） | 类型参数会扩散到生成代码和所有代理类型里；trait 对象每帧多一次间接调用，开销可以忽略 |
+| `limit(n)` | 限制消息大小，遵守发送不关闭、接收关闭的超限语义 |
+| `trace` | 调试用，默认关闭；记录须脱敏，不暴露凭据或秘密 |
+| `fault` | 仅测试：延迟、丢弃后关闭、半开（停止转发但不关闭） |
 
-## 十五、与其他文档的关系
+心跳由具有带外控制能力的承载实现，不作为通用消息装饰器。
 
-- [兼容层设计](design-protocol-plugin-mount.md)：§3 的帧语义由节点稿改成对称；§9 的"帧走独立 socket"改由通道层保证。
-- [节点稿](design-remote-plugins-2026-10-03.md)：会话层对称化、框架操作、桥、策略、远程插件的用法。
-- 需求 §3 的约束不变：rutis 内核和 Cordis 都不改。
-- [多语言决策记录](decision-multilang-2026-10-03.md)（#107）把"启动方式抽象"列为不做，理由是它只为其他语言铺路。本文要做协议与通道解耦，理由是远程 peer 要走网络，与其他语言无关；这项修订列在节点稿 §十四，需要评审确认。
+## 阶段与版本
+
+| 阶段 | 交付 | 验收 |
+| --- | --- | --- |
+| D1 | 新建 `rutis-channel`（契约）、`rutis-bridge`（Transport 公共接口）及 local/memory 承载 crate（通道实现与原生插件）；`rpc.rs` 使用 `Channel`；从 `Process` 拆出 Session；会话内部 `Peer` 改为 `SessionState` 等不与节点 Peer 混淆的名称，JS `peer.mjs` 改为 `session.mjs`；Node 编码去掉换行，worker 通道模块化（路径方式）；将 `rpc.rs` 借用的 `server::native_error` 移出冻结的 `server.rs` | 现有测试全通过；Unix 线格式不变；性能不退化；`rpc.rs`、`protocol.rs` 不再引用 `std::os::unix`，移除其 `cfg(unix)` 后可编译 |
+| D2 | Rust、Node、Python 的继承 fd 接入；装饰器；通道契约测试；会话矩阵 | 各语言支持的本地通道通过契约测试和会话矩阵 |
+| D3 | Rust `rutis-transport-websocket` 及 WebSocketPlugin、JS 与 Python 网络承载接入；单次 `dial` / `listen`；结构化建立错误；承载与 link 的监听注册接口 | Rust/JS 双向互通及 Rust/Python 运行时接入；回环 WebSocket 会话矩阵通过；结合远程稿验收重试分类、注册撤销、运行时租约与接管 |
+
+- D1、D2 不修改接入基线的线格式与协议版本；Unix 与继承 fd 上仍为逐行 JSON，不将已使用 PROTOCOL 2 的多语言实现退回版本 1。
+- WebSocket 子协议跟随实际会话主版本；通道内部变化不自行升级会话协议。远程稿新增的不兼容会话格式另行分配主版本，实施前确定发布编号。
+- 远程稿规定共享接入插件、节点桥功能与叶子运行时接入；网络接入须依赖 D3 交付，节点桥功能不作为运行时接入的前置条件。现有 PR 或本机通道接入不据此视为已支持网络。
+
+## 测试与完成条件
+
+| 测试组 | 必须覆盖 |
+| --- | --- |
+| 复用 Adapter 契约 | 两个逻辑 Channel 共用物理连接；消息、流控和身份隔离；关闭、撤销、替换一个通道不影响另一个；物理故障通知所有受影响通道；终止通道不复活、不重放调用；会话接入只有一个重试所有者。无生产复用 Adapter 时由测试 Adapter 验证上层无一对一假设 |
+| 通道契约：每种实现 | 发送锁串行化后的并发发送顺序；边界保持及接近上限的大消息；背压；幂等关闭；关闭唤醒阻塞的 send/recv；WebSocket 关闭原因传递；调用方 `current_thread` 被同步调用阻塞时通道仍推进、可关闭 |
+| 会话矩阵 | `rpc/tests.rs` 使用 memory；真实 Node 进程按路径、继承 fd、回环 WebSocket 参数化；同一组会话语义测试在各通道通过 |
+| Node | 会话内存 harness；路径及 fd 的分帧测试；主线程同步等待时 worker 持续处理收发与心跳 |
+| WebSocket 跨实现 | Rust 监听 ↔ JS 拨号、JS 监听 ↔ Rust 拨号；鉴权失败、证书验证、子协议不符、消息超限、心跳超时、半开、接管和关闭码 |
+| 建立错误与重试 | `Retryable` 退避、`AuthRejected` 慢重试、`Incompatible` 停止；0.5 秒/30 秒/±20%/60 秒参数；改变诊断文字不改变分支；停止 link 后无迟到重连；本地子进程不自动重启 |
+| 共享监听器 | 无注册拒绝；重复/歧义注册拒绝；按已验证身份路由；握手期间撤销、Identity 撤销、link 重建、迟到移交均不得复用旧注册；清理目标 link 不影响其他 link |
+| 安全与身份 | `hello` 端点 id 不符不得会话就绪；无凭据泄漏；非回环 TLS 约束；未经验证的端点 id 不参与授权路由 |
+| 端点与职责隔离 | 完整框架节点与无 rutis 的叶子运行时均可使用共享承载、身份、link、Session；link 不依赖 loader、schema、`PeerRows` / `RuntimeRows`；会话就绪与两阶段行就绪分别验收，后者由 loader 侧配套插件负责；会话替换、撤销后由配套插件清理行 |
+| 操作契约接入 | `rows.*` / `hosts.*` 与 `plugins.*` / `services.*` 按端点契约接入，不强行合并；不安装节点桥功能也可完成叶子运行时接入；完整框架节点各自管理插件并按功能权限工作 |
+| 性能 | 使用既有 bench fixture 对比 D1 前后 Unix 通道，退化不得超出噪声范围 |
+
+完成条件：以上对应阶段测试通过；新增承载不修改 `rutis-interop`；协议和会话层不再依赖 Unix；Rust/JS 可双向互通；D1、D2 的 Unix 兼容格式保持不变。本稿不代表上述实现或验收已经完成。
+
+## 关联规范
+
+- [兼容层设计](design-protocol-plugin-mount.md)：本机运行时帧语义保持不变，新网络会话格式按远程稿；协议帧与 stdout 隔离由通道保证。
+- [远程稿](design-remote-plugins-2026-10-03.md)：两种远程端点、会话握手与能力格式、端点操作契约、共享接入插件、节点桥功能、loader 侧配套插件与权限。
+- [挂载 Cordis 插件：需求](requirements-protocol-plugins.md)：保留不修改 rutis 内核和 Cordis 的约束。
