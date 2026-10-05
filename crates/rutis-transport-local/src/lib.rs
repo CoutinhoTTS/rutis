@@ -10,6 +10,7 @@
 //! It knows nothing of what runs in the process: a language runtime started
 //! this way is composed on top (`rutis-runtime-local`).
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 

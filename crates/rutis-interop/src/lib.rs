@@ -47,7 +47,6 @@ macro_rules! include_mounts {
 }
 #[cfg(unix)]
 mod events;
-#[cfg(unix)]
 mod objects;
 #[cfg(unix)]
 mod process;
@@ -61,6 +60,7 @@ pub mod rpc;
 mod runtime;
 #[cfg(unix)]
 pub mod server;
+mod services;
 #[cfg(unix)]
 mod spawn;
 #[cfg(unix)]
@@ -68,13 +68,9 @@ mod unix;
 
 #[cfg(unix)]
 pub use events::{EmitToCordis, EventSink, Events};
-#[cfg(unix)]
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
-pub use process::{
-    runtime_session_key, Host, HostDispatch, HostLease, Launcher, Mount, Process, RowSchema,
-    RuntimeSession, ServiceEvents,
-};
+pub use process::{Host, HostLease, Launcher, Mount, Process, RowSchema, ServiceEvents};
 #[cfg(unix)]
 pub use projection::Projection;
 #[cfg(unix)]
@@ -82,12 +78,12 @@ pub use rows::{row_projection, RowService};
 #[cfg(unix)]
 #[allow(deprecated)]
 pub use runtime::{
-    host_key, CordisRuntime, CordisRuntimePlugin, Runtime, RuntimeHandle, RuntimePlugin,
-    RuntimeState,
+    CordisRuntime, CordisRuntimePlugin, Runtime, RuntimeHandle, RuntimePlugin, RuntimeState,
 };
 pub use rutis_channel as channel;
 pub use serde;
 pub use serde_json;
+pub use services::{host_key, runtime_session_key, HostDispatch, RuntimeSession};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {

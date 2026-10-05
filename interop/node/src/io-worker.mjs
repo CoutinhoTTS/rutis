@@ -32,10 +32,15 @@ port.on('message', message => {
 try {
   let ended
   const done = new Promise(resolve => { ended = resolve })
+  // Frames that arrive before the session started (the far end's hello can
+  // come in the same read as the upgrade, before `open` resumes) wait: the
+  // session sends its own hello on `ready`, and must not answer first.
+  let early = []
+  const forward = text => {
+    try { send(decode(text)) } catch (error) { channel.close(error.message) }
+  }
   const handlers = {
-    message: text => {
-      try { send(decode(text)) } catch (error) { channel.close(error.message) }
-    },
+    message: text => { if (early) early.push(text); else forward(text) },
     closed: reason => { if (reason) failure = reason; ended() },
   }
   if (spec) {
@@ -58,6 +63,8 @@ try {
     channel = frame(stream, handlers)
   }
   send({ ready: true, pid: child?.pid })
+  for (const text of early) forward(text)
+  early = undefined
   await done
   if (child && !disposing && child.exitCode === null && child.signalCode === null) child.kill()
   const status = await exited

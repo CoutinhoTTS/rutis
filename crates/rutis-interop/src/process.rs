@@ -1,5 +1,6 @@
 use crate::events::EventSink;
 use crate::rpc::{Connection, Dispatch, Reply, Value as RpcValue};
+use crate::services::{HostDispatch, RuntimeSession};
 use crate::Error;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -11,26 +12,6 @@ use std::sync::{Arc, Mutex};
 /// changes, so an older notification must not override a newer one.
 pub trait ServiceEvents: Send + Sync + 'static {
     fn changed(&self, name: &str, handle: Option<String>, version: u64);
-}
-
-/// A rutis service provided to the mounted Cordis plugins: the Node side
-/// registers a proxy under `name` whose calls arrive here.
-pub trait HostDispatch: Send + Sync + 'static {
-    fn invoke(&self, method: &str, args: RpcValue) -> Reply;
-
-    /// The methods as `{ method: "sync" | "async" }`, when the service knows
-    /// them; otherwise whoever registers it with a runtime supplies them.
-    fn methods(&self) -> Option<Value> {
-        None
-    }
-
-    /// The runtime session whose plugin serves this service, when it is
-    /// one ([`crate::RowService`]), as its [`Connection::tag`]: a row of that
-    /// same session uses the plugin natively instead of through a proxy. A
-    /// tag names one session of one runtime instance, wherever it runs.
-    fn origin(&self) -> Option<&str> {
-        None
-    }
 }
 
 /// One host-provided service: its Cordis name, the bound methods as
@@ -316,26 +297,6 @@ pub struct Process {
     /// For a runtime on a session something else owns (a link): what routes
     /// the runtime's calls here. The session is not this process's to close.
     routed: Option<Box<dyn std::any::Any + Send + Sync>>,
-}
-
-/// A session with a runtime that something else owns, such as a link to a
-/// remote runtime. A [`crate::RuntimePlugin::remote`] runs its rows on it.
-pub trait RuntimeSession: Send + Sync + 'static {
-    /// The session, ready.
-    fn connection(&self) -> Connection;
-
-    /// Route the runtime's calls into rutis (`host:<name>`, `service`,
-    /// `event`) to `dispatch` while the returned guard lives.
-    fn route(
-        &self,
-        dispatch: Arc<dyn Dispatch>,
-    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Error>;
-}
-
-/// The key the runtime session named `name` is provided under
-/// (`RuntimeSession#gpu`).
-pub fn runtime_session_key(name: &str) -> rutis::TypeKey {
-    rutis::TypeKey::keyed_dynamic::<dyn RuntimeSession>(name.to_owned())
 }
 
 /// What a plugin module declares, for rutis-loader (see

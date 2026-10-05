@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::{HostDispatch, Mount, Process};
+use crate::{Mount, Process};
 
 /// What the rows of a runtime need from it: describing plugins, exporting
 /// their services (`rows.v2`) and leasing host services (`hosts`). Static
@@ -47,12 +47,6 @@ impl Runtime {
     pub fn host_methods(&self, name: &str) -> Option<Value> {
         self.hosts.get(name).cloned()
     }
-}
-
-/// The key a host service named `name` is provided under, for example
-/// `ctx.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe))`.
-pub fn host_key(name: &str) -> TypeKey {
-    TypeKey::keyed_dynamic::<dyn HostDispatch>(name.to_owned())
 }
 
 /// What the runtime is doing, as seen through a [`RuntimeHandle`].

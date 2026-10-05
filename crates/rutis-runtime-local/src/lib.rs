@@ -15,6 +15,8 @@
 //! channel) comes from `rutis-interop` ([`Launcher`]); the transport only
 //! starts it.
 
+#![cfg(unix)]
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
