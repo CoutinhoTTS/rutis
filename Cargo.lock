@@ -2962,6 +2962,7 @@ dependencies = [
  "quote",
  "rutis",
  "rutis-channel",
+ "rutis-transport-memory",
  "serde",
  "serde_json",
  "syn 2.0.119",

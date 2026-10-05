@@ -167,7 +167,7 @@ let view = root.plugin(runtime);
 一种语言一个运行时插件、一个进程。它们和 Node 运行时说同一套协议和行契约（`rows.*`、`hosts.*`、服务投影），所以 rutis-loader 用同样的方式管理它们的插件。
 
 - **Python**：`RuntimePlugin::python(sdk, project)`，名字为 `"py"`。`sdk` 是本仓库的 `interop/python`（Python 包 `rutis_runtime`），`project` 是插件模块所在的目录。用 `python3 -m rutis_runtime` 启动，需要 Python 3.12 或更高；`.interpreter(路径)` 换解释器（例如项目的 venv）。写法见 [interop/python/README.md](../../interop/python/README.md)。
-- 其他启动方式：`Mount::launcher` 接受任意 `Launcher { program, args, env, cwd }`，它的最后两个参数是 socket 路径和项目位置。
+- 其他启动方式：`Mount::launcher` 接受任意 `Launcher`（`program`、`args`、`env`、`cwd`），它的最后两个参数是通道和项目位置。通道默认是要回拨的 socket 路径；进程能接继承的 socket 时用 `.inherit_fd()` 声明，通道就是 `fd:3`（Node、Python 运行时都已支持）。设置 `RUTIS_INTEROP_TRACE` 时，运行时通道上的每条消息都会在 stderr 记一行（方向和长度，不含内容）。
 
 Python 运行时只跑"叶子插件"：插件有 `apply(ctx, config)`，在里面用服务（`ctx.use`）、提供服务（`ctx.provide`），返回清理函数；依赖、启停顺序和重启都由 rutis 决定。它在 `mount` 时报告 `leaf` 特性，rutis-loader 据此让插件 `inject` 的每个名字都在 rutis 里门控。
 

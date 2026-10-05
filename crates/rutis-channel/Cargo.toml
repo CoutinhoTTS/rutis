@@ -11,3 +11,7 @@ categories = ["network-programming"]
 
 [dependencies]
 thiserror.workspace = true
+
+[features]
+# The channel contract as checks every implementation runs in its tests.
+testing = []

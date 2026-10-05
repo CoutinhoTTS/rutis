@@ -4,7 +4,8 @@ import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { isLeaf, toCordis } from './plugin.mjs'
 
-const [socketPath, pluginPath] = process.argv.slice(2)
+// The channel (`fd:3`, or a socket path to dial) and the first plugin.
+const [channelSpec, pluginPath] = process.argv.slice(2)
 
 // The plugins' Service classes must come from the same Cordis instance as the
 // Context, so prefer the Cordis that the (first) plugin itself resolves.
@@ -409,7 +410,7 @@ function dispatch(target, method, args) {
 }
 
 // Calls on exported objects and functions may replace services too.
-peer = await Process.connect(socketPath, dispatch, () => { if (slots.size && !closing) refresh() })
+peer = await Process.connect(channelSpec, dispatch, () => { if (slots.size && !closing) refresh() })
 await peer.closed()
 closing = true
 await dispose()

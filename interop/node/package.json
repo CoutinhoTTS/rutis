@@ -10,6 +10,7 @@
   },
   "homepage": "https://github.com/arcships/rutis/tree/main/crates/rutis-interop#readme",
   "rutisProtocol": 2,
+  "rutisChannels": ["unix", "fd"],
   "type": "module",
   "exports": {
     "./plugin": {

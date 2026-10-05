@@ -227,7 +227,8 @@ pub enum ConnectError {
 - `Session` 以 `Connection` 提供会话机制，按端点契约接入操作封装，可建立在任意 `Channel` 上；不要求叶子运行时具备节点桥操作。
 - `Process` = `spawn` 产出的子进程句柄 + `Session`；D1 保留全部已有构造函数和方法，生成代码及 `CordisRuntimePlugin` 继续使用该外观。
 - `rutis-bridge/local` 可拉起完整框架节点或叶子语言运行时；生成代码迁至对应接入插件并完成兼容验收后，才可移除 `Process` 外观，运行时接入不以节点桥功能落地为前提。
-- 启动参数：`<程序> <通道> --id <id> <插件或 project>`；通道为 `fd:3`、`unix:/path` 或裸路径；端点 id 由启动方指定。
+- 启动参数：`<程序> <通道> <插件或 project>`；通道为 `fd:3`、`unix:/path` 或裸路径。N1 起新会话格式需要端点 id 时追加 `--id <id>`，由启动方指定；兼容会话不传。
+- 是否用继承 fd 由启动方决定：Node 运行时包声明 `rutisChannels` 含 `fd` 时使用；Python 运行时由 `RuntimePlugin::python` 启用；自定义 `Launcher` 以 `inherit_fd()` 声明，未声明的沿用路径方式。
 - 继承 fd：Rust 用 `UnixStream::pair()`，在 `pre_exec` 中 `dup2` 到 fd 3；只允许该 fd 作为通道被继承，其余 fd 保持 `CLOEXEC`，标准流按原有用途保留。stdout 不承载协议帧，可供插件输出。
 - cordis 桥包在 `package.json` 声明 `rutisChannels`（如 `["unix", "fd"]`），构建时与 `rutisProtocol` 一并核对；未声明 `fd` 的旧版本使用路径方式。
 - `spawn` 的 Receiver 在 EOF 后最多等 1 秒获取子进程退出状态，再返回 `Closed`；保留已有退出诊断的逐字兼容，例如 `Cordis process exited with signal: 9 (SIGKILL)`。子进程不自动重启。
@@ -237,10 +238,10 @@ pub enum ConnectError {
 
 | 装饰器 | 契约 |
 | --- | --- |
-| `trace` | 调试用，默认关闭；记录须脱敏，不暴露凭据或秘密 |
-| `fault` | 仅测试：延迟、丢弃后关闭、半开（停止转发但不关闭） |
+| `trace` | 调试用，默认关闭（运行时通道由 `RUTIS_INTEROP_TRACE` 开启）；只记录方向、长度与关闭原因，不记录消息内容 |
+| `fault` | 仅测试（`rutis-channel` 的 `testing` feature）：延迟、丢弃后关闭、半开（停止转发但不关闭） |
 
-心跳与消息大小上限由具体承载实现和配置，不作为通用消息装饰器。
+装饰器包装任意 `Channel`，与具体承载无关，位于 `rutis-channel`。心跳与消息大小上限由具体承载实现和配置，不作为通用消息装饰器。通道契约本身以 `rutis_channel::testing::contract` 的形式提供，每种实现在自己的测试中运行。
 
 ## 阶段与版本
 

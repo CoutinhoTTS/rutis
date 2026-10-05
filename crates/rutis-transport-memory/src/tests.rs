@@ -2,6 +2,56 @@ use super::*;
 use std::time::Duration;
 
 #[test]
+fn meets_the_channel_contract() {
+    rutis_channel::testing::contract(pair);
+}
+
+#[test]
+fn a_fault_free_fault_wrapper_meets_the_contract_too() {
+    use rutis_channel::testing::fault;
+    rutis_channel::testing::contract(|| {
+        let (a, b) = pair();
+        (fault(a).0, fault(b).0)
+    });
+}
+
+#[test]
+fn faults_delay_go_half_open_and_drop() {
+    use rutis_channel::testing::fault;
+    let (a, b) = pair();
+    let (mut a, faults) = fault(a);
+    let mut b = b;
+
+    faults.delay(Duration::from_millis(50));
+    let started = std::time::Instant::now();
+    a.sender.send(b"slow").unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert_eq!(b.receiver.recv().unwrap().unwrap(), b"slow");
+
+    // Half-open: sends vanish, nothing is delivered, nothing closes.
+    faults.half_open();
+    a.sender.send(b"lost").unwrap();
+    b.sender.send(b"swallowed").unwrap();
+    let (got, receiving) = mpsc::channel();
+    let receiver = std::thread::spawn(move || {
+        let message = a.receiver.recv();
+        got.send(()).unwrap();
+        (a, message)
+    });
+    assert!(receiving.recv_timeout(Duration::from_millis(100)).is_err());
+    faults.heal();
+    b.sender.send(b"after").unwrap();
+    receiving.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (mut a, message) = receiver.join().unwrap();
+    assert_eq!(message.unwrap().unwrap(), b"after");
+
+    faults.drop_and_close("gone");
+    assert!(a.sender.send(b"x").is_err());
+    // "lost", sent while half-open, never arrives: the end does.
+    assert!(matches!(b.receiver.recv(), Ok(None)));
+}
+
+#[test]
 fn delivers_in_order_with_boundaries_and_ends_normally() {
     let (mut a, mut b) = pair();
     for message in [&b"one"[..], b"", b"three\nlines"] {

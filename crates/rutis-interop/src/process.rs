@@ -86,8 +86,10 @@ pub struct Mount<'a> {
     pub launcher: Option<&'a Launcher>,
 }
 
-/// The command that starts a runtime process. It receives the socket path
-/// and then the first plugin (or the anchor) as its last two arguments.
+/// The command that starts a runtime process. It receives its channel and
+/// then the first plugin (or the anchor) as its last two arguments: `fd:3`
+/// when it takes an inherited socket ([`Launcher::inherit_fd`]), otherwise
+/// a socket path to dial.
 #[derive(Debug, Clone, Default)]
 pub struct Launcher {
     pub program: std::ffi::OsString,
@@ -95,6 +97,9 @@ pub struct Launcher {
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// The working directory; the application's by default.
     pub cwd: Option<std::path::PathBuf>,
+    /// The process takes its channel as an inherited socket on fd 3
+    /// (`fd:3`) instead of dialing a socket path.
+    pub inherit_fd: bool,
 }
 
 impl Launcher {
@@ -121,6 +126,12 @@ impl Launcher {
 
     pub fn cwd(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(dir.into());
+        self
+    }
+
+    /// The process takes `fd:3`, an inherited socket, as its channel.
+    pub fn inherit_fd(mut self) -> Self {
+        self.inherit_fd = true;
         self
     }
 }
@@ -189,7 +200,7 @@ pub struct Process {
     /// once its service is registered on the Node side, and a withdrawal
     /// never overtakes the registration it undoes.
     host_changes: tokio::sync::Mutex<()>,
-    _directory: tempfile::TempDir,
+    _directory: Option<tempfile::TempDir>,
 }
 
 /// What a plugin module declares, for rutis-loader (see
@@ -324,7 +335,7 @@ impl Process {
             .iter()
             .map(|(entry, config)| json!({ "entry": entry, "config": config }))
             .collect();
-        let command = match launcher {
+        let (command, connect) = match launcher {
             Some(launcher) => {
                 let mut command = tokio::process::Command::new(&launcher.program);
                 command
@@ -335,7 +346,11 @@ impl Process {
                 if let Some(cwd) = &launcher.cwd {
                     command.current_dir(cwd);
                 }
-                command
+                let connect = match launcher.inherit_fd {
+                    true => crate::spawn::Connect::Inherit,
+                    false => crate::spawn::Connect::DialBack,
+                };
+                (command, connect)
             }
             #[cfg(not(feature = "node"))]
             None => {
@@ -352,10 +367,10 @@ impl Process {
                     .arg("tsx")
                     .arg(node_package.join("src/runner.mjs"))
                     .current_dir(node_package);
-                command
+                (command, crate::spawn::node_connect(node_package))
             }
         };
-        let spawned = crate::spawn::spawn(command, plugin).await?;
+        let spawned = crate::spawn::spawn(command, plugin, connect).await?;
         let imports = Arc::new(Imports {
             slots: Slots::default(),
             events,

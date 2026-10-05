@@ -8,7 +8,7 @@ import { open } from './channel/index.mjs'
 import { frame } from './channel/unix.mjs'
 import { decode } from './codec.mjs'
 
-const { executable, socketPath, port, signal } = workerData
+const { executable, channel: spec, port, signal } = workerData
 function send(message) {
   port.postMessage(message)
   Atomics.add(signal, 0, 1)
@@ -38,8 +38,8 @@ try {
     },
     closed: reason => { if (reason) failure = reason; ended() },
   }
-  if (socketPath) {
-    channel = await open(socketPath, handlers)
+  if (spec) {
+    channel = await open(spec, handlers)
   } else {
     // The frozen reverse direction: listen, then start the Rust process,
     // which dials back.

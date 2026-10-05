@@ -16,4 +16,5 @@ rutis-bridge = { path = "../rutis-bridge", version = "0.1.0" }
 tokio.workspace = true
 
 [dev-dependencies]
+rutis-channel = { path = "../rutis-channel", features = ["testing"] }
 tempfile = "3"

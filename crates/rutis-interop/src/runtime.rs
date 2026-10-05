@@ -183,7 +183,8 @@ impl RuntimePlugin {
             // A plugin imported again after an edit must not come from a
             // bytecode file written in the same second as the old source.
             .env("PYTHONDONTWRITEBYTECODE", "1")
-            .cwd(&project);
+            .cwd(&project)
+            .inherit_fd();
         Self {
             runtime: "py".into(),
             label: "python-runtime".into(),
@@ -205,8 +206,9 @@ impl RuntimePlugin {
     }
 
     /// Start the runtime process with `launcher` (another language, or
-    /// another way to start one). The launcher receives the socket path and
-    /// the anchor as its last two arguments.
+    /// another way to start one). The launcher receives its channel (`fd:3`
+    /// or a socket path, see [`crate::Launcher`]) and the anchor as its last
+    /// two arguments.
     pub fn launcher(
         name: impl Into<String>,
         launcher: crate::Launcher,

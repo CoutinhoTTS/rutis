@@ -127,3 +127,17 @@ impl Connection {
         Self::open(on_disconnect(channel(stream, "")?, disconnected), dispatch)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn meets_the_channel_contract() {
+        rutis_channel::testing::contract(|| {
+            let (a, b) = super::UnixStream::pair().unwrap();
+            (
+                super::channel(a, "").unwrap(),
+                super::channel(b, "").unwrap(),
+            )
+        });
+    }
+}

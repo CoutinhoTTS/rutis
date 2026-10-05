@@ -45,3 +45,22 @@ fn classify(path: &str, error: std::io::Error) -> ConnectError {
         _ => ConnectError::Retryable { reason },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn end(stream: UnixStream) -> Channel {
+        let reader = stream.try_clone().unwrap();
+        let closer = Arc::new(Shut(stream.try_clone().unwrap()));
+        lines::channel(reader, stream, closer, ChannelInfo::default())
+    }
+
+    #[test]
+    fn meets_the_channel_contract() {
+        rutis_channel::testing::contract(|| {
+            let (a, b) = UnixStream::pair().unwrap();
+            (end(a), end(b))
+        });
+    }
+}

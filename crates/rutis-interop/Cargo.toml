@@ -34,3 +34,7 @@ python = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+rutis-channel = { path = "../rutis-channel", features = ["testing"] }
+rutis-transport-memory = { path = "../rutis-transport-memory" }

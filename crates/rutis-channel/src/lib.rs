@@ -10,6 +10,10 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "testing")]
+pub mod testing;
+pub mod trace;
+
 /// One established channel. The sender and receiver are used from one
 /// thread each; the closer may be called from anywhere.
 pub struct Channel {

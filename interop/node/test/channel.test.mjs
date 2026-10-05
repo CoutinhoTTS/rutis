@@ -48,3 +48,27 @@ test('failing to connect carries a category, not just text', async () => {
   await assert.rejects(open('wss://example.com/rutis', { message() {}, closed() {} }),
     error => error instanceof ConnectError && error.category === 'incompatible')
 })
+
+test('an inherited socket (fd:3) is a channel, both ways', async () => {
+  const { spawn } = await import('node:child_process')
+  const echo = `
+    import { open } from ${JSON.stringify(new URL('../src/channel/index.mjs', import.meta.url).href)}
+    const channel = await open('fd:3', {
+      message: text => channel.send(text.toUpperCase()),
+      closed: () => process.exit(0),
+    })
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '-e', echo], { stdio: ['ignore', 'inherit', 'inherit', 'pipe'] })
+  const socket = child.stdio[3]
+  const lines = createInterface({ input: socket })[Symbol.asyncIterator]()
+  socket.write('{"op":"hello"}\n')
+  assert.equal((await lines.next()).value, '{"OP":"HELLO"}')
+  socket.end()
+  const code = await new Promise(resolve => child.once('exit', resolve))
+  assert.equal(code, 0)
+})
+
+test('an invalid fd spec is incompatible, not retryable', async () => {
+  await assert.rejects(open('fd:x', { message() {}, closed() {} }),
+    error => error instanceof ConnectError && error.category === 'incompatible')
+})

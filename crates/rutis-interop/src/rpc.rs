@@ -1508,6 +1508,6 @@ fn ended(label: &str, error: ChannelError) -> Error {
 mod relay;
 use relay::Relayed;
 
-// The tests script the far end over a Unix socket pair.
-#[cfg(all(test, unix))]
+// The tests script the far end over a memory channel.
+#[cfg(test)]
 mod tests;

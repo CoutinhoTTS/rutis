@@ -8,7 +8,7 @@ export class Process {
   #exited
   #session
 
-  constructor(executable, { socketPath, dispatch, settled } = {}) {
+  constructor(executable, { channel, dispatch, settled } = {}) {
     const { port1, port2 } = new MessageChannel()
     this.#port = port1
     this.#session = new Session({
@@ -25,7 +25,7 @@ export class Process {
     })
     this.#port.on('message', message => this.#receive(message))
     this.#worker = new Worker(new URL('./io-worker.mjs', import.meta.url), {
-      workerData: { executable, socketPath, port: port2, signal: this.#signal }, transferList: [port2],
+      workerData: { executable, channel, port: port2, signal: this.#signal }, transferList: [port2],
     })
     this.#worker.on('error', error => this.#session.close(error))
     this.#exited = new Promise(resolve => this.#worker.once('exit', code => {
@@ -51,8 +51,8 @@ export class Process {
       throw error
     }
   }
-  static async connect(socketPath, dispatch, settled) {
-    const process = new Process(undefined, { socketPath, dispatch, settled })
+  static async connect(channel, dispatch, settled) {
+    const process = new Process(undefined, { channel, dispatch, settled })
     try { await process.#session.ready; return process }
     catch (error) { process.#port.postMessage({ abort: true }); await process.#exited; throw error }
   }

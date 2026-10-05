@@ -1,5 +1,12 @@
-//! The local connector: starts a runtime process that dials back over a
-//! Unix socket in a private directory, and watches how the process ends.
+//! The local connector: starts a runtime process and connects it, either
+//! on an inherited socket (fd 3) or, for runtimes that cannot take one, on
+//! a Unix socket in a private directory that the process dials back. It
+//! watches how the process ends.
+//!
+//! This serves the `Process` compatibility facade; it moves into
+//! `rutis-transport-local` once runtimes get sessions through local + link.
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex};
@@ -10,22 +17,87 @@ use tokio::sync::{oneshot, watch};
 
 use crate::Error;
 
+/// The fd a runtime process finds its channel on (`fd:3`).
+pub(crate) const CHANNEL_FD: i32 = 3;
+
+/// How the process gets its channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Connect {
+    /// One end of a socket pair, as fd 3: `fd:3 <first>`.
+    Inherit,
+    /// A socket path the process dials: `<path> <first>`.
+    DialBack,
+}
+
 /// A started runtime process and the channel it connected.
 pub(crate) struct Spawned {
     pub channel: Channel,
     pub child: Child,
-    /// Holds the socket; removed when the process is dropped.
-    pub directory: tempfile::TempDir,
+    /// Holds the socket when the process dials back; removed when the
+    /// process is dropped.
+    pub directory: Option<tempfile::TempDir>,
 }
 
-/// Start `command` with the socket path and `first` (the first plugin or
-/// the anchor) as its last two arguments, and wait for it to connect. The
-/// channel ends with how the process ended (`Cordis process exited …`).
+fn transport(error: std::io::Error) -> Error {
+    Error::Transport(error.to_string())
+}
+
+/// Start `command` with the channel and `first` (the first plugin or the
+/// anchor) as its last two arguments, and connect it. The channel ends with
+/// how the process ended (`Cordis process exited …`).
 pub(crate) async fn spawn(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     first: &Path,
+    connect: Connect,
 ) -> Result<Spawned, Error> {
-    let transport = |error: std::io::Error| Error::Transport(error.to_string());
+    match connect {
+        Connect::Inherit => inherit(command, first),
+        Connect::DialBack => dial_back(command, first).await,
+    }
+}
+
+fn inherit(mut command: tokio::process::Command, first: &Path) -> Result<Spawned, Error> {
+    let (ours, theirs) = UnixStream::pair().map_err(transport)?;
+    let fd = theirs.as_raw_fd();
+    // SAFETY: between fork and exec, only async-signal-safe calls: dup2 and
+    // fcntl. Our end and every other descriptor keep CLOEXEC; only fd 3
+    // crosses exec.
+    unsafe {
+        command.pre_exec(move || {
+            if fd == CHANNEL_FD {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(fd, CHANNEL_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .arg(format!("fd:{CHANNEL_FD}"))
+        .arg(first)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(transport)?;
+    // The child has its copy; ours would keep the channel open after it exits.
+    drop(theirs);
+    let child = Child::watch(child);
+    let mut channel = crate::unix::channel(ours, "")?;
+    channel.info.transport = "fd";
+    let channel = crate::unix::on_disconnect(channel, Box::new(child.disconnected()));
+    Ok(Spawned {
+        channel: traced(channel),
+        child,
+        directory: None,
+    })
+}
+
+async fn dial_back(mut command: tokio::process::Command, first: &Path) -> Result<Spawned, Error> {
     let directory = tempfile::Builder::new()
         .prefix("rutis-mount-")
         .tempdir()
@@ -55,10 +127,40 @@ pub(crate) async fn spawn(
         Box::new(child.disconnected()),
     );
     Ok(Spawned {
-        channel,
+        channel: traced(channel),
         child,
-        directory,
+        directory: Some(directory),
     })
+}
+
+/// Set to report every message crossing a runtime channel (direction and
+/// length, never content) on stderr.
+pub(crate) const TRACE_VARIABLE: &str = "RUTIS_INTEROP_TRACE";
+
+fn traced(channel: Channel) -> Channel {
+    match std::env::var_os(TRACE_VARIABLE) {
+        Some(_) => rutis_channel::trace::trace(
+            channel,
+            Arc::new(|line: &str| eprintln!("rutis-interop trace: {line}")),
+        ),
+        None => channel,
+    }
+}
+
+/// Whether the Node runtime package at `package` takes an inherited channel:
+/// its `package.json` lists `"fd"` in `rutisChannels`. Older packages do
+/// not, and dial back.
+pub(crate) fn node_connect(package: &Path) -> Connect {
+    let channels = std::fs::read(package.join("package.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|manifest| manifest.get("rutisChannels").cloned());
+    match channels {
+        Some(serde_json::Value::Array(channels)) if channels.iter().any(|c| c == "fd") => {
+            Connect::Inherit
+        }
+        _ => Connect::DialBack,
+    }
 }
 
 /// The Node process, owned by a task that records how it ended. Dropping
@@ -106,9 +208,11 @@ impl Child {
         }
     }
 
-    /// How the process ended, once it has.
+    /// How the process ended, once it has: as soon as either the exit
+    /// watcher or the runtime records it, so it agrees with the error that
+    /// ended the session.
     pub(crate) fn status(&self) -> Option<String> {
-        self.exit.borrow().clone()
+        self.ended.0.lock().unwrap().clone()
     }
 
     pub(crate) async fn exited(&self) -> String {

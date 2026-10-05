@@ -1,7 +1,6 @@
 use super::*;
+use rutis_channel::Receiver;
 use serde_json::json;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct NoExports;
@@ -10,31 +9,46 @@ impl Dispatch for NoExports {
         Err(Error::Value("no exports".into()))
     }
 }
-fn read(reader: &mut BufReader<UnixStream>) -> Frame {
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap()
+/// The far end of a session's memory channel, scripted by a test. Clones
+/// share it, so one thread can read while another writes.
+#[derive(Clone)]
+struct Far {
+    sender: Arc<Mutex<Box<dyn Sender>>>,
+    receiver: Arc<Mutex<Box<dyn Receiver>>>,
+    _closer: Arc<dyn Closer>,
 }
-fn send(writer: &mut UnixStream, frame: Frame) {
-    serde_json::to_writer(&mut *writer, &frame).unwrap();
-    writer.write_all(b"\n").unwrap();
+impl Far {
+    fn try_clone(&self) -> Result<Self, std::convert::Infallible> {
+        Ok(self.clone())
+    }
 }
-fn pair() -> (Connection, UnixStream) {
-    let (local, remote) = UnixStream::pair().unwrap();
-    remote
-        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-        .unwrap();
-    (
-        Connection::connect(local, Arc::new(NoExports)).unwrap(),
-        remote,
-    )
+fn read(far: &mut Far) -> Frame {
+    let message = far.receiver.lock().unwrap().recv().unwrap().unwrap();
+    serde_json::from_slice(&message).unwrap()
+}
+fn send(far: &mut Far, frame: Frame) {
+    let message = serde_json::to_vec(&frame).unwrap();
+    far.sender.lock().unwrap().send(&message).unwrap();
+}
+fn far_pair() -> (Channel, Far) {
+    let (local, far) = rutis_transport_memory::pair();
+    let far = Far {
+        sender: Arc::new(Mutex::new(far.sender)),
+        receiver: Arc::new(Mutex::new(far.receiver)),
+        _closer: far.closer,
+    };
+    (local, far)
+}
+fn pair() -> (Connection, Far) {
+    let (local, far) = far_pair();
+    (Connection::open(local, Arc::new(NoExports)).unwrap(), far)
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn admitted_call_pins_its_target_before_a_following_counted_release() {
     let (peer, mut remote) = pair();
     let remote = std::thread::spawn(move || {
-        let mut reader = BufReader::new(remote.try_clone().unwrap());
+        let mut reader = remote.try_clone().unwrap();
         assert!(matches!(
             read(&mut reader),
             Frame::Hello { version: VERSION }
@@ -111,7 +125,7 @@ async fn admitted_call_pins_its_target_before_a_following_counted_release() {
 async fn an_old_release_does_not_remove_a_concurrent_new_grant() {
     let (peer, mut remote) = pair();
     let remote = std::thread::spawn(move || {
-        let mut reader = BufReader::new(remote.try_clone().unwrap());
+        let mut reader = remote.try_clone().unwrap();
         read(&mut reader);
         send(&mut remote, Frame::Hello { version: VERSION });
         let Frame::Invoke {
@@ -225,10 +239,13 @@ async fn explicit_close_interrupts_a_writer_whose_peer_stopped_reading() {
     peer.ready().await.unwrap();
     let (entered, blocked) = mpsc::channel();
     let writing = peer.clone();
-    let writer = std::thread::spawn(move || {
+    let writer = std::thread::spawn(move || -> Result<(), ChannelError> {
         let mut stream = writing.0.writer.lock().unwrap();
         entered.send(()).unwrap();
-        stream.send(&vec![b'x'; 8 * 1024 * 1024])
+        // The far end reads nothing: sending blocks once the channel is full.
+        loop {
+            stream.send(b"{}")?;
+        }
     });
     blocked.recv().unwrap();
     peer.close(Error::Transport("explicit close".into()));
@@ -238,13 +255,13 @@ async fn explicit_close_interrupts_a_writer_whose_peer_stopped_reading() {
 
 /// A scripted peer on the far end of a connection, after the handshake.
 struct Remote {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: Far,
+    writer: Far,
 }
 impl Remote {
-    fn start(stream: UnixStream) -> Self {
+    fn start(stream: Far) -> Self {
         let mut remote = Self {
-            reader: BufReader::new(stream.try_clone().unwrap()),
+            reader: stream.try_clone().unwrap(),
             writer: stream,
         };
         assert!(matches!(remote.read(), Frame::Hello { version: VERSION }));
@@ -300,12 +317,9 @@ fn granted(value: &WireValue) -> (u64, Kind) {
 fn ids(path: &[&str]) -> Vec<String> {
     path.iter().map(|id| id.to_string()).collect()
 }
-fn connected(dispatch: Arc<dyn Dispatch>) -> (Connection, UnixStream) {
-    let (local, remote) = UnixStream::pair().unwrap();
-    remote
-        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-        .unwrap();
-    (Connection::connect(local, dispatch).unwrap(), remote)
+fn connected(dispatch: Arc<dyn Dispatch>) -> (Connection, Far) {
+    let (local, remote) = far_pair();
+    (Connection::open(local, dispatch).unwrap(), remote)
 }
 
 #[test]

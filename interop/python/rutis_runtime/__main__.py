@@ -1,4 +1,8 @@
-"""`python3 -m rutis_runtime <socket> <project>`: one runtime process."""
+"""`python3 -m rutis_runtime <channel> <project>`: one runtime process.
+
+The channel is `fd:<n>`, a socket inherited from the process that started
+this one, or `unix:<path>` (or a bare path), a socket to dial.
+"""
 
 import asyncio
 import logging
@@ -10,11 +14,19 @@ from .peer import Peer
 from .runner import Runtime
 
 
-async def run(socket_path: str, project: str) -> None:
+def open_channel(spec: str) -> socket.socket:
+    if spec.startswith("fd:"):
+        return socket.socket(fileno=int(spec[len("fd:"):]))
+    path = spec[len("unix:"):] if spec.startswith("unix:") else spec
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.connect(path)
+    return connection
+
+
+async def run(channel: str, project: str) -> None:
     if project and project not in sys.path:
         sys.path.insert(0, project)
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.connect(socket_path)
+    connection = open_channel(channel)
     runtime = Runtime()
     peer = Peer(connection, runtime.dispatch, settled=None)
     runtime.peer = peer
@@ -27,7 +39,7 @@ async def run(socket_path: str, project: str) -> None:
 
 def main() -> None:
     if len(sys.argv) < 3:
-        sys.exit("usage: python3 -m rutis_runtime <socket> <project>")
+        sys.exit("usage: python3 -m rutis_runtime <channel> <project>")
     try:
         asyncio.run(run(sys.argv[1], sys.argv[2]))
     finally:
