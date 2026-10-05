@@ -37,7 +37,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, PluginFactory, TypeKey};
-use rutis_interop::{host_key, row_projection, HostDispatch, HostLease, Process, RuntimeHandle};
+use rutis_interop::{
+    host_key, row_projection, HostDispatch, HostLease, Process, Projection, Runtime, RuntimeHandle,
+};
 use serde_json::{json, Map, Value};
 
 use crate::{
@@ -51,11 +53,62 @@ pub use rows::{CordisRuntimeRows, RuntimeRows, RuntimeRowsPlugin};
 #[cfg(doc)]
 use rutis_interop::RuntimePlugin;
 
+/// How row names map to plugins: the part of resolution that differs by
+/// runtime. Everything else (asking the runtime what a plugin declares,
+/// gating, staleness, the rows themselves) is shared.
+enum Naming {
+    /// npm package names, subpaths and files, resolved from the runtime's
+    /// anchor (Node). A package says when it changed (`version`), so
+    /// resolutions are cached.
+    #[cfg(feature = "node")]
+    Npm,
+    /// `<prefix><module>`: names the runtime loads itself (Python modules;
+    /// later Swift bundles or plugins compiled into a Go binary). Nothing
+    /// says when one changed, so the runtime is asked every time.
+    Modules { prefix: String },
+}
+
+impl Naming {
+    /// The plugin a row name loads, or `None` when it is not this
+    /// runtime's.
+    fn entry(&self, runtime: &RuntimeHandle, name: &str) -> Option<PathBuf> {
+        match self {
+            #[cfg(feature = "node")]
+            Naming::Npm => resolve_entry(runtime.anchor(), name),
+            Naming::Modules { prefix } => {
+                let _ = runtime;
+                name.strip_prefix(prefix.as_str())
+                    .filter(|module| !module.is_empty())
+                    .map(PathBuf::from)
+            }
+        }
+    }
+
+    /// Whether a resolution may be reused until its version changes.
+    fn caches(&self) -> bool {
+        match self {
+            #[cfg(feature = "node")]
+            Naming::Npm => true,
+            Naming::Modules { .. } => false,
+        }
+    }
+
+    /// What tells that the plugin at `entry` changed, if anything does.
+    fn version(&self, entry: &Path) -> Option<Value> {
+        match self {
+            #[cfg(feature = "node")]
+            Naming::Npm => package_version(entry),
+            Naming::Modules { .. } => {
+                let _ = entry;
+                None
+            }
+        }
+    }
+}
+
 pub struct InteropResolver {
     runtime: RuntimeHandle,
-    /// Row names are `<prefix><module>` (a Python runtime's `py:`); none
-    /// for the Node runtime, whose rows are npm names and files.
-    prefix: Option<String>,
+    naming: Naming,
     catalog: ServiceCatalog,
     resolved: Mutex<HashMap<String, Arc<Resolved>>>,
     /// Names whose resolution lacks the plugin's current declarations
@@ -71,7 +124,7 @@ impl InteropResolver {
     /// npm names and files.
     #[cfg(feature = "node")]
     pub fn node(runtime: RuntimeHandle) -> Self {
-        Self::with_prefix(runtime, None)
+        Self::with_naming(runtime, Naming::Npm)
     }
 
     /// Rows of the Node runtime, as [`InteropResolver::node`].
@@ -81,10 +134,10 @@ impl InteropResolver {
         Self::node(runtime)
     }
 
-    fn with_prefix(runtime: RuntimeHandle, prefix: Option<String>) -> Self {
+    fn with_naming(runtime: RuntimeHandle, naming: Naming) -> Self {
         Self {
             runtime,
-            prefix,
+            naming,
             catalog: ServiceCatalog::default(),
             resolved: Mutex::new(HashMap::new()),
             offline: Mutex::new(HashSet::new()),
@@ -96,26 +149,11 @@ impl InteropResolver {
     /// `<runtime name>:<module>` (`py:weather.plugin`) loads `<module>`.
     pub fn modules(runtime: RuntimeHandle) -> Self {
         let prefix = format!("{}:", runtime.name());
-        Self::with_prefix(runtime, Some(prefix))
+        Self::with_naming(runtime, Naming::Modules { prefix })
     }
 
     pub(crate) fn runtime_name(&self) -> &str {
         self.runtime.name()
-    }
-
-    /// The module a row name loads, or `None` when it is not this
-    /// resolver's.
-    fn entry(&self, name: &str) -> Option<PathBuf> {
-        match &self.prefix {
-            Some(prefix) => name
-                .strip_prefix(prefix.as_str())
-                .filter(|module| !module.is_empty())
-                .map(PathBuf::from),
-            #[cfg(feature = "node")]
-            None => resolve_entry(self.runtime.anchor(), name),
-            #[cfg(not(feature = "node"))]
-            None => None,
-        }
     }
 
     /// The catalog the loader uses (`LoaderOptions::catalog`): its shared
@@ -160,7 +198,7 @@ impl InteropResolver {
         self.resolved.lock().unwrap().retain(|name, found| {
             let current = Path::new(found.meta["entry"].as_str().unwrap_or_default());
             let recorded = found.meta.get("version").filter(|v| !v.is_null()).cloned();
-            let fresh = package_version(current) == recorded;
+            let fresh = self.naming.version(current) == recorded;
             if !fresh {
                 stale.insert(name.clone());
             }
@@ -173,7 +211,7 @@ impl InteropResolver {
 impl Resolver for InteropResolver {
     fn resolve<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Arc<Resolved>, LoaderError>> {
         Box::pin(async move {
-            let Some(entry) = self.entry(name) else {
+            let Some(entry) = self.naming.entry(&self.runtime, name) else {
                 return Err(LoaderError::NotFound {
                     name: name.to_owned(),
                 });
@@ -181,7 +219,7 @@ impl Resolver for InteropResolver {
             // A runtime that loads by module name is asked every time: a
             // reload must see the module's current declarations, and there
             // is no package version to tell that it changed.
-            if self.prefix.is_none() {
+            if self.naming.caches() {
                 if let Some(found) = self.resolved.lock().unwrap().get(name) {
                     return Ok(found.clone());
                 }
@@ -241,13 +279,13 @@ impl Resolver for InteropResolver {
                 meta: json!({
                     "source": "interop",
                     "entry": entry,
-                    "version": package_version(&entry),
+                    "version": self.naming.version(&entry),
                     "inject": described.inject,
                     "provides": described.provides,
                 }),
                 foreign_scope: true,
             });
-            if self.prefix.is_none() {
+            if self.naming.caches() {
                 self.resolved
                     .lock()
                     .unwrap()
@@ -343,66 +381,19 @@ impl Plugin for JsRow {
                 .runtime()
                 .clone();
             let process = runtime.process().clone();
-            // The shared services the plugin injects, registered in Cordis
-            // for as long as the row runs. One served by a row of this same
-            // process is already there natively.
+            // Every lease taken is released: by the cleanup once the row
+            // runs, here when it does not get that far. The kernel waits for
+            // apply to finish, so this frame gets to release them; only a
+            // panic in it leaves them raised, in a runtime whose state is
+            // then unknown anyway.
             let mut leases: Vec<HostLease> = Vec::new();
-            for name in &self.gated {
-                let dispatch = ctx.require_as::<dyn HostDispatch>(host_key(name))?;
-                if dispatch
-                    .origin()
-                    .is_some_and(|origin| std::ptr::eq(origin, &*process))
-                {
-                    continue;
+            let (key, projection) = match self.start(ctx, &runtime, &mut leases).await {
+                Ok(started) => started,
+                Err(error) => {
+                    release(leases).await;
+                    return Err(error);
                 }
-                let lease = process
-                    .lease_host(name, dispatch, runtime.host_methods(name))
-                    .await
-                    .map_err(failed)?;
-                leases.push(lease);
-            }
-            // The fiber identity keys the row on the Cordis side: unique, and
-            // new for every generation.
-            let key = ctx.instance().to_string();
-            let row = ctx
-                .get::<Loader>()
-                .and_then(|loader| loader.row(ctx.instance()));
-            let (isolate, inject) = row.map(|row| (row.isolate, row.inject)).unwrap_or_default();
-            // The row's services are published from this fiber, so they go
-            // when it does.
-            let projection = row_projection(&self.provides);
-            projection.attach(ctx, process.clone())?;
-            if let Err(error) = process
-                .load_row_exporting(
-                    &key,
-                    &self.entry,
-                    self.config.clone(),
-                    &isolate,
-                    &inject,
-                    &self.provides,
-                    projection.clone(),
-                )
-                .await
-            {
-                projection.close();
-                return Err(failed(error));
-            }
-            // Volatile-only changes go to Cordis, which commits them in place.
-            let listening = ctx.events().on(
-                ctx,
-                &volatile_key(ctx),
-                Forward {
-                    key: key.clone(),
-                    process: process.clone(),
-                },
-            );
-            if let Err(error) = listening {
-                // The plugin is loaded, but no cleanup will be registered for
-                // it: undo the load here. The leases go with this frame.
-                projection.withdraw().await;
-                let _ = process.unload_row(&key).await;
-                return Err(error);
-            }
+            };
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 Box::pin(async move {
                     // The row's services go first, and their users stop,
@@ -411,9 +402,7 @@ impl Plugin for JsRow {
                     let unloaded = process.unload_row(&key).await;
                     // After the unload: the plugin never sees a service it
                     // injects go away before it does.
-                    for lease in leases {
-                        let _ = lease.release().await;
-                    }
+                    release(leases).await;
                     match unloaded {
                         // The process is gone, and the row with it.
                         Ok(()) | Err(rutis_interop::Error::Transport(_)) => Ok(()),
@@ -422,6 +411,89 @@ impl Plugin for JsRow {
                 })
             })))
         })
+    }
+}
+
+impl JsRow {
+    /// Lease the shared services the plugin injects into `leases`, then
+    /// load it into the runtime. Returns its key there and the projection
+    /// of its services; on failure nothing of the load remains, and the
+    /// caller releases the leases.
+    async fn start(
+        &self,
+        ctx: &Ctx,
+        runtime: &Arc<Runtime>,
+        leases: &mut Vec<HostLease>,
+    ) -> Result<(String, Arc<Projection>), CordisError> {
+        let process = runtime.process();
+        // The shared services the plugin injects, registered in Cordis for
+        // as long as the row runs. One served by a row of this same process
+        // is already there natively.
+        for name in &self.gated {
+            let dispatch = ctx.require_as::<dyn HostDispatch>(host_key(name))?;
+            if dispatch
+                .origin()
+                .is_some_and(|origin| std::ptr::eq(origin, &**process))
+            {
+                continue;
+            }
+            let lease = process
+                .lease_host(name, dispatch, runtime.host_methods(name))
+                .await
+                .map_err(failed)?;
+            leases.push(lease);
+        }
+        // The fiber identity keys the row on the Cordis side: unique, and
+        // new for every generation.
+        let key = ctx.instance().to_string();
+        let row = ctx
+            .get::<Loader>()
+            .and_then(|loader| loader.row(ctx.instance()));
+        let (isolate, inject) = row.map(|row| (row.isolate, row.inject)).unwrap_or_default();
+        // The row's services are published from this fiber, so they go when
+        // it does.
+        let projection = row_projection(&self.provides);
+        projection.attach(ctx, process.clone())?;
+        if let Err(error) = process
+            .load_row_exporting(
+                &key,
+                &self.entry,
+                self.config.clone(),
+                &isolate,
+                &inject,
+                &self.provides,
+                projection.clone(),
+            )
+            .await
+        {
+            projection.close();
+            return Err(failed(error));
+        }
+        // Volatile-only changes go to Cordis, which commits them in place.
+        let listening = ctx.events().on(
+            ctx,
+            &volatile_key(ctx),
+            Forward {
+                key: key.clone(),
+                process: process.clone(),
+            },
+        );
+        if let Err(error) = listening {
+            // The plugin is loaded, but no cleanup will be registered for it:
+            // undo the load here.
+            projection.withdraw().await;
+            let _ = process.unload_row(&key).await;
+            return Err(error);
+        }
+        Ok((key, projection))
+    }
+}
+
+/// Give the leases back; a process that is gone has nothing left to
+/// withdraw.
+async fn release(leases: Vec<HostLease>) {
+    for lease in leases {
+        let _ = lease.release().await;
     }
 }
 
@@ -446,6 +518,7 @@ impl Listener<VolatileUpdate> for Forward {
     }
 }
 
+#[cfg(feature = "node")]
 /// The `version` of the package a plugin file belongs to (the nearest
 /// `package.json` above it), if it has one. A module name (a relative path)
 /// has none.
@@ -481,6 +554,7 @@ mod stale_tests {
         })
     }
 
+    #[cfg(feature = "node")]
     #[test]
     fn stale_rows_are_those_without_current_declarations() {
         let dir = tempfile::tempdir().unwrap();
@@ -497,13 +571,11 @@ mod stale_tests {
             rutis_interop::Launcher::new("true"),
             dir.path(),
         );
-        let resolver = InteropResolver::modules(runtime.handle());
+        let resolver = InteropResolver::node(runtime.handle());
         {
             let mut resolved = resolver.resolved.lock().unwrap();
-            // No package version, recorded as null: unchanged. A module
-            // name has none either.
+            // No package version, recorded as null: unchanged.
             resolved.insert("loose".into(), cached(loose, None));
-            resolved.insert("module".into(), cached(Path::new("weather.plugin"), None));
             resolved.insert("same".into(), cached(&versioned, Some(json!("2.0.0"))));
             resolved.insert("older".into(), cached(&versioned, Some(json!("1.0.0"))));
         }
@@ -516,6 +588,27 @@ mod stale_tests {
         assert!(!resolver.resolved.lock().unwrap().contains_key("older"));
         // A refresh that never finished leaves them stale for the next one.
         assert_eq!(resolver.take_stale(), stale);
+    }
+
+    #[test]
+    fn module_rows_have_no_version_and_are_never_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = rutis_interop::RuntimePlugin::launcher(
+            "py",
+            rutis_interop::Launcher::new("true"),
+            dir.path(),
+        );
+        let naming = Naming::Modules {
+            prefix: "py:".into(),
+        };
+        assert_eq!(
+            naming.entry(&runtime.handle(), "py:weather.plugin"),
+            Some(PathBuf::from("weather.plugin"))
+        );
+        assert_eq!(naming.entry(&runtime.handle(), "py:"), None);
+        assert_eq!(naming.entry(&runtime.handle(), "weather"), None);
+        assert!(!naming.caches());
+        assert_eq!(naming.version(Path::new("weather.plugin")), None);
     }
 
     #[test]

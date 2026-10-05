@@ -897,3 +897,74 @@ async fn a_row_restarted_while_loading_is_unloaded_in_the_runtime() {
     .await;
     root.shutdown().await.unwrap();
 }
+
+// ── Leases of a row that fails to load ──────────────────────────
+
+const BROKEN: &str = r#"
+export const name = 'broken'
+export const inject = ['probe']
+export function apply() { throw new Error('broken on purpose') }
+"#;
+
+// Reads the Cordis Context directly, without injecting what it looks at.
+const INSPECTOR: &str = r#"
+export const name = 'inspector'
+export function apply(ctx) {
+  ctx.provide('inspector', { has(name) { return ctx.get(name, false) !== undefined } })
+}
+"#;
+
+/// A row whose plugin fails to load gives back the host services it leased:
+/// nothing of it stays registered in the runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_that_fails_to_load_releases_its_leases() {
+    let dir = tempfile::tempdir().unwrap();
+    let broken = dir.path().join("broken.mjs");
+    std::fs::write(&broken, BROKEN).unwrap();
+    let inspector = dir.path().join("inspector/index.mjs");
+    std::fs::create_dir_all(inspector.parent().unwrap()).unwrap();
+    std::fs::write(&inspector, INSPECTOR).unwrap();
+    std::fs::write(
+        dir.path().join("inspector/package.json"),
+        r#"{ "rutis": { "provides": { "inspector": { "has": "sync" } } } }"#,
+    )
+    .unwrap();
+    let probe = Probe::default();
+    let root = Ctx::root().unwrap();
+    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+        .unwrap();
+    let (loader, runtime) = mount(&root, node_package(), &["probe", "inspector"]).await;
+    (&runtime).await.unwrap();
+    loader
+        .reconcile(
+            rows(vec![
+                row("i", &inspector, json!({}), json!(null)),
+                row("b", &broken, json!({}), json!(null)),
+            ]),
+            None,
+        )
+        .await
+        .unwrap();
+    until("the broken row to fail", || {
+        row_state(&loader, "b") == Some(FiberState::Failed)
+    })
+    .await;
+    let key = host_key("inspector");
+    until("the inspector", || {
+        root.get_as::<dyn HostDispatch>(key.clone()).is_some()
+    })
+    .await;
+    let inspector = root.get_as::<dyn HostDispatch>(key).unwrap();
+    let has_probe = inspector
+        .invoke("has", json!(["probe"]).into())
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        has_probe,
+        json!(false),
+        "the failed row's lease was given back"
+    );
+    drop(inspector);
+    root.shutdown().await.unwrap();
+}

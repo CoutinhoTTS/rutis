@@ -172,3 +172,34 @@ async fn python_rows_follow_the_row_contract() {
     process.dispose().await.unwrap();
     ctx.shutdown().await.unwrap();
 }
+
+/// A runtime that does not report what rows need fails when it starts, with
+/// one clear error, instead of every row failing later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_without_the_row_contract_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut path = sdk().into_os_string();
+    path.push(":");
+    path.push(dir.path());
+    // The Python runtime, made to report no features, like an old runner.
+    let launcher = Launcher::new("python3")
+        .arg("-c")
+        .arg(
+            "import runpy, rutis_runtime.runner as r; r.FEATURES = []; \
+             runpy.run_module('rutis_runtime', run_name='__main__')",
+        )
+        .env("PYTHONPATH", path);
+    let runtime = rutis_interop::RuntimePlugin::launcher("old", launcher, dir.path());
+    let handle = runtime.handle();
+    let ctx = Ctx::root().unwrap();
+    let view = ctx.plugin(runtime);
+    let _ = (&view).await;
+    assert_eq!(view.state().state, rutis::FiberState::Failed);
+    match handle.state() {
+        rutis_interop::RuntimeState::Down(message) => {
+            assert!(message.contains("lacks rows.v2 and hosts"), "{message}")
+        }
+        _ => panic!("the runtime should be down"),
+    }
+    ctx.shutdown().await.unwrap();
+}
