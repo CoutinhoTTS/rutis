@@ -1,6 +1,8 @@
 # rutis-loader releases with tags loader-vX.Y.Z. It depends on rutis and,
-# for its `interop` feature, on rutis-interop: release those first (tags
-# rutis-vX.Y.Z and interop-vX.Y.Z) when this version needs new ones.
+# for its optional features, on rutis-interop and rutis-channel (`interop`,
+# `peer`) and rutis-bridge (`peer`): crates.io needs optional dependencies
+# published too, so release those first (tags rutis-vX.Y.Z, interop-vX.Y.Z,
+# bridge-vX.Y.Z) when this version needs new ones.
 name: publish rutis-loader
 
 on:
@@ -27,6 +29,15 @@ jobs:
         run: |
           package_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rutis-loader") | .version')
           test "$GITHUB_REF_NAME" = "loader-v$package_version"
+
+      - name: Check the published dependencies
+        run: |
+          metadata=$(cargo metadata --locked --no-deps --format-version 1)
+          for crate in rutis rutis-channel rutis-interop rutis-bridge; do
+            version=$(echo "$metadata" | jq -r ".packages[] | select(.name == \"$crate\") | .version")
+            curl -sf -A "rutis release (github.com/arcships/rutis)" "https://crates.io/api/v1/crates/$crate/$version" >/dev/null \
+              || { echo "::error::$crate $version is not on crates.io: release it first"; exit 1; }
+          done
 
       # The dry run resolves every dependency, the optional rutis-interop
       # included, from crates.io and builds against the released rutis: it

@@ -1,6 +1,8 @@
 # The rutis kernel tests run many times over, to catch failures that depend
-# on how tasks interleave and show up only once in a while. Runs nightly and
-# on demand; a failing round prints the test output it saw.
+# on how tasks interleave and show up only once in a while; the network
+# stack soaks (links cut and relinked, processes started and ended, over
+# and over) check that nothing piles up. Runs nightly and on demand; a
+# failing round prints the test output it saw.
 name: stress
 
 on:
@@ -11,6 +13,9 @@ on:
       rounds:
         description: How many times to run the rutis tests
         default: "20"
+      soak_secs:
+        description: How long each soak runs, in seconds
+        default: "600"
 
 permissions:
   contents: read
@@ -36,3 +41,21 @@ jobs:
             fi
           done
           echo "rutis tests passed $ROUNDS rounds." >> "$GITHUB_STEP_SUMMARY"
+
+  soak:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rutis-transport-websocket -p rutis-transport-local --test soak --no-run
+      - name: Soak the network stack
+        # bash -eo pipefail: a failing soak fails the step through tee.
+        shell: bash
+        env:
+          RUTIS_SOAK_SECS: ${{ inputs.soak_secs || '600' }}
+        run: |
+          case "$RUTIS_SOAK_SECS" in ""|*[!0-9]*) echo "::error::soak_secs must be a number"; exit 1;; esac
+          cargo test -q -p rutis-transport-websocket --test soak -- --ignored --nocapture 2>&1 | tee websocket.txt
+          cargo test -q -p rutis-transport-local --test soak -- --ignored --nocapture 2>&1 | tee local.txt
+          grep -h '^soak:' websocket.txt local.txt >> "$GITHUB_STEP_SUMMARY"
