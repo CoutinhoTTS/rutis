@@ -16,7 +16,10 @@ async fn provides_the_transport_until_unloaded() {
         .get_as::<dyn Transport>(transport_key("memory"))
         .expect("Transport#memory is provided");
     assert_eq!(transport.kind(), "memory");
-    let mut dialed = transport.dial("echo").await.unwrap();
+    let mut dialed = transport
+        .dial(&rutis_bridge::Dial::address("echo"))
+        .await
+        .unwrap();
     let mut accepted = listener.accept().unwrap();
     dialed.sender.send(b"ping").unwrap();
     assert_eq!(accepted.receiver.recv().unwrap().unwrap(), b"ping");

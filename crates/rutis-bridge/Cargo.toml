@@ -12,3 +12,5 @@ categories = ["network-programming"]
 [dependencies]
 rutis = { path = "../rutis", version = "0.6.0" }
 rutis-channel = { path = "../rutis-channel", version = "0.1.0" }
+sha2 = "0.10"
+thiserror.workspace = true

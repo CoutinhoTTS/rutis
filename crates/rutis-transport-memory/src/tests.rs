@@ -129,16 +129,22 @@ async fn dial_reaches_a_listener_and_unknown_names_are_retryable() {
         transport.listen("svc"),
         Err(ConnectError::Incompatible { .. })
     ));
-    let mut dialed = transport.dial("svc").await.unwrap();
+    let mut dialed = transport
+        .dial(&rutis_bridge::Dial::address("svc"))
+        .await
+        .unwrap();
     let mut accepted = listener.accept().unwrap();
     dialed.sender.send(b"hi").unwrap();
     assert_eq!(accepted.receiver.recv().unwrap().unwrap(), b"hi");
     assert!(matches!(
-        transport.dial("other").await,
+        transport.dial(&rutis_bridge::Dial::address("other")).await,
         Err(ConnectError::Retryable { .. })
     ));
     transport.close_all();
     assert!(dialed.sender.send(b"after").is_err());
     drop(listener);
-    assert!(transport.dial("svc").await.is_err());
+    assert!(transport
+        .dial(&rutis_bridge::Dial::address("svc"))
+        .await
+        .is_err());
 }

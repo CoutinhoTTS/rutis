@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex, Weak};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
-use rutis_bridge::{transport_key, Transport};
+use rutis_bridge::{transport_key, Dial, Transport};
 use rutis_channel::{Channel, ConnectError};
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -74,9 +74,10 @@ impl Transport for LocalTransport {
         "local"
     }
 
-    fn dial<'a>(&'a self, address: &'a str) -> BoxFuture<'a, Result<Channel, ConnectError>> {
+    fn dial<'a>(&'a self, dial: &'a Dial) -> BoxFuture<'a, Result<Channel, ConnectError>> {
         Box::pin(async move {
-            let channel = dial(address).await?;
+            let address = dial.address.as_str();
+            let channel = connect(address).await?;
             self.track(&channel);
             Ok(channel)
         })
@@ -84,7 +85,7 @@ impl Transport for LocalTransport {
 }
 
 #[cfg(unix)]
-async fn dial(address: &str) -> Result<Channel, ConnectError> {
+async fn connect(address: &str) -> Result<Channel, ConnectError> {
     let path = match address.split_once(':') {
         Some(("unix", path)) => path,
         Some((scheme, _)) if !scheme.contains('/') => {
@@ -98,7 +99,7 @@ async fn dial(address: &str) -> Result<Channel, ConnectError> {
 }
 
 #[cfg(not(unix))]
-async fn dial(_address: &str) -> Result<Channel, ConnectError> {
+async fn connect(_address: &str) -> Result<Channel, ConnectError> {
     Err(ConnectError::Incompatible {
         reason: "the local transport supports Unix sockets only on this platform".into(),
     })

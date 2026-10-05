@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{mpsc, Arc, Condvar, Mutex, Weak};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
-use rutis_bridge::{transport_key, Transport};
+use rutis_bridge::{transport_key, Dial, Transport};
 use rutis_channel::{Channel, ChannelError, ChannelInfo, Closer, ConnectError, Receiver, Sender};
 
 /// Messages buffered per direction before `send` blocks.
@@ -239,14 +239,16 @@ impl Transport for MemoryTransport {
         "memory"
     }
 
-    fn dial<'a>(&'a self, address: &'a str) -> BoxFuture<'a, Result<Channel, ConnectError>> {
+    fn dial<'a>(&'a self, dial: &'a Dial) -> BoxFuture<'a, Result<Channel, ConnectError>> {
         Box::pin(async move {
+            let address = dial.address.as_str();
             let listener = self.listeners.lock().unwrap().get(address).cloned();
             let listener = listener.ok_or_else(|| ConnectError::Retryable {
                 reason: format!("nothing listens on memory:{address}"),
             })?;
             let (a, b) = (Arc::default(), Arc::default());
-            let (dialed, accepted) = (end(&a, &b, address), end(&b, &a, address));
+            let (mut dialed, accepted) = (end(&a, &b, address), end(&b, &a, address));
+            dialed.info.peer = dial.peer.clone();
             {
                 let mut open = self.open.lock().unwrap();
                 open.retain(|closer| closer.strong_count() > 0);

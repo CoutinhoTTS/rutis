@@ -23,6 +23,14 @@ pub struct Channel {
     pub info: ChannelInfo,
 }
 
+impl std::fmt::Debug for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Channel")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
+}
+
 pub trait Sender: Send {
     /// Send one message; blocks under backpressure.
     fn send(&mut self, message: &[u8]) -> Result<(), ChannelError>;
@@ -37,6 +45,13 @@ pub trait Receiver: Send {
 pub trait Closer: Send + Sync {
     /// Idempotent; wakes threads blocked in `send` and `recv`.
     fn close(&self, reason: &str);
+
+    /// Close because a newer connection of the same endpoint took over. A
+    /// transport that can tell the far end so (WebSocket close code 4002)
+    /// does; others just close.
+    fn replaced(&self) {
+        self.close("replaced by a new connection");
+    }
 }
 
 /// What the connector established about a channel. Identity is delivered
