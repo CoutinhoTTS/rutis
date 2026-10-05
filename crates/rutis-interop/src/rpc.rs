@@ -424,6 +424,24 @@ thread_local! { static CALLER: RefCell<Option<Connection>> = const { RefCell::ne
 pub fn caller() -> Option<Connection> {
     CALLER.with(|caller| caller.borrow().clone())
 }
+thread_local! { static PUMPING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+/// Marks a thread that runs an invocation pumped by its own synchronous
+/// wait (`request_sync`), so code that relies on running there can check it.
+struct Pumping;
+impl Pumping {
+    fn enter() -> Self {
+        PUMPING.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+    fn active() -> bool {
+        PUMPING.with(|depth| depth.get() > 0)
+    }
+}
+impl Drop for Pumping {
+    fn drop(&mut self) {
+        PUMPING.with(|depth| depth.set(depth.get() - 1));
+    }
+}
 fn current_path() -> Vec<String> {
     SYNC_PATH
         .with(|p| p.borrow().clone())
@@ -947,7 +965,10 @@ impl Connection {
         loop {
             match receiver.recv().map_err(transport)? {
                 Message::Reply(result) => return result,
-                Message::Invoke(incoming) => self.execute(incoming, true),
+                Message::Invoke(incoming) => {
+                    let _pumping = Pumping::enter();
+                    self.execute(incoming, true)
+                }
             }
         }
     }
@@ -1520,6 +1541,21 @@ impl Connection {
         };
         let forwarded = rebase(&path, self.tag(), target.tag());
         if sync {
+            // Why blocking here cannot deadlock across the two sessions:
+            // - this thread is a synchronous waiter pumping its own chain
+            //   (`sync` is set only there; checked below), so a reverse call
+            //   from `target` that belongs to this chain is delivered to this
+            //   very thread by path, and runs nested instead of waiting;
+            // - no lock of this session is held here: `execute` runs after
+            //   `receive` released `calls` and `exports`, and `request_sync`
+            //   takes `target`'s locks only briefly, never while waiting.
+            // Forwarding synchronously from anywhere else (an ordinary task,
+            // or while holding a lock) would break both; such callers must
+            // take the asynchronous path below.
+            debug_assert!(
+                Pumping::active(),
+                "synchronous relay forwarding outside a synchronous waiter"
+            );
             let result = {
                 let _path = PathGuard::enter(forwarded);
                 target.request_sync(operation)
