@@ -21,6 +21,11 @@ use tokio::task::JoinHandle;
 
 use crate::{HostDispatch, Mount, Process};
 
+/// What the rows of a runtime need from it: describing plugins, exporting
+/// their services (`rows.v2`) and leasing host services (`hosts`). Static
+/// mounts use neither, so only [`RuntimePlugin`] checks them.
+const ROW_FEATURES: [&str; 2] = ["rows.v2", "hosts"];
+
 /// The service a running runtime provides.
 pub struct Runtime {
     process: Arc<Process>,
@@ -275,6 +280,25 @@ impl Plugin for RuntimePlugin {
                 }
                 None => unreachable!("only cancellation ends the start early"),
             };
+            // Rows need both, so a runtime without them fails here, once,
+            // rather than every row failing on its own later. The process is
+            // dropped, which ends it.
+            let missing: Vec<&str> = ROW_FEATURES
+                .iter()
+                .copied()
+                .filter(|feature| !process.supports(feature))
+                .collect();
+            if !missing.is_empty() {
+                let error = crate::Error::Value(format!(
+                    "the {} runtime lacks {}: @arcships/rutis-interop 0.3.0 or later \
+                     (or a runtime speaking its row contract) is required",
+                    self.runtime,
+                    missing.join(" and ")
+                ));
+                self.state
+                    .send_replace(RuntimeState::Down(error.to_string()));
+                return Err(error.into());
+            }
 
             // Registered before the service, so cleanup withdraws the service
             // (dependent plugins unload first) before the process ends.
