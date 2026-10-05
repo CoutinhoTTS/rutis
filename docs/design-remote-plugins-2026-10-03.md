@@ -184,9 +184,9 @@
 | 操作 | 语义 / 处理方 |
 | --- | --- |
 | `services.announce { name, service, shape, version }` | 公告服务对象引用 / import |
-| `services.withdraw { name, version }` | 撤销服务 / import |
+| `services.withdraw { name, version }` | 撤销服务；导入方保留撤销的版本，晚到的更旧公告不得恢复服务 / import |
 | `plugins.describe(插件)` | 返回 `{ schema, version, integrity }` / host |
-| `plugins.load(key, 插件, config, isolate, inject)` | 代装 / host |
+| `plugins.load(key, 插件, config, isolate, inject)` | 代装：按行的 `isolate`（[服务名, 标签]，标签按对端区分）隔离、按 `inject` 门控；服务名经宿主的映射转为键（loader 组合用其服务目录，默认 `host_key`），无法映射即拒绝 / host |
 | `plugins.update(key, config)`、`plugins.unload(key)` | 更新、卸载 / host |
 | `events.forward { name, args }` | 以 parallel 发通知，等待监听完成 / events |
 | `link.offers { families, version, since }` | 宣告已注册功能族，版本递增，忽略旧宣告；`since` 为各族登记时的版本，族被撤销后重新登记即为新的一次提供，跟随方按它（而不是族在不在）重新提供依赖它的东西；不带 `since` 的一端各族视为 0 / link |
