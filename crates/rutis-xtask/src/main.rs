@@ -416,13 +416,28 @@ fn check_bundle_manifest(manifest: &Path) -> Result<(), String> {
         "dependencies",
         &mut offenders,
     );
+    // dev/build dependencies resolve into the same graph: a shared crate
+    // there collides with the SDK closure the same way (dev-deps on
+    // `cargo check`, build-deps when build.rs touches them).
+    scan(
+        cargo_toml.get("dev-dependencies"),
+        "dev-dependencies",
+        &mut offenders,
+    );
+    scan(
+        cargo_toml.get("build-dependencies"),
+        "build-dependencies",
+        &mut offenders,
+    );
     if let Some(targets) = cargo_toml.get("target").and_then(toml::Value::as_table) {
         for cfg in targets.values() {
-            scan(
-                cfg.get("dependencies"),
-                "target dependencies",
-                &mut offenders,
-            );
+            for (section, where_) in [
+                ("dependencies", "target dependencies"),
+                ("dev-dependencies", "target dev-dependencies"),
+                ("build-dependencies", "target build-dependencies"),
+            ] {
+                scan(cfg.get(section), where_, &mut offenders);
+            }
         }
     }
     if !offenders.is_empty() {
@@ -1091,11 +1106,17 @@ fn shrink_closure_inner(
     let target_dir = probe_root.join("target");
     let build = |verbose: bool| -> Result<bool, String> {
         // Cargo does not track -L contents; force the plugin crate to
-        // recompile each round by bumping its source mtime.
+        // recompile each round by invalidating its fingerprint. A source
+        // change (not just mtime) is what cargo's fingerprint hashes, so
+        // append a line comment that flips between two states each round.
         let lib = probe.join("src/lib.rs");
-        if let Ok(file) = fs::File::options().write(true).open(&lib) {
-            file.set_modified(std::time::SystemTime::now()).ok();
+        let mut source = fs::read_to_string(&lib).map_err(|e| e.to_string())?;
+        if source.ends_with("// shrink round\n") {
+            source.truncate(source.len() - "// shrink round\n".len());
+        } else {
+            source.push_str("// shrink round\n");
         }
+        fs::write(&lib, source).map_err(|e| e.to_string())?;
         let mut command = Command::new("cargo");
         command
             .args(["build", "--release", "--manifest-path"])
@@ -1216,18 +1237,19 @@ fn write_cargo_config(bundle: &Path, sdk_name: &str) -> Result<(), String> {
     };
     let content = format!(
         "# Copy this file to the plugin workspace as .cargo/config.toml and\n\
-         # adjust the two paths below to where you unpacked the bundle.\n\
+         # adjust the three paths below to where you unpacked the bundle.\n\
          # The RUSTFLAGS environment variable fully replaces these flags:\n\
          # if it is set, the injection silently stops working. Unset it.\n\
-         [build]\nrustflags = [\n  \"--extern\", \"rutis_sdk={0}\",\n  \"-L\", \"dependency={1}\",\n]\n\n\
+         [build]\nrustflags = [\n  \"--extern\", \"rutis_sdk={0}\",\n  \"-L\", \"dependency={1}\",\n  \"-L\", \"native={2}\",\n]\n\n\
          # export_plugin! embeds the SDK artifact hash at compile time; the\n\
          # packer sets the real value, the template uses the recorded one so\n\
          # cargo check/build works without the packer.\n\
-         [env]\nRUTIS_SDK_ARTIFACT_SHA256 = \"{2}\"\n\n\
+         [env]\nRUTIS_SDK_ARTIFACT_SHA256 = \"{3}\"\n\n\
          # macOS: keep the plugin's deployment target equal to the SDK's.\n\
          # [env]\n# MACOSX_DEPLOYMENT_TARGET = \"13.0\"\n",
         forward_slashes(&bundle.join("lib").join(sdk_name)),
         forward_slashes(&bundle.join("deps")),
+        forward_slashes(&bundle.join("lib")),
         sdk_hash
     );
     fs::write(bundle.join("cargo-config.toml"), content).map_err(|e| e.to_string())
