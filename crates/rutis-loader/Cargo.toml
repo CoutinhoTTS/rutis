@@ -18,6 +18,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 rutis-interop = { path = "../rutis-interop", version = "0.3.0", optional = true, default-features = false }
 url = { version = "2", optional = true }
+rutis-bridge = { path = "../rutis-bridge", version = "0.1.0", optional = true }
+rutis-channel = { path = "../rutis-channel", version = "0.1.0", optional = true }
 
 [features]
 # Plugins of other languages as rows, each language in its own runtime
@@ -30,10 +32,14 @@ python = ["runtimes", "rutis-interop/python"]
 interop = ["node", "python"]
 # What every language shares; enabled by the language features.
 runtimes = ["dep:rutis-interop"]
+# Rows hosted on other nodes (`peer:<id>/<plugin>`), over rutis-bridge links.
+peer = ["dep:rutis-bridge", "dep:rutis-channel", "dep:rutis-interop"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 tempfile = "3"
+rutis-transport-memory = { path = "../rutis-transport-memory" }
 rutis-bridge = { path = "../rutis-bridge" }
 rutis-channel = { path = "../rutis-channel" }
 rutis-transport-websocket = { path = "../rutis-transport-websocket" }
+rutis-interop = { path = "../rutis-interop", default-features = false }

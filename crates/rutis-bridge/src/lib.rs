@@ -12,12 +12,19 @@ use std::sync::Arc;
 use rutis::{BoxFuture, TypeKey};
 pub use rutis_channel::{Channel, ConnectError, PeerId};
 
+mod compose;
+mod events;
+mod host;
 mod identity;
 mod link;
 mod peer;
 mod registration;
 mod runtime;
+mod services;
 
+pub use compose::{Features, PeerHandle, PeerPlugin};
+pub use events::{node_event, EventsPlugin, NodeEvent};
+pub use host::{Described, HostPlugin, Installed, PluginCatalog, StaticCatalog};
 pub use identity::{
     fingerprint, identity_key, Credential, Identity, IdentityPlugin, Presented, StaticIdentity,
 };
@@ -27,6 +34,7 @@ pub use registration::{
     Deliver, Refusal, Registered, Registration, RegistrationError, Registrations, Ticket,
 };
 pub use runtime::RuntimeAccessPlugin;
+pub use services::{ExportPlugin, ImportPlugin};
 
 /// One kind of carrier, as its plugin provides it.
 pub trait Transport: Send + Sync + 'static {

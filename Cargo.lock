@@ -3200,6 +3200,7 @@ dependencies = [
  "rutis-bridge",
  "rutis-channel",
  "rutis-interop",
+ "rutis-transport-memory",
  "rutis-transport-websocket",
  "schemars",
  "serde",

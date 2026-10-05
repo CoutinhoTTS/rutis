@@ -216,6 +216,15 @@ impl Loader {
         Ok(self.inner.resolver.resolve(name).await?.schema.clone())
     }
 
+    /// Resolve a module name with this loader's resolvers, as a row naming
+    /// it would be (a host serving its peer looks plugins up this way).
+    pub async fn resolve(
+        &self,
+        name: &str,
+    ) -> Result<std::sync::Arc<crate::Resolved>, LoaderError> {
+        self.inner.resolver.resolve(name).await
+    }
+
     /// The config a row's plugin runs with (read-only). For a running row
     /// this is what the kernel holds, which differs from the desired config
     /// when the last update was rejected (see [`EntryInfo::rejected`]).
