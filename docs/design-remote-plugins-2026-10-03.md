@@ -189,7 +189,7 @@
 | `plugins.load(key, 插件, config, isolate, inject)` | 代装 / host |
 | `plugins.update(key, config)`、`plugins.unload(key)` | 更新、卸载 / host |
 | `events.forward { name, args }` | 以 parallel 发通知，等待监听完成 / events |
-| `link.offers { families, version }` | 宣告已注册功能族，版本递增，忽略旧宣告 / link |
+| `link.offers { families, version, since }` | 宣告已注册功能族，版本递增，忽略旧宣告；`since` 为各族登记时的版本，族被撤销后重新登记即为新的一次提供，跟随方按它（而不是族在不在）重新提供依赖它的东西；不带 `since` 的一端各族视为 0 / link |
 
 - 服务通过 Session 对象 call/get 访问；换值公告新引用，按 version 排序，旧引用按计数释放。
 - Cordis 服务经 export 的导出 fiber 读取，调用产生的 effect 归该 fiber。
