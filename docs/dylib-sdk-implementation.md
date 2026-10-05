@@ -41,6 +41,28 @@ cargo xtask pack-plugin \
 
 `rutis-cli` 的 dylib 变体可用 `--plugin <目录> --plugin-config '<JSON>'` 装载一个插件。需要代码换代的宿主调用 `Loader::load`、`Loader::spawn` 和 `Loader::swap`；`swap` 复用 rutis 的 `FiberView::update`，消费者会随服务卸载和重新提供而重载。`DylibConfig::new` 的模块身份、名称和依赖声明检查位于工厂内部，直接调用 `view.update` 也不能绕过。加载器每个插件 id 默认最多保留四个已映射版本；旧版本永不 `dlclose`，达到上限后须重启回收。
 
+## 外部构建：SDK 构建包
+
+面向插件作者的完整指南（工作区搭建、代码示例、排错）见
+[外部插件开发指南](external-plugin-guide.md)；本节概要工具链视角。上面的流程需要宿主源码（锚点包进入同一次 Cargo 构建）。没有宿主源码的外部开发者用 **sdk-bundle**：发布流水线在构建运行发布目录后运行
+
+```sh
+cargo xtask pack-sdk-bundle --bundle-dir target/dylib-bundles/<hash> --output <sdk-bundle>
+```
+
+它复制预编译 SDK（Windows 另带 `rutis_sdk.dll.lib` 导入库）、按 `sdk.toml` 的 `packages` 清单收集依赖闭包的编译期产物（**含 proc-macro 的 `.so`**——rustc 递归加载闭包 crate 的完整 rmeta 依赖链），再用一个探针插件逐个变体试删收缩到最小集（Linux 实测 41 个产物、约 60 MB），最后写 `bundle.toml` 文件级哈希清单。`sdk.toml`、`Cargo.lock`、`rust-toolchain.toml`、`cargo-config.toml` 模板与 `GUIDE.md` 一并放入。
+
+插件侧：`Cargo.toml` 不声明 `rutis-sdk`（也不能直接依赖 `rutis`、`tokio`、`tokio-util`、`serde_json`——共享 crate 只能经 `rutis_sdk::` 的再导出使用），共享类型由注入的 `--extern` 解析。打包命令：
+
+```sh
+cargo xtask pack-plugin --bundle <sdk-bundle> \
+  --manifest-path <plugin>/Cargo.toml --features export --output <dist>
+```
+
+打包器先核对 `bundle.toml` 全部文件哈希、`rustc` 完整版本与 `sdk.toml` 一致（版本不符时 rustc 会在元数据加载期报 E0514，早于任何检查）、以及插件 manifest 的直接依赖黑名单（声明共享 crate 在构建前被拒绝，而不是依赖 rustc 的错误码——注入的 `--extern` 出现在 RUSTFLAGS 时，SDK 的 build.rs 白名单会先报"未归类的 RUSTFLAGS 参数"）。环境里已设置 `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` 时打包器直接失败：注入就是通过它们传递的，静默覆盖调用者的 flags 不安全。构建成功后照常执行分配器、weak 导出、`native_deps`、引导节 L1/L2 与 `sdk.toml` 的交叉核对，并按平台核验链接产物（Linux `DT_NEEDED`、macOS `@rpath` 且无 run path、Windows 导入表）。
+
+开发体验：把构建包的 `cargo-config.toml` 放进插件工作区 `.cargo/config.toml` 并改好路径后，`cargo check`/`cargo build` 可用；rust-analyzer 的补全可能不解析 `rutis_sdk::` 路径（注入的 crate 不在 cargo 的 crate graph 里），flycheck 仍走 `cargo check`。SDK 升级后旧插件因 L1/L2 不符被宿主拒绝，须用新构建包重编。Linux 与 macOS 的完整流程由 `tools/test-sdk-bundle.sh` 覆盖（E1/E3/E6/E9），Windows 走 `dylib-windows` 工作流的相同脚本。
+
 ## 验证与边界
 
 本仓库的 Linux 验证命令：
@@ -49,6 +71,7 @@ cargo xtask pack-plugin \
 bash tools/test-dylib.sh
 bash tools/test-dylib-launcher.sh
 bash tools/test-dylib-repro.sh
+bash tools/test-sdk-bundle.sh
 cargo test --workspace
 ```
 

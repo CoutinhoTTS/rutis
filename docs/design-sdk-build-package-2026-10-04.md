@@ -51,14 +51,23 @@ sdk-bundle-<target>-<sdk-version>/
   sdk.toml           SDK 身份与构建诊断
   lib/               librutis_sdk.so / .dylib / rutis_sdk.dll
                      Windows：rutis_sdk.dll.lib 与 .dll 同目录同名
-  deps/*.rlib        SDK 依赖闭包的 rlib（--extern 解析 SDK 元数据后，
-                     rustc 递归要求的最小集合，E0 确定；不含 proc-macro
-                     宿主产物；std 元数据来自固定工具链 sysroot，不进包）
+  deps/              SDK 依赖闭包的编译期产物（E0 实测见 §六：rlib 与
+                     proc-macro 的 .so 都要——rustc 递归加载闭包 crate 的
+                     完整 rmeta 依赖链，闭包 crate 依赖的 proc-macro 也在内；
+                     std 元数据来自固定工具链 sysroot，不进包）
   Cargo.lock         SDK 构建的锁文件（诊断与复核 packages 用）
   rust-toolchain.toml 固定 1.98.1
   cargo-config.toml  .cargo/config.toml 注入模板
   GUIDE.md           插件作者指南
 ```
+
+**闭包收集与收缩（E0 定案）**：收集器按 `sdk.toml` 的 `packages` 包名，从锚点构建的
+`target/release/deps` 拷贝每个包的**全部同名变体**（`.rlib` 与 proc-macro 的 `.so`；
+多变体共存时 rustc 按 crate disambiguator 自动挑选，不冲突），随后用**收缩轮**去重：
+逐个变体移走重试构建，能通过即删除。发布产物只留被选中的变体（E0 实测收缩后
+41 个文件、60.1 MB，其中 4 个是 proc-macro 的 .so）。收缩轮在发布流水线内执行，
+约两三百次增量编译，分钟级。
+
 
 **`bundle.toml`（包级清单）**：`format_version`（构建包格式自身版本）、关联的 SDK
 `version/L1/L2`、**每个文件（含闭包 rlib、导入库、模板）的 sha256**。完整性靠这份清单
@@ -157,18 +166,57 @@ unresolved——如实测量并记录（E8c），不作为验收承诺。
 | # | 内容 | 判定 |
 | --- | --- | --- |
 | E0 | **最小闭包与注入形式（三平台）**：以发布 SDK 实测 rustc 递归要求的 rlib 集合（按元数据依赖图）；`.rmeta` 是否够（build 模式预期不够）；sysroot std 元数据可用性；Windows `--extern` 指向 `.dll` + 同目录 `.dll.lib` 的链接；闭包体积数据 | 每项结论记入本稿；闭包集合成为收集器规格 |
-| E1 | Linux：独立工作区（无宿主源码、不在仓库内），构建包 + `--bundle` 构建 greeter 等价插件；发布宿主加载，v1→v2 换代、消费者重载；§四第 5 步链接产物核验 | 与 `test-dylib.sh` 同口径 |
+| E1 | Linux：独立工作区（无宿主源码、不在仓库内），构建包 + `--bundle` 构建 greeter 等价插件；发布宿主加载；§四第 5 步链接产物核验。**口径说明**：v1→v2 换代与消费者重载由 `test-dylib.sh` 在共享的 Loader 路径上覆盖；本测试用 `rutis-cli --load-only` 分别加载 v1/v2，证明外部构建产物通过宿主的全部身份、依赖与生命周期检查 | 加载成功且检查全过 |
 | E2 | 私有依赖矩阵：SDK 树外 crate（`base64`）→ 正常；直接依赖 `serde_json` → 前置拒绝；间接引入同版本不同 feature → 行为记录；间接引入 feature 全同 → 预期拒绝/警告，行为记录 | 每格结论记入 §五 |
-| E3 | 前置检查：声明 `rutis-sdk`（含声明未引用）、传递引入 SDK 源码、直接依赖共享 crate → 构建前失败，信息含包名与引入路径 | 拒绝发生在调用 rustc 前 |
+| E3 | 前置检查：声明 `rutis-sdk`（含声明未引用、含 `package =` 重命名）、传递引入 SDK 源码、直接依赖共享 crate → 构建前失败，信息含包名与引入路径 | 拒绝发生在调用 rustc 前 |
 | E4 | macOS：E1 等价（arm64、`@rpath`、quarantine、无 run path、两级命名空间） | 同 E1 |
-| E5 | Windows：E1 等价（导入库来自构建包；导入表核验；GUIDE 的静态初始化禁则带最小失败测试） | 同 E1 |
+| E5 | Windows：E1 等价（导入库来自构建包；导入表核验） | 同 E1 |
 | E6 | 篡改：SDK dylib 改一字节、闭包 rlib 改一字节、`bundle.toml` 缺件/哈希不符、用锚点模式自建 SDK 冒充 → 全部拒绝，错误可读 | 拒绝在构建/`dlopen` 前 |
 | E7 | 工具链：非 1.98.1 构建 → 第 1 步 rustc 版本核对失败，信息提示用包内 `rust-toolchain.toml`；不出现 E0514 | 版本核对先于一切 |
 | E8 | 开发体验拆分：E8a 干净环境（无 RUSTFLAGS）`cargo check`/`build` 通过；E8b 环境带 `RUSTFLAGS` → 打包器立即失败并说明覆盖规则；E8c rust-analyzer 行为实测记录（不承诺补全） | E8a/E8b 可验收，E8c 仅记录 |
 | E9 | 闭包缺失/损坏（删一个 rlib）→ 可读错误，指向缺失的 crate（不是误导性 E0463 指向 rutis_sdk） | 错误可读 |
 
-CI：`dylib-linux`、`dylib-macos` 增加 bundle 作业（产出构建包 → 独立临时工作区构建夹具
-插件 → `loader_host` 加载换代）；Windows 走 `dylib-windows` 现有触发条件。
+CI：三个 dylib 作业各加一步 `tools/test-sdk-bundle.sh`（产出构建包 → 独立临时工作区
+构建插件 → `rutis-cli --load-only` 加载 → 拒绝路径断言）。
+
+### E0 记录（2026-10-04，Linux x64，SDK 0.5.0 / L2 `a1064b9e…`）
+
+- 注入形式成立：`--extern rutis_sdk=<发布 dylib>` + `-L dependency=<deps/>`，插件
+  Cargo.toml 不声明 rutis-sdk 依赖，独立工作区编译链接通过；产物 `DT_NEEDED` 只含
+  `librutis_sdk.so`、`libstd-<hash>.so` 与系统库，无 run path，引导节 L1/L2 与
+  `sdk.toml` 一致。
+- **闭包按 rmeta 依赖链完整递归，proc-macro 产物必须随包**：只带 rlib 时 E0463
+  （`futures_macro`、`tokio_macros`、`thiserror_impl` 等被 rustc 打开）。缺任何一项的
+  报错都只有误导性的 `can't find crate for rutis_sdk`，无 note；闭包完整性必须由打包器
+  按 `bundle.toml` 清单自查（对应 E9 的可读错误）。
+- 同名多变体共存不冲突：rustc 按 disambiguator 挑选。收缩后最小集 **41 个产物
+  （37 rlib + 4 个 proc-macro .so）、60.1 MB**（见 §三收集与收缩）。
+- sysroot std 元数据满足 SDK dylib 的 std 依赖（固定工具链即可，std 不进包）。
+- rustc 版本先于一切：1.97.1 工具链下最先报 `E0514`，先于任何 E0463。
+- E1 等价链路通过：收缩集构建的插件被发布宿主（`rutis-cli --plugin`）加载，L1/L2/boot
+  校验通过，初始化与 apply（含 `rutis_sdk::tokio::spawn` 在宿主运行时）执行。
+
+**平台补测（2026-10-04，CI，E4/E5）**：macOS 与 Windows 全流程通过。平台差异已按实测
+处理：proc-macro 产物为 `lib<crate>-<hash>.dylib`（macOS）与**无 lib 前缀的**
+`<crate>-<hash>.dll`（Windows）；Windows 动态 std 名为 `std-<hash>.dll`；导入库
+`rutis_sdk.dll.lib` 随包，`--extern` 指向 `.dll` 并由同目录导入库完成链接；Windows
+收缩后 46 个产物。另发现并修复：`rutis-cli` 的 TUI 主循环在无输入的 Windows console
+上永不退出，新增 `--load-only`（加载、apply 后在创建 TUI 前返回）作为插件验证模式。
+
+### E2 记录（2026-10-04，Linux x64）
+
+| 场景 | 结果 |
+| --- | --- |
+| 私有依赖在 SDK 树外（`base64`） | 编译、打包、发布宿主加载全部通过 |
+| 私有 `serde`（derive），副本与闭包共存 | 编译加载通过；**跨副本 trait 不可混用**——私有类型的 `serde::Serialize` 不是闭包内 serde_json 要求的 trait，编译期 E0277 拒绝（§五规则的实证：跨界数据走 `json!`/`ConfigValue`，私有类型不出现在 SDK API 边界） |
+| 私有 `serde`（无 derive） | 正常；SDK 闭包实际只含 `serde_core`/`serde_json`，与插件侧 `serde` 零重叠 |
+| 私有依赖间接拉 `tokio`（`tokio-stream`）且**代码引用其 API** | 编译期失败。**错误形态不稳定**：`colliding StableCrateId`（先撞 `pin_project_lite`：传递依赖 feature 全同 → 同 disambiguator，此时打包器附加指明出路的解释）或无注解的 `E0463`（报找不到私有 crate 本身），两种形态含义相同 |
+| 同上，仅声明依赖不引用 API | 不加载副本元数据，不触发冲突，正常通过——冲突检测以实际引用为准 |
+
+结论：§五的共存规则与拒绝语义全部按设计工作；间接重叠的拒绝点是 rustc 的编译期冲突。
+`colliding StableCrateId` 形态由打包器附加指明出路的解释；`E0463` 形态无法可靠区分于
+其他缺 crate 场景，不加注解（E2a/E2d 断言两种形态并要求错误点名重叠的 crate；B/C
+场景的行为记录于此）。
 
 ## 七、实施步骤
 

@@ -35,6 +35,7 @@ OPTIONS:
         --scripted        offline demo backend (no API key needed)
         --plugin <DIR>    load a trusted dylib plugin [dylib-plugins build only]
         --plugin-config <JSON>   configuration passed to the dylib plugin
+        --load-only       with --plugin: load, apply and exit (no TUI) [dylib-plugins build only]
     -h, --help            print this help
     -V, --version         print the version
         --sdk-info        print dylib SDK build identity [dylib-plugins build only]
@@ -102,7 +103,11 @@ mod bundle_env_tests {
 
     #[test]
     fn child_environment_recovers_callers_loader_values() {
-        let p = if cfg!(target_os = "macos") { "DYLD_" } else { "LD_" };
+        let p = if cfg!(target_os = "macos") {
+            "DYLD_"
+        } else {
+            "LD_"
+        };
         let library_path = format!("{p}LIBRARY_PATH");
         let other = format!("{p}PRELOAD");
         let saved_library_path = format!("RUTIS_ORIG_{library_path}");
@@ -133,6 +138,10 @@ async fn cli_main() {
     let mut provider = std::env::var("AIMUX_PROVIDER").unwrap_or_else(|_| "deepseek".into());
     let mut model = std::env::var("AIMUX_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
     let mut scripted = false;
+    #[cfg(feature = "dylib-plugins")]
+    let mut load_only = false;
+    #[cfg(not(feature = "dylib-plugins"))]
+    let load_only = false;
     let mut plugin: Option<String> = None;
     let mut plugin_config = serde_json::Value::Null;
     let mut args = std::env::args().skip(1);
@@ -141,6 +150,8 @@ async fn cli_main() {
             "-p" | "--provider" => provider = value(&mut args, &arg),
             "-m" | "--model" => model = value(&mut args, &arg),
             "--scripted" => scripted = true,
+            #[cfg(feature = "dylib-plugins")]
+            "--load-only" => load_only = true,
             #[cfg(feature = "dylib-plugins")]
             "--sdk-info" => {
                 println!("[sdk]\nversion = {:?}\nid = {:?}\nartifact_sha256 = {:?}\ntarget = {:?}\nrustc = {:?}",
@@ -196,13 +207,18 @@ async fn cli_main() {
             }
         }
     };
+    #[cfg(feature = "dylib-plugins")]
+    if load_only && plugin.is_none() {
+        eprintln!("--load-only needs --plugin <DIR> (there is nothing to load)");
+        std::process::exit(2);
+    }
     let model_id = if scripted {
         "scripted".to_string()
     } else {
         model.clone()
     };
 
-    if let Err(e) = run(llm, &provider, &model_id, plugin, plugin_config).await {
+    if let Err(e) = run(llm, &provider, &model_id, plugin, plugin_config, load_only).await {
         eprintln!("rutis-cli failed: {e}");
         std::process::exit(1);
     }
@@ -224,6 +240,7 @@ async fn run(
     model: &str,
     plugin: Option<String>,
     plugin_config: serde_json::Value,
+    load_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -246,12 +263,18 @@ async fn run(
         let module = unsafe { loader.load(dir)? };
         let view = loader.spawn(&root, &module, plugin_config)?;
         (&view).await?;
+        if load_only {
+            // A plugin verification mode: load, construct and apply, then
+            // exit without starting the TUI. The TUI main loop waits for
+            // input, which hangs on consoles without one (CI).
+            return Ok(());
+        }
         Some(view)
     } else {
         None
     };
     #[cfg(not(feature = "dylib-plugins"))]
-    let _ = plugin_config;
+    let _ = (plugin_config, load_only);
 
     // session 持久化(默认 <cwd>/.rutis/session.json,重启恢复历史)
     let tools_view = root.plugin(ToolsPlugin::new(minimal_tools()));
