@@ -259,6 +259,28 @@ fi
 grep -Fq 'declares rutis-sdk (dependencies)' "$base/e3c.stdout"
 grep -Fq 'bad-transitive' "$base/e3c.stdout" || grep -Fq 'rutis-sdk' "$base/e3c.stdout"
 
+# E3d: a shared crate declared under [dev-dependencies] or
+# [build-dependencies] is rejected too — it resolves into the same graph
+# and collides with the SDK closure on `cargo check` or when build.rs
+# touches it.
+for section in dev-dependencies build-dependencies; do
+  cat > "$base/bad-manifest/Cargo.toml" <<EOF
+[package]
+name = "bad-manifest"
+version = "0.1.0"
+edition = "2021"
+
+[$section]
+tokio = "1"
+EOF
+  if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin --manifest-path "$base/bad-manifest/Cargo.toml" \
+    --bundle "$base/sdk-bundle" --output "$base/bad-out" > "$base/e3d.stdout" 2>&1; then
+    echo "a shared crate under [$section] was accepted" >&2
+    exit 1
+  fi
+  grep -Fq "tokio ($section)" "$base/e3d.stdout"
+done
+
 # E6: a modified closure file is rejected against the bundle manifest.
 echo "[sdk-bundle-test] E6: a modified closure file is rejected"
 cp -a "$base/sdk-bundle" "$base/tampered"

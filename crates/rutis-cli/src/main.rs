@@ -152,6 +152,11 @@ async fn cli_main() {
             "--scripted" => scripted = true,
             #[cfg(feature = "dylib-plugins")]
             "--load-only" => load_only = true,
+            #[cfg(not(feature = "dylib-plugins"))]
+            "--load-only" => {
+                eprintln!("--load-only requires a dylib-plugins build");
+                std::process::exit(2);
+            }
             #[cfg(feature = "dylib-plugins")]
             "--sdk-info" => {
                 println!("[sdk]\nversion = {:?}\nid = {:?}\nartifact_sha256 = {:?}\ntarget = {:?}\nrustc = {:?}",
