@@ -1,0 +1,14 @@
+[package]
+name = "rutis-bridge"
+description = "Connecting rutis to other processes and machines: the Transport service that transport plugins provide"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["rutis", "transport", "interop", "bridge"]
+categories = ["network-programming"]
+
+[dependencies]
+rutis = { path = "../rutis", version = "0.6.0" }
+rutis-channel = { path = "../rutis-channel", version = "0.1.0" }

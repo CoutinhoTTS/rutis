@@ -1,0 +1,13 @@
+[package]
+name = "rutis-channel"
+description = "The channel contract of rutis interop sessions: ordered, reliable, message-preserving duplex channels and their connection errors"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["rutis", "channel", "ipc", "interop"]
+categories = ["network-programming"]
+
+[dependencies]
+thiserror.workspace = true

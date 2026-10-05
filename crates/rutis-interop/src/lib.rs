@@ -45,16 +45,18 @@ mod objects;
 mod process;
 #[cfg(unix)]
 mod projection;
-#[cfg(unix)]
 mod protocol;
 #[cfg(unix)]
 mod rows;
-#[cfg(unix)]
 pub mod rpc;
 #[cfg(unix)]
 mod runtime;
 #[cfg(unix)]
 pub mod server;
+#[cfg(unix)]
+mod spawn;
+#[cfg(unix)]
+mod unix;
 
 #[cfg(unix)]
 pub use events::{EmitToCordis, EventSink, Events};
@@ -74,6 +76,7 @@ pub use runtime::{
     host_key, CordisRuntime, CordisRuntimePlugin, Runtime, RuntimeHandle, RuntimePlugin,
     RuntimeState,
 };
+pub use rutis_channel as channel;
 pub use serde;
 pub use serde_json;
 
@@ -96,6 +99,15 @@ pub enum Error {
 impl From<Error> for rutis::CordisError {
     fn from(error: Error) -> Self {
         Self::PluginFailed(Box::new(error))
+    }
+}
+
+/// An error raised on the Rust side, as the other side sees it.
+pub fn native_error(error: impl std::fmt::Display) -> Error {
+    Error::Remote {
+        name: "RustError".into(),
+        message: error.to_string(),
+        graph: None,
     }
 }
 

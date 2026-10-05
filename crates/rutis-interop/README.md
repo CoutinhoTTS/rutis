@@ -171,6 +171,8 @@ let view = root.plugin(runtime);
 
 Python 运行时只跑"叶子插件"：插件有 `apply(ctx, config)`，在里面用服务（`ctx.use`）、提供服务（`ctx.provide`），返回清理函数；依赖、启停顺序和重启都由 rutis 决定。它在 `mount` 时报告 `leaf` 特性，rutis-loader 据此让插件 `inject` 的每个名字都在 rutis 里门控。
 
+会话不依赖具体通道：`rpc::Connection::open(channel, dispatch)` 可以建立在任意 [`rutis-channel`](../rutis-channel) 的 `Channel` 上（有序、可靠、保持消息边界）。本机运行时进程仍走 Unix socket、逐行 JSON，线格式不变；`Connection::connect(UnixStream, …)` 保留为它的简写。
+
 同一个进程里的插件互相使用服务时直接拿到对象本身，不走进程间通信。跨进程的调用经 Rust 转发，同步调用链会按会话改写（`rpc::rebase`），回调能回到正在等待的线程。
 
 **同步调用与可重入**：Node 运行时在同步等待期间只执行属于这条调用链的进来调用，其他调用延后。Python 运行时在同步等待期间也执行其他进来的调用：否则两个运行时同时同步调用对方的服务时，会互相等待对方先返回而卡死。所以 Python 插件的服务可能在它自己正处于一次同步调用之中时被调用，不要在调用 rutis 的服务时持有锁。两个 Node 运行时之间互相同步调用仍可能卡死，跨运行时的高频或可能交叉的调用请用异步方法。

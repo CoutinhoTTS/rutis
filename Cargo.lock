@@ -2841,6 +2841,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rutis-bridge"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-channel",
+]
+
+[[package]]
+name = "rutis-channel"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rutis-cli"
 version = "0.6.0"
 dependencies = [
@@ -2946,6 +2961,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rutis",
+ "rutis-channel",
  "serde",
  "serde_json",
  "syn 2.0.119",
@@ -2979,6 +2995,29 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rutis-transport-local"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-bridge",
+ "rutis-channel",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rutis-transport-memory"
+version = "0.1.0"
+dependencies = [
+ "rutis",
+ "rutis-bridge",
+ "rutis-channel",
+ "rutis-interop",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

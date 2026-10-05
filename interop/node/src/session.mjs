@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFileSync } from 'node:fs'
-import { encode } from './wire.mjs'
+import { encode } from './codec.mjs'
 import { encodeError, decodeError } from './errors.mjs'
 
 // Values with behaviour cross by reference, so their identity and state stay
@@ -53,7 +53,7 @@ class RemotePromise extends Promise {
 // One peer is used by both the Cordis runner and the application's Rust client.
 // The transport owns I/O; every decoder, reference table and callback stays on
 // the owning JS thread, including while a synchronous caller pumps its chain.
-export class Peer {
+export class Session {
   #send; #pump; #dispatch; #abort; #settled
   #next = 0; #received = 0; #ref = 0; #pending = new Map(); #exports = new Map(); #identities = new WeakMap()
   #imports = new Map(); #proxies = new WeakMap(); #finalizer

@@ -1,5 +1,7 @@
 use super::*;
 use serde_json::json;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct NoExports;
@@ -226,7 +228,7 @@ async fn explicit_close_interrupts_a_writer_whose_peer_stopped_reading() {
     let writer = std::thread::spawn(move || {
         let mut stream = writing.0.writer.lock().unwrap();
         entered.send(()).unwrap();
-        stream.write_all(&vec![0; 8 * 1024 * 1024])
+        stream.send(&vec![b'x'; 8 * 1024 * 1024])
     });
     blocked.recv().unwrap();
     peer.close(Error::Transport("explicit close".into()));

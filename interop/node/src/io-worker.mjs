@@ -1,10 +1,12 @@
 import { workerData } from 'node:worker_threads'
-import { createServer, createConnection } from 'node:net'
+import { createServer } from 'node:net'
 import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createInterface } from 'node:readline'
+import { open } from './channel/index.mjs'
+import { frame } from './channel/unix.mjs'
+import { decode } from './codec.mjs'
 
 const { executable, socketPath, port, signal } = workerData
 function send(message) {
@@ -17,21 +19,30 @@ function send(message) {
 // an uncaught worker failure before Node terminates the communication thread.
 process.on('uncaughtExceptionMonitor', error => send({ closed: error.message }))
 
-let directory, server, child, stream, exited
+let directory, server, child, channel, exited
 let failure = 'Rust process disconnected'
 let disposing = false
 port.on('message', message => {
-  if (message.abort) { child?.kill(); stream?.destroy(); return }
+  if (message.abort) { child?.kill(); channel?.close(); return }
   if (message.dispose) disposing = true
-  if (message.end) { stream?.end(); return }
-  if (message.frame) stream?.write(message.frame)
+  if (message.end) { channel?.end(); return }
+  if (message.frame) channel?.send(message.frame)
 })
 
 try {
+  let ended
+  const done = new Promise(resolve => { ended = resolve })
+  const handlers = {
+    message: text => {
+      try { send(decode(text)) } catch (error) { channel.close(error.message) }
+    },
+    closed: reason => { if (reason) failure = reason; ended() },
+  }
   if (socketPath) {
-    stream = createConnection(socketPath)
-    await new Promise((resolve, reject) => { stream.once('connect', resolve); stream.once('error', reject) })
+    channel = await open(socketPath, handlers)
   } else {
+    // The frozen reverse direction: listen, then start the Rust process,
+    // which dials back.
     directory = await mkdtemp(join(tmpdir(), 'rutis-mount-'))
     const socket = join(directory, 'peer.sock')
     server = createServer()
@@ -42,22 +53,19 @@ try {
       child.once('error', reject)
       child.once('close', (code, signal) => resolve({ code, signal }))
     })
-    stream = await Promise.race([connected, exited.then(status => { throw new Error(`Rust process exited before connecting (${status.code ?? status.signal})`) })])
+    const stream = await Promise.race([connected, exited.then(status => { throw new Error(`Rust process exited before connecting (${status.code ?? status.signal})`) })])
     server.close()
+    channel = frame(stream, handlers)
   }
-  stream.on('error', error => { failure = error.message })
-  const lines = createInterface({ input: stream })
-  lines.on('error', error => { failure = error.message; stream.destroy() })
-  stream.once('close', () => lines.close())
   send({ ready: true, pid: child?.pid })
-  for await (const line of lines) send(JSON.parse(line))
+  await done
   if (child && !disposing && child.exitCode === null && child.signalCode === null) child.kill()
   const status = await exited
   if (status && status.code !== 0) failure = `Rust process exited (${status.code ?? status.signal})`
 } catch (error) {
   failure = error.message
 } finally {
-  stream?.destroy()
+  channel?.close()
   server?.close()
   if (child && child.exitCode === null && child.signalCode === null) child.kill()
   await exited?.catch(() => {})
