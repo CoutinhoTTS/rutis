@@ -46,6 +46,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # WebSocket channels of the Python runtime (rutis-runtime[network]).
+      - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
         working-directory: interop/python
 

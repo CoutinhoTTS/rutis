@@ -186,12 +186,73 @@ impl Dispatch for Imports {
     }
 }
 
+/// A mount's parts, once split from where the process comes from.
+struct Started {
+    plugins: Vec<(std::path::PathBuf, Value)>,
+    services: Value,
+    events: Option<Arc<dyn ServiceEvents>>,
+    hosts: HashMap<String, HostEntry>,
+    forwarded: Option<Arc<dyn EventSink>>,
+    forwarded_names: Vec<String>,
+    emits: Vec<String>,
+    provided: serde_json::Map<String, Value>,
+}
+
+impl Started {
+    /// The parts, and the plugins as given (the first names what to start).
+    fn from(mount: Mount<'_>) -> (Self, Vec<(&Path, Value)>) {
+        let Mount {
+            plugins,
+            services,
+            observer: events,
+            hosts,
+            events: forwarded,
+            emits,
+            anchor: _,
+            launcher: _,
+        } = mount;
+        let (forwarded_names, forwarded) = match forwarded {
+            Some((names, sink)) => (names, Some(sink)),
+            None => (Vec::new(), None),
+        };
+        let provided = hosts
+            .iter()
+            .map(|host| (host.name.clone(), host.methods.clone()))
+            .collect();
+        let hosts = hosts
+            .into_iter()
+            .map(|host| {
+                let entry = HostEntry {
+                    dispatch: host.dispatch,
+                    leases: 1,
+                };
+                (host.name, entry)
+            })
+            .collect();
+        let started = Self {
+            plugins: plugins
+                .iter()
+                .map(|(entry, config)| (entry.to_path_buf(), config.clone()))
+                .collect(),
+            services,
+            events,
+            hosts,
+            forwarded,
+            forwarded_names,
+            emits,
+            provided,
+        };
+        (started, plugins)
+    }
+}
+
 /// Owns one native Cordis process and its generated service bindings.
 pub struct Process {
     peer: Connection,
     imports: Arc<Imports>,
     runtime: tokio::runtime::Handle,
-    child: crate::spawn::Child,
+    /// The process this side started; `None` for an attached runtime.
+    child: Option<crate::spawn::Child>,
     /// Reported by the runner when mounting.
     features: std::sync::OnceLock<Vec<String>>,
     /// The services each loaded row exports, by row key.
@@ -294,34 +355,8 @@ impl Process {
 
     /// Launch a mount: see [`Mount`].
     pub async fn mount(node_package: &Path, mount: Mount<'_>) -> Result<Arc<Self>, Error> {
-        let Mount {
-            plugins,
-            services,
-            observer: events,
-            hosts,
-            events: forwarded,
-            emits,
-            anchor,
-            launcher,
-        } = mount;
-        let (forwarded_names, forwarded) = match forwarded {
-            Some((names, sink)) => (names, Some(sink)),
-            None => (Vec::new(), None),
-        };
-        let provided: serde_json::Map<String, Value> = hosts
-            .iter()
-            .map(|host| (host.name.clone(), host.methods.clone()))
-            .collect();
-        let hosts = hosts
-            .into_iter()
-            .map(|host| {
-                let entry = HostEntry {
-                    dispatch: host.dispatch,
-                    leases: 1,
-                };
-                (host.name, entry)
-            })
-            .collect();
+        let (anchor, launcher) = (mount.anchor, mount.launcher);
+        let (started, plugins) = Started::from(mount);
         let plugin = match (plugins.first(), anchor) {
             (Some((plugin, _)), _) => *plugin,
             (None, Some(anchor)) => anchor,
@@ -331,10 +366,6 @@ impl Process {
                 ))
             }
         };
-        let plugins: Vec<Value> = plugins
-            .iter()
-            .map(|(entry, config)| json!({ "entry": entry, "config": config }))
-            .collect();
         let (command, connect) = match launcher {
             Some(launcher) => {
                 let mut command = tokio::process::Command::new(&launcher.program);
@@ -371,6 +402,48 @@ impl Process {
             }
         };
         let spawned = crate::spawn::spawn(command, plugin, connect).await?;
+        Self::start(
+            spawned.channel,
+            Some(spawned.child),
+            spawned.directory,
+            started,
+        )
+        .await
+    }
+
+    /// Run a mount on a runtime that is already connected: `channel` leads
+    /// to a runtime process this side did not start (for example one that
+    /// listens on a WebSocket and was dialed). [`Mount::launcher`] and
+    /// [`Mount::anchor`] do not apply: that process was started with its own.
+    /// It has no exit status here, and its end is the session's end.
+    pub async fn attach(
+        channel: rutis_channel::Channel,
+        mount: Mount<'_>,
+    ) -> Result<Arc<Self>, Error> {
+        let (started, _) = Started::from(mount);
+        Self::start(channel, None, None, started).await
+    }
+
+    async fn start(
+        channel: rutis_channel::Channel,
+        child: Option<crate::spawn::Child>,
+        directory: Option<tempfile::TempDir>,
+        started: Started,
+    ) -> Result<Arc<Self>, Error> {
+        let Started {
+            plugins,
+            services,
+            events,
+            hosts,
+            forwarded,
+            forwarded_names,
+            emits,
+            provided,
+        } = started;
+        let plugins: Vec<Value> = plugins
+            .iter()
+            .map(|(entry, config)| json!({ "entry": entry, "config": config }))
+            .collect();
         let imports = Arc::new(Imports {
             slots: Slots::default(),
             events,
@@ -378,8 +451,7 @@ impl Process {
             hosts: Mutex::new(hosts),
             forwarded,
         });
-        let child = spawned.child;
-        let peer = Connection::open(spawned.channel, imports.clone())?;
+        let peer = Connection::open(channel, imports.clone())?;
         peer.ready().await?;
         let process = Arc::new(Self {
             peer,
@@ -389,7 +461,7 @@ impl Process {
             features: std::sync::OnceLock::new(),
             exports: Mutex::default(),
             host_changes: tokio::sync::Mutex::new(()),
-            _directory: spawned.directory,
+            _directory: directory,
         });
         let mounted = process
             .call_async(
@@ -707,7 +779,10 @@ impl Process {
         let result = self.call_async("", "dispose", Value::Null).await;
         self.peer
             .close(Error::Transport("plugin has been disposed".into()));
-        let status = self.child.exited().await;
+        let Some(child) = &self.child else {
+            return result.map(|_| ());
+        };
+        let status = child.exited().await;
         result?;
         if status != "exited normally" {
             return Err(Error::Transport(format!("Cordis process {status}")));
@@ -718,7 +793,7 @@ impl Process {
     /// How the Node process ended (for example `exited with signal: 9
     /// (SIGKILL)`), or `None` while it runs.
     pub fn exit_status(&self) -> Option<String> {
-        self.child.status()
+        self.child.as_ref().and_then(|child| child.status())
     }
 
     /// Resolves once the session with the Node process has ended, whether

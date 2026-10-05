@@ -22,11 +22,14 @@ import contextvars
 import dataclasses
 import json
 import re
+import socket
 import sys
 import threading
 import traceback
 import weakref
 from typing import Any, Callable
+
+from .channel import SocketChannel
 
 PROTOCOL = 2
 MAX_SAFE = 9_007_199_254_740_991
@@ -113,7 +116,9 @@ def decode_error(failure: dict) -> RemoteError:
 
 
 def dumps(frame: dict) -> bytes:
-    return (json.dumps(frame, separators=(",", ":"), allow_nan=False) + "\n").encode()
+    """Compact JSON; newlines inside strings are escaped, so a frame never
+    contains a raw one. The channel frames it."""
+    return json.dumps(frame, separators=(",", ":"), allow_nan=False).encode()
 
 
 _DATA = (type(None), bool, int, float, str)
@@ -244,7 +249,7 @@ class Peer:
 
     def __init__(
         self,
-        sock,
+        channel,
         dispatch: Callable,
         settled: Callable | None = None,
         reentrant: bool = True,
@@ -252,7 +257,8 @@ class Peer:
         self._reentrant = reentrant
         self.loop = asyncio.get_running_loop()
         self._thread = threading.get_ident()
-        self._sock = sock
+        # A socket is a newline-framed channel.
+        self._channel = SocketChannel(channel) if isinstance(channel, socket.socket) else channel
         self._write_lock = threading.Lock()
         self._dispatch = dispatch
         self._settled = settled
@@ -289,11 +295,9 @@ class Peer:
         self._send({"op": "hello", "version": PROTOCOL})
 
     def _read(self) -> None:
-        stream = self._sock.makefile("rb")
         try:
-            for line in stream:
-                frame = json.loads(line)
-                self._deliver(frame)
+            while (message := self._channel.recv()) is not None:
+                self._deliver(json.loads(message))
         except Exception as error:  # noqa: BLE001 - any failure ends the session
             self._deliver((_CLOSED, f"session failed: {error}"))
             return
@@ -329,7 +333,7 @@ class Peer:
             raise self.closed_error
         data = dumps(frame)
         with self._write_lock:
-            self._sock.sendall(data)
+            self._channel.send(data)
 
     def close(self, error: BaseException | None = None) -> None:
         if self.closed_error is not None:
@@ -355,7 +359,7 @@ class Peer:
     def _fault(self, error: BaseException) -> None:
         self.close(error)
         try:
-            self._sock.close()
+            self._channel.close(str(error))
         except OSError:
             pass
 
@@ -540,7 +544,7 @@ class Peer:
             if self.closed_error is not None:
                 raise self.closed_error
             with self._write_lock:
-                self._sock.sendall(data)
+                self._channel.send(data)
         except BaseException:
             self._pending.pop(call, None)
             self._rollback(grants)
@@ -828,7 +832,7 @@ class Peer:
                 self._rollback(grants)
                 data = dumps({"op": "throw", "id": call, "error": encode_error(error)})
             with self._write_lock:
-                self._sock.sendall(data)
+                self._channel.send(data)
         except Exception as error:  # noqa: BLE001
             self._fault(error)
         finally:

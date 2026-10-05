@@ -150,6 +150,7 @@ fn traced(channel: Channel) -> Channel {
 /// Whether the Node runtime package at `package` takes an inherited channel:
 /// its `package.json` lists `"fd"` in `rutisChannels`. Older packages do
 /// not, and dial back.
+#[cfg(feature = "node")]
 pub(crate) fn node_connect(package: &Path) -> Connect {
     let channels = std::fs::read(package.join("package.json"))
         .ok()

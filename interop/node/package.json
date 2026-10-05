@@ -10,7 +10,10 @@
   },
   "homepage": "https://github.com/arcships/rutis/tree/main/crates/rutis-interop#readme",
   "rutisProtocol": 2,
-  "rutisChannels": ["unix", "fd"],
+  "rutisChannels": [
+    "unix",
+    "fd"
+  ],
   "type": "module",
   "exports": {
     "./plugin": {
@@ -34,6 +37,7 @@
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.4",
     "tsx": "^4.20.0",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "ws": "^8.22.0"
   }
 }

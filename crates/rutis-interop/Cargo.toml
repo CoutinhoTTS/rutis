@@ -36,5 +36,7 @@ python = []
 libc = "0.2"
 
 [dev-dependencies]
+rutis-bridge = { path = "../rutis-bridge" }
+rutis-transport-websocket = { path = "../rutis-transport-websocket" }
 rutis-channel = { path = "../rutis-channel", features = ["testing"] }
 rutis-transport-memory = { path = "../rutis-transport-memory" }

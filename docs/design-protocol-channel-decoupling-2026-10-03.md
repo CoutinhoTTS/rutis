@@ -115,7 +115,7 @@ Node 通道在 I/O worker 内提供等价接口：
 // 建立失败另行返回结构化 ConnectError，不通过 closed(reason) 推断。
 ```
 
-- 通道规格：`unix:<path>`、`fd:<n>`、`wss://…`；裸路径等同 `unix:`。
+- 通道规格：`unix:<path>`、`fd:<n>`、`ws://…`（仅回环）/`wss://…`、`listen:ws://…`/`listen:wss://…`；裸路径等同 `unix:`。`listen:` 用于运行时等待控制方拨入，接受第一条通过鉴权的连接；凭据、CA、证书与私钥经环境变量 `RUTIS_INTEROP_TOKEN`、`RUTIS_INTEROP_CA`、`RUTIS_INTEROP_CERT`、`RUTIS_INTEROP_KEY` 传入，不进入通道规格、URL 或命令行。Python 运行时的 WebSocket 接入为可选依赖 `rutis-runtime[network]`。
 - 主线程与 worker 沿用 MessagePort + `Atomics` 交接；主线程同步等待时，worker 继续收发和处理心跳。
 - 会话使用不带换行的 `codec.encode`；worker 可调用 `codec.decode`，通道模块不决定编码。
 - JS 接受 WebSocket 连接时使用支持服务端的依赖（如 `ws`）；仅拨号不要求服务端能力。
@@ -152,7 +152,7 @@ Node 通道在 I/O worker 内提供等价接口：
 | `spawn`（路径） | 临时目录 socket、子进程回拨；保留兼容 |
 | `unix::connect` / `unix::listen` | 每次产出一个 `Channel`；用于工具及冻结的反方向 |
 | `memory::pair` | 两条首尾相连的 `Channel`；用于测试或进程内端点 |
-| WebSocket `dial` / `listen` | 每次连接产出 `Channel`，身份放入 `ChannelInfo.peer`；心跳在通道内部；`dial` 只尝试一次 |
+| WebSocket `dial` / `listen` | 每次连接产出 `Channel`，身份放入 `ChannelInfo.peer`；心跳在通道内部；`dial` 只尝试一次。拨号请求为 `Dial { address, peer, identity, protocol }`：`protocol` 是会话协议名，由上层传入，承载只核对，不认识会话版本 |
 
 连接器每次调用只报告一次逻辑 Channel 建立结果，不自行重试失败的会话接入、不替换会话、不决定 link 会话就绪。Adapter 可内部管理物理连接池与连接维护；单次建立必须可取消，内部维护不得演变为无限等待或另一个会话重连循环。link 完成身份核对和协议握手后才进入会话就绪状态；此状态不表示 loader 的 schema 或行已就绪。两阶段行就绪由 loader 侧配套插件独立完成，不作为 link 的握手或就绪条件。卸载承载或身份依赖时，link 按框架原生门控停止、撤销注册并清理连接；配套插件清理其管理的行。
 
@@ -182,7 +182,7 @@ pub enum ConnectError {
 
 ### 共享监听器注册与接收路由
 
-网络监听器由承载插件持有，link 通过注册句柄声明允许接收的连接。注册至少绑定：监听器、承载实例、本地端点 id、预期对端 id、有效 Identity 验证规则、所属 link 及本次注册代次。
+网络监听器由承载插件持有，link 通过注册句柄声明允许接收的连接。注册至少绑定：监听器、承载实例、本地端点 id、预期对端 id、有效 Identity 验证规则、会话协议、所属 link 及本次注册代次。每个监听器服务一个本地端点（配置项），注册按（监听器，对端）唯一。路由、代次复核与撤销互斥由 `rutis-bridge` 的 `Registrations` 统一实现，各承载复用。
 
 | 环节 | 强制规则 |
 | --- | --- |
@@ -218,7 +218,7 @@ pub enum ConnectError {
 | 心跳 | 双方默认每 10 秒发一次 ping；30 秒内收不到任何消息即判定失联并关闭；启用 TCP keepalive；心跳独立于调用方执行器推进 |
 | 关闭原因 | close frame 的 reason 为 UTF-8，最多 123 字节；只供诊断 |
 | 有序关闭 | 关闭码 1001 |
-| 接管 | link 决定同一端点 id 的新连接接管旧会话后，旧连接以 4002 关闭，reason 为 `replaced by a new connection` |
+| 接管 | link 决定同一端点 id 的新连接接管旧会话后，调用旧通道的 `Closer::replaced()`；WebSocket 以 4002 关闭，reason 为 `replaced by a new connection`，其他承载普通关闭 |
 
 完整框架节点之间的拨号方向由部署配置；远程叶子运行时只监听，由控制方 link 拨号，因为叶子侧没有 link 持有重连退避（见远程稿“远端租约”）。方向不授予功能权限。心跳使用 WebSocket ping/pong，不注入会话协议帧。
 

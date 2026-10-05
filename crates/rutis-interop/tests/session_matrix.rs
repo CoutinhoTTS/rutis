@@ -1,9 +1,10 @@
 #![cfg(unix)]
-//! One set of session semantics over every local channel: the Node and the
-//! Python runtime, each connected on an inherited socket (`fd:3`) and on a
-//! socket path it dials back. Describe, load with exports, lease a host,
+//! One set of session semantics over every channel: the Node and the
+//! Python runtime, each connected on an inherited socket (`fd:3`), on a
+//! socket path it dials back, and over a loopback WebSocket it listens on
+//! (dialed by Rust and attached). Describe, load with exports, lease a host,
 //! sync and async calls, a callback into Rust during a synchronous call,
-//! unload with withdrawal, and the exit diagnostics of a crashed process.
+//! unload with withdrawal, and how a crash ends the session.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -80,8 +81,21 @@ enum Runtime {
     Python,
 }
 
-/// Start `runtime` on a fresh project, connected as `inherit` says.
-async fn start(runtime: Runtime, inherit: bool, dir: &Path) -> (Arc<Process>, PathBuf) {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Via {
+    Inherit,
+    DialBack,
+    WebSocket,
+}
+
+/// The Python interpreter: one with `websockets` for WebSocket channels
+/// (`RUTIS_INTEROP_PYTHON`), else `python3`.
+fn python() -> String {
+    std::env::var("RUTIS_INTEROP_PYTHON").unwrap_or_else(|_| "python3".into())
+}
+
+/// Start `runtime` on a fresh project, connected as `via` says.
+async fn start(runtime: Runtime, via: Via, dir: &Path) -> (Arc<Process>, PathBuf) {
     let (launcher, anchor, entry) = match runtime {
         Runtime::Node => {
             let package = repo().join("interop/node");
@@ -101,16 +115,19 @@ async fn start(runtime: Runtime, inherit: bool, dir: &Path) -> (Arc<Process>, Pa
             let mut path = repo().join("interop/python").into_os_string();
             path.push(":");
             path.push(dir);
-            let launcher = Launcher::new("python3")
+            let launcher = Launcher::new(python())
                 .arg("-m")
                 .arg("rutis_runtime")
                 .env("PYTHONPATH", path);
             (launcher, dir.to_owned(), PathBuf::from("weather_plugin"))
         }
     };
-    let launcher = match inherit {
-        true => launcher.inherit_fd(),
-        false => launcher,
+    if via == Via::WebSocket {
+        return (listening(launcher, &anchor).await, entry);
+    }
+    let launcher = match via {
+        Via::Inherit => launcher.inherit_fd(),
+        _ => launcher,
     };
     let process = Process::mount(
         &repo().join("interop/node"),
@@ -121,8 +138,67 @@ async fn start(runtime: Runtime, inherit: bool, dir: &Path) -> (Arc<Process>, Pa
         },
     )
     .await
-    .unwrap_or_else(|error| panic!("{runtime:?} (inherit {inherit}) failed to start: {error}"));
+    .unwrap_or_else(|error| panic!("{runtime:?} ({via:?}) failed to start: {error}"));
     (process, entry)
+}
+
+/// Start the runtime listening on a loopback WebSocket, dial it, attach.
+async fn listening(launcher: Launcher, anchor: &Path) -> Arc<Process> {
+    use rutis_bridge::{Credential, Dial, Identity, StaticIdentity, Transport};
+    use rutis_channel::PeerId;
+    use tokio::io::AsyncBufReadExt;
+
+    let mut command = tokio::process::Command::new(&launcher.program);
+    command
+        .args(&launcher.args)
+        .envs(launcher.env.iter().map(|(name, value)| (name, value)))
+        .arg("listen:ws://127.0.0.1:0/rutis")
+        .arg(anchor)
+        .env("RUTIS_INTEROP_TOKEN", "controller-token")
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(cwd) = &launcher.cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command.spawn().unwrap();
+    let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+    let address = loop {
+        let line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("the runtime's address");
+        if let Some(address) = line.strip_prefix("rutis-interop: listening on ") {
+            break address.to_owned();
+        }
+    };
+    // Keep reading its stderr, and keep it running for the test's length.
+    tokio::spawn(async move {
+        while let Ok(Some(_)) = lines.next_line().await {}
+        let _ = child.wait().await;
+    });
+    let transport = rutis_transport_websocket::WebSocketTransport::start(
+        rutis_transport_websocket::Config::new(),
+    )
+    .unwrap();
+    let runtime = PeerId::new("runtime").unwrap();
+    let identity: Arc<dyn Identity> =
+        Arc::new(StaticIdentity::new(PeerId::new("main").unwrap()).present(
+            runtime.clone(),
+            Credential::Bearer("controller-token".into()),
+        ));
+    let channel = transport
+        .dial(
+            &Dial::address(address)
+                .peer(runtime)
+                .identity(identity)
+                .protocol(format!("rutis.{}", rutis_interop::PROTOCOL)),
+        )
+        .await
+        .unwrap();
+    // The transport's threads must outlive the channel: leak it for the test.
+    std::mem::forget(transport);
+    Process::attach(channel, Mount::default()).await.unwrap()
 }
 
 async fn eventually(mut check: impl FnMut() -> bool, what: &str) {
@@ -135,10 +211,10 @@ async fn eventually(mut check: impl FnMut() -> bool, what: &str) {
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
 
-async fn semantics(runtime: Runtime, inherit: bool) {
-    let case = format!("{runtime:?}, inherit {inherit}");
+async fn semantics(runtime: Runtime, via: Via) {
+    let case = format!("{runtime:?} via {via:?}");
     let dir = tempfile::tempdir().unwrap();
-    let (process, entry) = start(runtime, inherit, dir.path()).await;
+    let (process, entry) = start(runtime, via, dir.path()).await;
 
     let described = process.describe_row(&entry).await.unwrap();
     assert_eq!(described.inject, ["clock"], "{case}");
@@ -215,19 +291,18 @@ async fn semantics(runtime: Runtime, inherit: bool) {
     )
     .await;
     let weather = ctx.get_as::<dyn HostDispatch>(key.clone()).unwrap();
-    match weather.invoke("crash", json!([]).into()) {
-        Err(Error::Transport(message)) => assert_eq!(
+    match (weather.invoke("crash", json!([]).into()), via) {
+        // An attached runtime is no child of ours: the session just ends.
+        (Err(Error::Transport(_)), Via::WebSocket) => {}
+        (Err(Error::Transport(message)), _) => assert_eq!(
             message, "Cordis process exited with exit status: 17",
             "{case}"
         ),
-        other => panic!("{case}: the crash should end the session, got {other:?}"),
+        (other, _) => panic!("{case}: the crash should end the session, got {other:?}"),
     }
     process.closed().await;
-    assert_eq!(
-        process.exit_status().as_deref(),
-        Some("exited with exit status: 17"),
-        "{case}"
-    );
+    let expected = (via != Via::WebSocket).then_some("exited with exit status: 17");
+    assert_eq!(process.exit_status().as_deref(), expected, "{case}");
     drop(weather);
     projection.close();
     drop(lease);
@@ -236,22 +311,32 @@ async fn semantics(runtime: Runtime, inherit: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn node_on_an_inherited_socket() {
-    semantics(Runtime::Node, true).await;
+    semantics(Runtime::Node, Via::Inherit).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn node_dialing_a_socket_path() {
-    semantics(Runtime::Node, false).await;
+    semantics(Runtime::Node, Via::DialBack).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_listening_on_a_websocket() {
+    semantics(Runtime::Node, Via::WebSocket).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn python_on_an_inherited_socket() {
-    semantics(Runtime::Python, true).await;
+    semantics(Runtime::Python, Via::Inherit).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn python_dialing_a_socket_path() {
-    semantics(Runtime::Python, false).await;
+    semantics(Runtime::Python, Via::DialBack).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn python_listening_on_a_websocket() {
+    semantics(Runtime::Python, Via::WebSocket).await;
 }
 
 /// A runtime package that does not list `fd` in `rutisChannels` is started

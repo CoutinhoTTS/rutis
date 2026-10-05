@@ -1,7 +1,10 @@
 """`python3 -m rutis_runtime <channel> <project>`: one runtime process.
 
 The channel is `fd:<n>`, a socket inherited from the process that started
-this one, or `unix:<path>` (or a bare path), a socket to dial.
+this one; `unix:<path>` (or a bare path), a socket to dial; or
+`listen:ws://…` / `listen:wss://…`, a WebSocket address to listen on for the
+controlling rutis (the token it must present in RUTIS_INTEROP_TOKEN, a
+listener certificate and key in RUTIS_INTEROP_CERT and RUTIS_INTEROP_KEY).
 """
 
 import asyncio
@@ -14,7 +17,18 @@ from .peer import Peer
 from .runner import Runtime
 
 
-def open_channel(spec: str) -> socket.socket:
+def open_channel(spec: str):
+    if spec.startswith("listen:"):
+        from . import websocket
+        from .peer import PROTOCOL
+
+        return websocket.listen_once(
+            spec[len("listen:"):],
+            f"rutis.{PROTOCOL}",
+            os.environ.get("RUTIS_INTEROP_TOKEN"),
+            os.environ.get("RUTIS_INTEROP_CERT"),
+            os.environ.get("RUTIS_INTEROP_KEY"),
+        )
     if spec.startswith("fd:"):
         return socket.socket(fileno=int(spec[len("fd:"):]))
     path = spec[len("unix:"):] if spec.startswith("unix:") else spec
@@ -26,7 +40,8 @@ def open_channel(spec: str) -> socket.socket:
 async def run(channel: str, project: str) -> None:
     if project and project not in sys.path:
         sys.path.insert(0, project)
-    connection = open_channel(channel)
+    # Listening may wait long for the controller: not on the event loop.
+    connection = await asyncio.to_thread(open_channel, channel)
     runtime = Runtime()
     peer = Peer(connection, runtime.dispatch, settled=None)
     runtime.peer = peer
