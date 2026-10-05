@@ -77,8 +77,9 @@ export class Session {
   // `settled` runs after a call or property read on an exported reference
   // returns (or its Promise settles): the owner may have changed state that
   // invoke dispatch would otherwise observe, such as replaced services.
-  // `endpoint` ({ local, expected?, verified? }) selects the endpoint
-  // format; without it the session speaks the compat protocol.
+  // `endpoint` ({ local, expected?, verified?, declare? }) selects the
+  // endpoint format (`declare`: capabilities beyond the session's, such as
+  // the contract); without it the session speaks the compat protocol.
   constructor({ send, pump, dispatch, abort, settled, endpoint }) {
     this.#send = send; this.#pump = pump; this.#dispatch = dispatch; this.#abort = abort; this.#settled = settled
     if (endpoint) {
@@ -90,7 +91,7 @@ export class Session {
   }
   start() {
     this.#send(encode(this.#endpoint
-      ? { op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: this.#endpoint.local, implementation: { name: MANIFEST.name, version: MANIFEST.version }, capabilities: CAPABILITIES }
+      ? { op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: this.#endpoint.local, implementation: { name: MANIFEST.name, version: MANIFEST.version }, capabilities: [...CAPABILITIES, ...(this.#endpoint.declare ?? [])] }
       : { op: 'hello', version: PROTOCOL }))
   }
   // What the far end said of itself (endpoint format), once it greeted.

@@ -3058,8 +3058,12 @@ version = "0.1.0"
 dependencies = [
  "rutis",
  "rutis-channel",
+ "rutis-interop",
+ "rutis-transport-memory",
+ "serde_json",
  "sha2",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -3248,6 +3252,8 @@ dependencies = [
  "rutis",
  "rutis-bridge",
  "rutis-channel",
+ "rutis-interop",
+ "serde_json",
  "socket2",
  "thiserror 2.0.20",
  "tokio",

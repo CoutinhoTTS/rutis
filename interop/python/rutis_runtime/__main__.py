@@ -56,7 +56,8 @@ def parse(argv: list[str]) -> tuple[str, dict | None, str]:
     if channel.startswith("listen:"):
         if "id" not in flags:
             raise ValueError(f"a network channel needs --id <endpoint>: {channel}")
-        endpoint = {"local": flags["id"], "expected": flags.get("peer")}
+        # A runner is a runtime: the controller manages its rows.
+        endpoint = {"local": flags["id"], "expected": flags.get("peer"), "declare": ["runtime"]}
     return channel, endpoint, rest[0]
 
 

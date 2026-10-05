@@ -203,9 +203,14 @@ async fn listening(launcher: Launcher, anchor: &Path) -> Arc<Process> {
         rutis_interop::rpc::Endpoint::rust(PeerId::new("main").unwrap())
             .expect(PeerId::new("runtime").unwrap()),
     );
-    Process::attach(channel, Mount::default(), format)
+    let process = Process::attach(channel, Mount::default(), format)
         .await
-        .unwrap()
+        .unwrap();
+    assert!(
+        process.connection().supports("runtime"),
+        "a runner declares its contract"
+    );
+    process
 }
 
 async fn eventually(mut check: impl FnMut() -> bool, what: &str) {

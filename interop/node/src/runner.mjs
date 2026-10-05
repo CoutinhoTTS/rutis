@@ -14,7 +14,8 @@ const { channelSpec, pluginPath, endpoint } = (() => {
   while (rest[0]?.startsWith('--')) flags[rest.shift().slice(2)] = rest.shift()
   const network = /^(wss?|listen):/.test(channelSpec)
   if (network && !flags.id) throw new Error(`a network channel needs --id <endpoint>: ${channelSpec}`)
-  const endpoint = network ? { local: flags.id, expected: flags.peer } : undefined
+  // A runner is a runtime: the controller manages its rows.
+  const endpoint = network ? { local: flags.id, expected: flags.peer, declare: ['runtime'] } : undefined
   return { channelSpec, pluginPath: rest[0], endpoint }
 })()
 

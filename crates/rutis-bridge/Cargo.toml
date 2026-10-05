@@ -14,3 +14,9 @@ rutis = { path = "../rutis", version = "0.6.0" }
 rutis-channel = { path = "../rutis-channel", version = "0.1.0" }
 sha2 = "0.10"
 thiserror.workspace = true
+rutis-interop = { path = "../rutis-interop", version = "0.3.0", default-features = false }
+serde_json = "1"
+tokio = { workspace = true }
+
+[dev-dependencies]
+rutis-transport-memory = { path = "../rutis-transport-memory" }

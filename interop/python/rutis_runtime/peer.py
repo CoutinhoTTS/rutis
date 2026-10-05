@@ -266,8 +266,9 @@ class Peer:
         reentrant: bool = True,
         endpoint: dict | None = None,
     ):
-        """`endpoint` ({"local", "expected"?, "verified"?}) selects the
-        endpoint format; without it the session speaks the compat protocol."""
+        """`endpoint` ({"local", "expected"?, "verified"?, "declare"?}) selects
+        the endpoint format (`declare`: capabilities beyond the session's, such
+        as the contract); without it the session speaks the compat protocol."""
         self._reentrant = reentrant
         self.loop = asyncio.get_running_loop()
         self._thread = threading.get_ident()
@@ -323,7 +324,7 @@ class Peer:
                     "version": ENDPOINT_PROTOCOL,
                     "endpoint": self._endpoint["local"],
                     "implementation": IMPLEMENTATION,
-                    "capabilities": CAPABILITIES,
+                    "capabilities": CAPABILITIES + list(self._endpoint.get("declare", [])),
                 }
             )
 

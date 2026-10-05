@@ -234,7 +234,7 @@
 - 函数、异步结果、对象引用按能力声明；对象首次授予附形状。Node/Python 未实现对象接收时不得宣告支持。
 - 取消双向落到 AbortSignal、Rust 取消令牌或语言等价物；丢弃 future 发送取消。
 - 转发按（会话，引用号）保持身份，释放沿中继链传递；复用 M1a 的中继机制，补充网络多跳契约与测试。
-- 能力包含 objects、signals、reentrant-sync、plugins、events、volatile、forwarding；能力不授予权限，缺少必需能力时使用前拒绝。
+- 会话能力为 objects、signals、reentrant-sync、forwarding，按实现宣告（Rust 四项；Node 为 signals；Python 为 signals、reentrant-sync）；端点契约以能力 `runtime`、`node` 宣告，link 以 `require` 在握手后校验，缺少即按不兼容停止。plugins、events、volatile 等功能族经 `link.offers` 宣告，不作为会话能力。能力不授予权限，缺少必需能力时使用前拒绝。
 - 不支持同步重入时，同步等待期间的同链反向调用立即返回 SyncWaitCycle，不得排队。
 
 ### 6.3 服务形状与同步

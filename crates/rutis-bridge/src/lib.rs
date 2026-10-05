@@ -13,9 +13,15 @@ use rutis::{BoxFuture, TypeKey};
 pub use rutis_channel::{Channel, ConnectError, PeerId};
 
 mod identity;
+mod link;
+mod peer;
 mod registration;
 
-pub use identity::{fingerprint, identity_key, Credential, Identity, Presented, StaticIdentity};
+pub use identity::{
+    fingerprint, identity_key, Credential, Identity, IdentityPlugin, Presented, StaticIdentity,
+};
+pub use link::{protocol, Connect, Failure, LinkConfig, LinkPlugin, LinkState, Retry};
+pub use peer::{family, peer_key, Handler, Offered, Offers, Peer};
 pub use registration::{
     Deliver, Refusal, Registered, Registration, RegistrationError, Registrations, Ticket,
 };

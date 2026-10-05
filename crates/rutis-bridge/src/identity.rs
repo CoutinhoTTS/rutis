@@ -53,6 +53,40 @@ pub fn identity_key(name: &str) -> TypeKey {
     TypeKey::keyed_dynamic::<dyn Identity>(name.to_owned())
 }
 
+/// Provides an identity as `Identity#<name>`.
+pub struct IdentityPlugin {
+    label: String,
+    /// The `<name>` of `Identity#<name>`.
+    key: String,
+    identity: Arc<dyn Identity>,
+}
+
+impl IdentityPlugin {
+    pub fn new(name: &str, identity: impl Identity) -> Self {
+        Self {
+            label: format!("rutis-bridge/identity#{name}"),
+            key: name.to_owned(),
+            identity: Arc::new(identity),
+        }
+    }
+}
+
+impl rutis::Plugin for IdentityPlugin {
+    fn name(&self) -> &str {
+        &self.label
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as::<dyn Identity>(identity_key(&self.key), self.identity.clone())?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+
 /// An identity from configuration: tokens and certificates per peer.
 #[derive(Clone)]
 pub struct StaticIdentity {
