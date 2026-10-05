@@ -318,11 +318,7 @@ impl Mux {
         });
         let reading = physical.clone();
         std::thread::spawn(move || {
-            loop {
-                let message = match receiver.recv() {
-                    Ok(Some(message)) => message,
-                    _ => break,
-                };
+            while let Ok(Some(message)) = receiver.recv() {
                 let channel_of = |id: u32| reading.channels.lock().unwrap().get(&id).cloned();
                 match Frame::decode(&message) {
                     Frame::Data { channel, payload } => {
