@@ -294,6 +294,8 @@ class Peer:
         self._context: contextvars.ContextVar[list] = contextvars.ContextVar("rutis_path", default=[])
         self._tasks: dict[str, asyncio.Future] = {}
         self._signals: dict[str, Signal] = {}
+        # (call, result) while a call's result is encoded.
+        self._answering: tuple[str, Any] | None = None
         self._decoding_for: str | None = None
         self._active = 0
         self._draining: list[asyncio.Future] = []
@@ -475,6 +477,9 @@ class Peer:
                 if kind == "object" and self._endpoint is not None and not self.supports("objects"):
                     raise ValueError("the far end cannot receive object references")
                 entry = _Export(value, kind, list(self._path()), business)
+                # The result of a call: awaiting it is awaiting that call.
+                if kind == "future" and self._answering is not None and self._answering[1] is value:
+                    entry.call = self._answering[0]
                 self._identities[key] = ref
                 self._exports[ref] = entry
                 if kind == "future":
@@ -847,6 +852,10 @@ class Peer:
                 else:
                     if entry.call is not None:
                         self._tasks[call] = self._tasks.get(entry.call) or entry.value
+                        # Cancelling this await is cancelling that call.
+                        signal = self._signals.get(entry.call)
+                        if signal is not None:
+                            self._signals[call] = signal
                     entry.value.add_done_callback(lambda _done: self._respond(call, entry.result, business))
                 return
             value = None
@@ -889,12 +898,19 @@ class Peer:
         return task
 
     def _respond(self, call: str, result: tuple, business: bool) -> None:
-        self._signals.pop(call, None)
+        # A signal lives until the call's result settles: a returned future
+        # keeps it, so cancelling an await of it still reaches it.
+        ok_value = result[1] if result[0] else None
+        if asyncio.isfuture(ok_value) and not ok_value.done():
+            ok_value.add_done_callback(lambda _done: self._signals.pop(call, None))
+        else:
+            self._signals.pop(call, None)
         grants: list = []
         try:
             if self.closed_error is not None:
                 return
             ok, value = result
+            self._answering = (call, value)
             try:
                 frame = (
                     {"op": "return", "id": call, "value": self._encode(value, grants, business)}
@@ -905,6 +921,8 @@ class Peer:
             except Exception as error:  # noqa: BLE001
                 self._rollback(grants)
                 data = dumps({"op": "throw", "id": call, "error": encode_error(error)})
+            finally:
+                self._answering = None
             with self._write_lock:
                 self._channel.send(data)
         except Exception as error:  # noqa: BLE001

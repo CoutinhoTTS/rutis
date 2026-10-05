@@ -31,11 +31,14 @@ default = ["node"]
 node = ["dep:syn", "dep:quote", "dep:proc-macro2", "dep:toml"]
 # The Python runtime (interop/python): RuntimePlugin::python.
 python = []
+# Conformance suites other implementations run against themselves.
+conformance = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
+rutis-transport-local = { path = "../rutis-transport-local" }
 rutis-bridge = { path = "../rutis-bridge" }
 rutis-transport-websocket = { path = "../rutis-transport-websocket" }
 rutis-channel = { path = "../rutis-channel", features = ["testing"] }

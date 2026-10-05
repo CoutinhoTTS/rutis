@@ -11,8 +11,27 @@ use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
 use rutis_bridge::{transport_key, Dial, Transport};
 use rutis_channel::{Channel, ConnectError};
 
-#[cfg_attr(not(unix), allow(dead_code))]
 mod lines;
+
+/// Frame a connected byte stream (two handles of one socket, and a closer
+/// that wakes both) as a channel, one message per line: what this
+/// transport's Unix channels are.
+pub fn framed(
+    read: impl std::io::Read + Send + 'static,
+    write: impl std::io::Write + Send + 'static,
+    closer: Arc<dyn rutis_channel::Closer>,
+) -> Channel {
+    lines::channel(
+        read,
+        write,
+        closer,
+        rutis_channel::ChannelInfo {
+            transport: "unix",
+            peer: None,
+            label: String::new(),
+        },
+    )
+}
 #[cfg(unix)]
 mod unix;
 

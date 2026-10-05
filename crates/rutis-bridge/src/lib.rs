@@ -13,6 +13,8 @@ use rutis::{BoxFuture, TypeKey};
 pub use rutis_channel::{Channel, ConnectError, PeerId};
 
 mod compose;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 mod events;
 mod host;
 mod identity;

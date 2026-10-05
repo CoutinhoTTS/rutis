@@ -10,6 +10,8 @@
 
 #[cfg(feature = "node")]
 pub mod build;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 
 /// Wire protocol version. The Node runtime package declares the version it
 /// speaks as `rutisProtocol` in its package.json; builds check they match.

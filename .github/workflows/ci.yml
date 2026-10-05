@@ -58,6 +58,13 @@ jobs:
       - name: cargo test (rutis-loader interop rows)
         run: cargo test -p rutis-loader --features interop,peer
 
+      # Both runtimes, every channel, and the conformance suites.
+      - name: cargo test (rutis-interop, all features)
+        run: cargo test -p rutis-interop --all-features
+
+      - name: cargo test (rutis-bridge, node conformance)
+        run: cargo test -p rutis-bridge --features conformance
+
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
 

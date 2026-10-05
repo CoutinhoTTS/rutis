@@ -34,7 +34,9 @@ pub enum Value {
     Record(std::collections::BTreeMap<String, Value>),
     Reference(Reference),
     /// As an argument: an AbortSignal the callee receives, aborted when this
-    /// call is cancelled (its future dropped).
+    /// call is cancelled (its future dropped). Received by Rust, it only
+    /// marks the call as cancellable: a Rust callee is cancelled by the
+    /// future it returned being dropped.
     Signal,
 }
 impl Value {
@@ -1184,7 +1186,10 @@ impl Connection {
                     .map(|value| self.decode(value))
                     .collect::<Result<_, _>>()?,
             ),
-            WireValue::Signal => return Err(transport("Rust receives no AbortSignal values")),
+            // A Rust callee is cancelled by its future being dropped, once
+            // the caller gives the call up and releases its result; the
+            // signal itself only marks the call as cancellable.
+            WireValue::Signal => Value::Signal,
             WireValue::Record(fields) => Value::Record(
                 fields
                     .into_iter()

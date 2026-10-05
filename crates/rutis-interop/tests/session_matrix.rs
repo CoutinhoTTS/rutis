@@ -1,75 +1,14 @@
-#![cfg(unix)]
-//! One set of session semantics over every channel: the Node and the
-//! Python runtime, each connected on an inherited socket (`fd:3`), on a
-//! socket path it dials back, and over a loopback WebSocket it listens on
-//! (dialed by Rust and attached). Describe, load with exports, lease a host,
-//! sync and async calls, a callback into Rust during a synchronous call,
-//! unload with withdrawal, and how a crash ends the session.
+#![cfg(all(unix, feature = "conformance"))]
+//! The runtime conformance suite (`rutis_interop::conformance::runtime`) over
+//! every channel: the Node and the Python runtime, each connected on an
+//! inherited socket (`fd:3`), on a socket path it dials back, and over a
+//! loopback WebSocket it listens on (dialed by Rust and attached).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use rutis::Ctx;
-use rutis_interop::rpc::{settle, Reply, Value as RpcValue};
-use rutis_interop::{host_key, row_projection, Error, HostDispatch, Launcher, Mount, Process};
+use rutis_interop::{Launcher, Mount, Process};
 use serde_json::{json, Value};
-
-const NODE_PLUGIN: &str = r#"
-export const inject = ['clock']
-export function apply(ctx) {
-  ctx.provide('weather', {
-    today() { return `Oslo at ${ctx.clock.now()}` },
-    async later() { return 'Oslo later' },
-    each(callback) { return ['mon', 'tue'].map(day => callback(day)) },
-    crash() { process.exit(17) },
-  })
-}
-"#;
-
-const PYTHON_PLUGIN: &str = r#"
-import os
-
-inject = ["clock"]
-
-
-class Weather:
-    def __init__(self, clock):
-        self.clock = clock
-
-    def today(self):
-        return f"Oslo at {self.clock.now()}"
-
-    async def later(self):
-        return "Oslo later"
-
-    def each(self, callback):
-        return [callback(day) for day in ("mon", "tue")]
-
-    def crash(self):
-        os._exit(17)
-
-
-provides = {"weather": Weather}
-
-
-def apply(ctx, config):
-    ctx.provide("weather", Weather(ctx.use("clock")))
-"#;
-
-struct Clock(Arc<AtomicUsize>);
-
-impl HostDispatch for Clock {
-    fn invoke(&self, method: &str, _args: RpcValue) -> Reply {
-        assert_eq!(method, "now");
-        Ok(json!(self.0.fetch_add(1, Ordering::SeqCst)).into())
-    }
-
-    fn methods(&self) -> Option<Value> {
-        Some(json!({ "now": "sync" }))
-    }
-}
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -102,7 +41,11 @@ async fn start(runtime: Runtime, via: Via, dir: &Path) -> (Arc<Process>, PathBuf
             let anchor = dir.join("package.json");
             std::fs::write(&anchor, "{}").unwrap();
             let entry = dir.join("weather.mjs");
-            std::fs::write(&entry, NODE_PLUGIN).unwrap();
+            std::fs::copy(
+                repo().join("interop/node/test/fixtures/conformance-weather.mjs"),
+                &entry,
+            )
+            .unwrap();
             let launcher = Launcher::new("node")
                 .arg("--import")
                 .arg("tsx")
@@ -111,7 +54,11 @@ async fn start(runtime: Runtime, via: Via, dir: &Path) -> (Arc<Process>, PathBuf
             (launcher, anchor, entry)
         }
         Runtime::Python => {
-            std::fs::write(dir.join("weather_plugin.py"), PYTHON_PLUGIN).unwrap();
+            std::fs::copy(
+                repo().join("interop/python/tests/conformance_weather.py"),
+                dir.join("weather_plugin.py"),
+            )
+            .unwrap();
             let mut path = repo().join("interop/python").into_os_string();
             path.push(":");
             path.push(dir);
@@ -213,112 +160,10 @@ async fn listening(launcher: Launcher, anchor: &Path) -> Arc<Process> {
     process
 }
 
-async fn eventually(mut check: impl FnMut() -> bool, what: &str) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !check() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
-}
-
 async fn semantics(runtime: Runtime, via: Via) {
-    let case = format!("{runtime:?} via {via:?}");
     let dir = tempfile::tempdir().unwrap();
     let (process, entry) = start(runtime, via, dir.path()).await;
-
-    let described = process.describe_row(&entry).await.unwrap();
-    assert_eq!(described.inject, ["clock"], "{case}");
-    let provides = serde_json::Map::from_iter([(
-        "weather".to_owned(),
-        json!({ "today": "sync", "later": "async", "each": "sync", "crash": "sync" }),
-    )]);
-    let lease = process
-        .lease_host("clock", Arc::new(Clock(Arc::default())), None)
-        .await
-        .unwrap();
-    let ctx = Ctx::root().unwrap();
-    let projection = row_projection(&provides);
-    projection.attach(&ctx, process.clone()).unwrap();
-    process
-        .load_row_exporting(
-            "w",
-            &entry,
-            json!({}),
-            &[],
-            &[],
-            &provides,
-            projection.clone(),
-        )
-        .await
-        .unwrap();
-    let key = host_key("weather");
-    eventually(
-        || ctx.get_as::<dyn HostDispatch>(key.clone()).is_some(),
-        "the weather service",
-    )
-    .await;
-    let weather = ctx.get_as::<dyn HostDispatch>(key.clone()).unwrap();
-
-    let today = weather.invoke("today", json!([]).into()).unwrap();
-    assert_eq!(today.json().unwrap(), json!("Oslo at 0"), "{case}");
-    let later = settle(weather.invoke("later", json!([]).into()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(later.json().unwrap(), json!("Oslo later"), "{case}");
-    let callback = RpcValue::callback(|args| {
-        let [day]: [String; 1] = rutis_interop::decode_value(args)?;
-        Ok(json!(day.to_uppercase()).into())
-    });
-    let days = weather
-        .invoke("each", RpcValue::List(vec![callback]))
-        .unwrap();
-    assert_eq!(days.json().unwrap(), json!(["MON", "TUE"]), "{case}");
-    drop(weather);
-
-    process.unload_row("w").await.unwrap();
-    eventually(
-        || ctx.get_as::<dyn HostDispatch>(key.clone()).is_none(),
-        "the withdrawal",
-    )
-    .await;
-
-    // A crash ends the session with how the process ended.
-    process
-        .load_row_exporting(
-            "w",
-            &entry,
-            json!({}),
-            &[],
-            &[],
-            &provides,
-            projection.clone(),
-        )
-        .await
-        .unwrap();
-    eventually(
-        || ctx.get_as::<dyn HostDispatch>(key.clone()).is_some(),
-        "the weather service again",
-    )
-    .await;
-    let weather = ctx.get_as::<dyn HostDispatch>(key.clone()).unwrap();
-    match (weather.invoke("crash", json!([]).into()), via) {
-        // An attached runtime is no child of ours: the session just ends.
-        (Err(Error::Transport(_)), Via::WebSocket) => {}
-        (Err(Error::Transport(message)), _) => assert_eq!(
-            message, "Cordis process exited with exit status: 17",
-            "{case}"
-        ),
-        (other, _) => panic!("{case}: the crash should end the session, got {other:?}"),
-    }
-    process.closed().await;
-    let expected = (via != Via::WebSocket).then_some("exited with exit status: 17");
-    assert_eq!(process.exit_status().as_deref(), expected, "{case}");
-    drop(weather);
-    projection.close();
-    drop(lease);
-    ctx.shutdown().await.unwrap();
+    rutis_interop::conformance::runtime(process, &entry, via != Via::WebSocket).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
