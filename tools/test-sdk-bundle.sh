@@ -369,21 +369,27 @@ grep -Eq 'tokio_stream|tokio-stream|pin_project' "$base/e2d.stdout" || {
 # `rustc --version` run in the plugin workspace against the bundle's pin;
 # the workspace's own pin is what rustup picks when cargo runs there.
 echo "[sdk-bundle-test] E7: a mismatched workspace pin is refused"
-sed_inplace 's/channel = "1.98.1"/channel = "1.94.0"/' "$base/external/plugin-v1/rust-toolchain.toml"
-rm -rf "$base/external/plugin-v1/target"
-if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
-  --manifest-path "$base/external/plugin-v1/Cargo.toml" \
-  --bundle "$base/sdk-bundle" --features export --output "$base/bad-out" \
-  > "$base/e7.stdout" 2>&1; then
-  echo "a mismatched workspace pin was accepted" >&2
-  exit 1
+bundle_pin="$(grep '^channel' "$base/sdk-bundle/rust-toolchain.toml" | sed 's/.*= *"//;s/"//')"
+other_pin="$(rustup toolchain list 2>/dev/null | awk -F' ' '{print $1}' | sed 's/-x86_64.*//;s/-aarch64.*//' | grep -vxF "$bundle_pin" | head -1)"
+if test -z "$other_pin"; then
+  echo "[sdk-bundle-test] E7: skipped (no non-pinned toolchain installed)"
+else
+  sed_inplace "s/channel = \"$bundle_pin\"/channel = \"$other_pin\"/" "$base/external/plugin-v1/rust-toolchain.toml"
+  rm -rf "$base/external/plugin-v1/target"
+  if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
+    --manifest-path "$base/external/plugin-v1/Cargo.toml" \
+    --bundle "$base/sdk-bundle" --features export --output "$base/bad-out" \
+    > "$base/e7.stdout" 2>&1; then
+    echo "a mismatched workspace pin was accepted" >&2
+    exit 1
+  fi
+  grep -Fq 'rust-toolchain.toml' "$base/e7.stdout"
+  if grep -q 'E0514' "$base/e7.stdout"; then
+    echo "the check surfaced as E0514 instead of the version check" >&2
+    exit 1
+  fi
+  sed_inplace "s/channel = \"$other_pin\"/channel = \"$bundle_pin\"/" "$base/external/plugin-v1/rust-toolchain.toml"
 fi
-grep -Fq 'rust-toolchain.toml' "$base/e7.stdout"
-if grep -q 'E0514' "$base/e7.stdout"; then
-  echo "the check surfaced as E0514 instead of the version check" >&2
-  exit 1
-fi
-sed_inplace 's/channel = "1.94.0"/channel = "1.98.1"/' "$base/external/plugin-v1/rust-toolchain.toml"
 
 # E8b: an ambient RUSTFLAGS replaces the injected flags entirely; the packer
 # refuses up front instead of silently building against nothing.
@@ -401,9 +407,10 @@ grep -Fq 'RUSTFLAGS is set' "$base/e8b.stdout"
 echo "[sdk-bundle-test] E8a: cargo-config.toml enables check and build"
 mkdir -p "$e2a/.cargo"
 cp "$base/sdk-bundle/cargo-config.toml" "$e2a/.cargo/config.toml"
-cd "$e2a"
-env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR="$e2a/target" cargo check --features export
-env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR="$e2a/target" cargo build --release --features export
-cd "$repo_dir"
+(
+  cd "$e2a"
+  env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR="$e2a/target" cargo check --features export
+  env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR="$e2a/target" cargo build --release --features export
+)
 
 echo "sdk-bundle external build passed"
