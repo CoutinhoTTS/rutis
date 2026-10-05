@@ -32,9 +32,20 @@ from typing import Any, Callable
 from .channel import SocketChannel
 
 PROTOCOL = 2
+# The endpoint format: endpoint ids in the handshake and the call ids,
+# capabilities, either side calling the other.
+ENDPOINT_PROTOCOL = 3
+# What this implementation supports in the endpoint format. It sends objects
+# but cannot receive them, so it does not declare `objects`.
+CAPABILITIES = ["signals", "reentrant-sync"]
+IMPLEMENTATION = {"name": "rutis-runtime", "version": "0.3.0"}
 MAX_SAFE = 9_007_199_254_740_991
-_RUST_ID = re.compile(r"^rust:[1-9][0-9]*$")
-_ORIGIN_ID = re.compile(r"^(node|rust):[1-9][0-9]*$")
+_ENDPOINT_ID = re.compile(r"^[a-z0-9-]+$")
+_COMPAT_ORIGIN = re.compile(r"^(node|rust):[1-9][0-9]*$")
+# An id in a chain: either side's, possibly tagged with the session it came
+# through (`s3/mac:4`).
+_ENDPOINT_ORIGIN = re.compile(r"^(s[0-9]+/)?[a-z0-9-]+:[1-9][0-9]*$")
+_SEQUENCE = re.compile(r"^[1-9][0-9]*$")
 
 
 class _Undefined:
@@ -253,7 +264,10 @@ class Peer:
         dispatch: Callable,
         settled: Callable | None = None,
         reentrant: bool = True,
+        endpoint: dict | None = None,
     ):
+        """`endpoint` ({"local", "expected"?, "verified"?}) selects the
+        endpoint format; without it the session speaks the compat protocol."""
         self._reentrant = reentrant
         self.loop = asyncio.get_running_loop()
         self._thread = threading.get_ident()
@@ -283,6 +297,14 @@ class Peer:
         self._active = 0
         self._draining: list[asyncio.Future] = []
         self._handshake = False
+        # Call id prefixes: `node:` / `rust:` (compat), `<endpoint>:` (endpoint format).
+        self._endpoint = endpoint
+        if endpoint is not None and not _ENDPOINT_ID.match(endpoint["local"]):
+            raise ValueError(f"invalid endpoint id {endpoint['local']}")
+        self._local = f"{endpoint['local']}:" if endpoint else "node:"
+        self._remote: str | None = None if endpoint else "rust:"
+        # What the far end said of itself (endpoint format), once it greeted.
+        self.greeting: dict | None = None
         self.closed_error: BaseException | None = None
         self.ready: asyncio.Future = self.loop.create_future()
         self.closed: asyncio.Future = self.loop.create_future()
@@ -292,7 +314,54 @@ class Peer:
 
     def start(self) -> None:
         self._reader.start()
-        self._send({"op": "hello", "version": PROTOCOL})
+        if self._endpoint is None:
+            self._send({"op": "hello", "version": PROTOCOL})
+        else:
+            self._send(
+                {
+                    "op": "hello",
+                    "version": ENDPOINT_PROTOCOL,
+                    "endpoint": self._endpoint["local"],
+                    "implementation": IMPLEMENTATION,
+                    "capabilities": CAPABILITIES,
+                }
+            )
+
+    @property
+    def _origin_id(self):
+        return _COMPAT_ORIGIN if self._endpoint is None else _ENDPOINT_ORIGIN
+
+    def supports(self, capability: str) -> bool:
+        return self.greeting is not None and capability in self.greeting["capabilities"]
+
+    def _greet(self, frame: dict) -> None:
+        version = frame.get("version")
+        if self._endpoint is None:
+            if version != PROTOCOL or "endpoint" in frame:
+                raise ValueError(f"incompatible session: the far end speaks protocol {version}, this side {PROTOCOL}")
+            return
+        if version != ENDPOINT_PROTOCOL:
+            raise ValueError(
+                f"incompatible session: the far end speaks protocol {version}, this side {ENDPOINT_PROTOCOL}"
+            )
+        endpoint = frame.get("endpoint")
+        if not isinstance(endpoint, str) or not _ENDPOINT_ID.match(endpoint):
+            raise ValueError("incompatible session: the far end named no valid endpoint")
+        for whose in ("verified", "expected"):
+            expected = self._endpoint.get(whose)
+            if expected is not None and expected != endpoint:
+                raise ValueError(
+                    f"endpoint mismatch: the far end greeted as {endpoint}, but {expected} is the {whose} endpoint"
+                )
+        if endpoint == self._endpoint["local"]:
+            raise ValueError(f"endpoint mismatch: the far end greeted as this endpoint ({endpoint})")
+        self._remote = f"{endpoint}:"
+        capabilities = frame.get("capabilities")
+        self.greeting = {
+            "endpoint": endpoint,
+            "implementation": frame.get("implementation"),
+            "capabilities": capabilities if isinstance(capabilities, list) else [],
+        }
 
     def _read(self) -> None:
         try:
@@ -378,7 +447,7 @@ class Peer:
         self._next += 1
         if self._next > MAX_SAFE:
             raise RuntimeError("call identifiers exhausted")
-        return f"node:{self._next}"
+        return f"{self._local}{self._next}"
 
     # ── Values ───────────────────────────────────────────────────
 
@@ -402,6 +471,8 @@ class Peer:
                 self._ref += 1
                 ref = self._ref
                 kind = "future" if asyncio.isfuture(value) else "function" if callable(value) else "object"
+                if kind == "object" and self._endpoint is not None and not self.supports("objects"):
+                    raise ValueError("the far end cannot receive object references")
                 entry = _Export(value, kind, list(self._path()), business)
                 self._identities[key] = ref
                 self._exports[ref] = entry
@@ -479,7 +550,7 @@ class Peer:
             or kind not in ("function", "future", "object")
             or not isinstance(home, bool)
             or not isinstance(origin, list)
-            or not all(isinstance(item, str) and _ORIGIN_ID.match(item) for item in origin)
+            or not all(isinstance(item, str) and self._origin_id.match(item) for item in origin)
         ):
             raise ValueError("invalid reference")
         if home:
@@ -655,8 +726,9 @@ class Peer:
     def _receive(self, frame: dict) -> None:
         op = frame.get("op")
         if op == "hello":
-            if frame.get("version") != PROTOCOL or self._handshake:
-                raise ValueError("incompatible or duplicate protocol handshake")
+            if self._handshake:
+                raise ValueError("duplicate protocol handshake")
+            self._greet(frame)
             self._handshake = True
             if not self.ready.done():
                 self.ready.set_result(None)
@@ -696,13 +768,14 @@ class Peer:
         if (
             op not in ("invoke", "call", "get", "await")
             or not isinstance(call, str)
-            or not _RUST_ID.match(call)
+            or not call.startswith(self._remote)
+            or not _SEQUENCE.match(call[len(self._remote):])
             or not isinstance(path, list)
             or not all(isinstance(item, str) for item in path)
             or call in path
         ):
             raise ValueError("invalid invocation")
-        sequence = int(call[5:])
+        sequence = int(call[len(self._remote):])
         if sequence <= self._received or sequence > MAX_SAFE:
             raise ValueError("invalid or repeated invocation identity")
         self._received = sequence

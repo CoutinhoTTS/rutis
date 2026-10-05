@@ -153,6 +153,7 @@ async fn listening(launcher: Launcher, anchor: &Path) -> Arc<Process> {
         .args(&launcher.args)
         .envs(launcher.env.iter().map(|(name, value)| (name, value)))
         .arg("listen:ws://127.0.0.1:0/rutis")
+        .args(["--id", "runtime", "--peer", "main"])
         .arg(anchor)
         .env("RUTIS_INTEROP_TOKEN", "controller-token")
         .stderr(std::process::Stdio::piped())
@@ -192,13 +193,19 @@ async fn listening(launcher: Launcher, anchor: &Path) -> Arc<Process> {
             &Dial::address(address)
                 .peer(runtime)
                 .identity(identity)
-                .protocol(format!("rutis.{}", rutis_interop::PROTOCOL)),
+                .protocol(format!("rutis.{}", rutis_interop::ENDPOINT_PROTOCOL)),
         )
         .await
         .unwrap();
     // The transport's threads must outlive the channel: leak it for the test.
     std::mem::forget(transport);
-    Process::attach(channel, Mount::default()).await.unwrap()
+    let format = rutis_interop::rpc::Format::Endpoint(
+        rutis_interop::rpc::Endpoint::rust(PeerId::new("main").unwrap())
+            .expect(PeerId::new("runtime").unwrap()),
+    );
+    Process::attach(channel, Mount::default(), format)
+        .await
+        .unwrap()
 }
 
 async fn eventually(mut check: impl FnMut() -> bool, what: &str) {

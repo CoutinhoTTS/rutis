@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { threadId } from 'node:worker_threads'
 import { Process } from '../../src/client.mjs'
 
-const peer = await Process.connect(process.argv[2], () => { throw new Error('no root exports') })
+// `<channel> [<endpoint id> [<expected peer>]]`: network channels speak the
+// endpoint format.
+const [channel, id = 'node', expected] = process.argv.slice(2)
+const endpoint = /^(wss?|listen):/.test(channel) ? { local: id, expected } : undefined
+const peer = await Process.connect(channel, () => { throw new Error('no root exports') }, undefined, endpoint)
 const owner = threadId
 let timerRan = false, promiseRan = false
 const timer = setTimeout(() => { timerRan = true }, 0)

@@ -1,13 +1,14 @@
-import { readFileSync } from 'node:fs'
 import { ConnectError } from './errors.mjs'
+import { ENDPOINT_PROTOCOL } from '../session.mjs'
 import * as fd from './fd.mjs'
 import * as unix from './unix.mjs'
 import * as websocket from './websocket.mjs'
 
 export { ConnectError }
 
-// The session protocol, as a WebSocket subprotocol.
-const PROTOCOL = `rutis.${JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).rutisProtocol}`
+// Network sessions speak the endpoint format; its version is the
+// WebSocket subprotocol.
+const PROTOCOL = `rutis.${ENDPOINT_PROTOCOL}`
 
 // open(spec, { message(text), closed(reason) }) → { send(text), end(), close(reason) }
 // Specs:

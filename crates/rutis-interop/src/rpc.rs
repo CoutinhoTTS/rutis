@@ -15,8 +15,10 @@ use serde_json::Value as Json;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::{oneshot, watch, Notify};
 
+pub use crate::protocol::Implementation;
 use crate::protocol::{Frame, Kind, WireValue, VERSION};
-use crate::Error;
+use crate::{Error, Handshake};
+use rutis_channel::PeerId;
 
 pub type Reply = Result<Value, Error>;
 type Callback = dyn Fn(Value) -> Reply + Send + Sync;
@@ -628,12 +630,76 @@ impl Drop for Flight {
 pub trait Dispatch: Send + Sync + 'static {
     fn invoke(&self, peer: &Connection, target: &str, method: &str, args: Value) -> Reply;
 }
+/// How a session identifies itself and its calls.
+#[derive(Clone, Debug, Default)]
+pub enum Format {
+    /// Protocol 2, as local runtimes speak it: this side calls as `rust:`,
+    /// the far end as `node:`, and the handshake carries only the version.
+    #[default]
+    Compat,
+    /// The endpoint format ([`crate::ENDPOINT_PROTOCOL`]): each side names
+    /// itself in the handshake and calls as `<endpoint id>:<n>`.
+    Endpoint(Endpoint),
+}
+
+/// This side of an endpoint-format session.
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    pub local: PeerId,
+    /// The far end this side expects; the session fails if the handshake
+    /// names another.
+    pub expected: Option<PeerId>,
+    pub implementation: Implementation,
+    /// What this side supports: `objects`, `signals`, `reentrant-sync`,
+    /// `forwarding`. Capabilities grant no permission.
+    pub capabilities: Vec<String>,
+}
+
+impl Endpoint {
+    /// This implementation (rutis-interop), as `local`, with what it
+    /// supports.
+    pub fn rust(local: PeerId) -> Self {
+        Self {
+            local,
+            expected: None,
+            implementation: Implementation {
+                name: "rutis-interop".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+            capabilities: ["objects", "signals", "reentrant-sync", "forwarding"]
+                .map(String::from)
+                .to_vec(),
+        }
+    }
+
+    pub fn expect(mut self, peer: PeerId) -> Self {
+        self.expected = Some(peer);
+        self
+    }
+}
+
+/// What the far end said of itself in an endpoint-format handshake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Greeting {
+    pub endpoint: PeerId,
+    pub implementation: Option<Implementation>,
+    pub capabilities: Vec<String>,
+}
+
 /// One session's state. The session is reached through [`Connection`];
 /// the channel underneath is any [`Channel`].
 struct SessionState {
     /// Process-unique; marks this session's call ids in chains forwarded
     /// to other sessions (see [`rebase`]).
     tag: String,
+    format: Format,
+    /// The far end as the channel's connector verified it, if it did.
+    verified: Option<PeerId>,
+    /// This side's call ids: `rust:` or `<endpoint>:`.
+    local_prefix: String,
+    /// The far end's: `node:`, or `<endpoint>:` once it greeted.
+    remote_prefix: std::sync::OnceLock<String>,
+    greeting: std::sync::OnceLock<Greeting>,
     writer: Mutex<Box<dyn Sender>>,
     closer: Arc<dyn Closer>,
     calls: Mutex<Calls>,
@@ -659,6 +725,18 @@ impl Connection {
     /// thread of its own. When the channel ends, the session closes with
     /// `peer disconnected` (a normal end) or the channel's reason.
     pub fn open(channel: Channel, dispatch: Arc<dyn Dispatch>) -> Result<Self, Error> {
+        Self::open_with(channel, dispatch, Format::Compat)
+    }
+
+    /// [`Connection::open`] in `format`. In the endpoint format the session
+    /// is ready only once the far end greeted with the endpoint the channel
+    /// verified (if it verified one) and this side expects (if it expects
+    /// one); otherwise [`Connection::ready`] fails with [`Error::Handshake`].
+    pub fn open_with(
+        channel: Channel,
+        dispatch: Arc<dyn Dispatch>,
+        format: Format,
+    ) -> Result<Self, Error> {
         let Channel {
             sender,
             mut receiver,
@@ -666,8 +744,35 @@ impl Connection {
             info,
         } = channel;
         let label = info.label;
+        let (local_prefix, remote_prefix, hello) = match &format {
+            Format::Compat => (
+                "rust:".to_owned(),
+                std::sync::OnceLock::from("node:".to_owned()),
+                Frame::Hello {
+                    version: VERSION,
+                    endpoint: None,
+                    implementation: None,
+                    capabilities: None,
+                },
+            ),
+            Format::Endpoint(endpoint) => (
+                format!("{}:", endpoint.local),
+                std::sync::OnceLock::new(),
+                Frame::Hello {
+                    version: crate::ENDPOINT_PROTOCOL,
+                    endpoint: Some(endpoint.local.to_string()),
+                    implementation: Some(endpoint.implementation.clone()),
+                    capabilities: Some(endpoint.capabilities.clone()),
+                },
+            ),
+        };
         let peer = Self(Arc::new(SessionState {
             tag: format!("s{}", NEXT_TAG.fetch_add(1, Ordering::Relaxed)),
+            format,
+            verified: info.peer,
+            local_prefix,
+            remote_prefix,
+            greeting: std::sync::OnceLock::new(),
             closer,
             writer: Mutex::new(sender),
             calls: Mutex::new(Calls::default()),
@@ -703,8 +808,20 @@ impl Connection {
                 }
             })
             .map_err(transport)?;
-        peer.write(Frame::Hello { version: VERSION })?;
+        peer.write(hello)?;
         Ok(peer)
+    }
+
+    /// What the far end said of itself (endpoint format), once it greeted.
+    pub fn greeting(&self) -> Option<&Greeting> {
+        self.0.greeting.get()
+    }
+
+    /// Whether the far end declared `capability` (endpoint format). A
+    /// compat session declares none.
+    pub fn supports(&self, capability: &str) -> bool {
+        self.greeting()
+            .is_some_and(|greeting| greeting.capabilities.iter().any(|c| c == capability))
     }
     pub async fn ready(&self) -> Result<(), Error> {
         let mut ready = self.0.ready.subscribe();
@@ -856,7 +973,7 @@ impl Connection {
                 .next
                 .checked_add(1)
                 .ok_or_else(|| transport("call identifiers exhausted"))?;
-            format!("rust:{}", calls.next)
+            format!("{}{}", self.0.local_prefix, calls.next)
         };
         let mut path = current_path();
         if let Operation::Await(_, origin) = &call {
@@ -921,7 +1038,8 @@ impl Connection {
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
-                related.sort_by_key(|id| id.strip_prefix("node:").unwrap().parse::<u64>().unwrap());
+                let remote = self.remote_prefix();
+                related.sort_by_key(|id| id.strip_prefix(remote).unwrap().parse::<u64>().unwrap());
                 for id in related {
                     let incoming = calls.incoming.remove(&id).unwrap();
                     sender.send(Message::Invoke(incoming)).map_err(transport)?;
@@ -1131,6 +1249,64 @@ impl Connection {
         })
     }
     /// The waiter for a reply, `None` for a late reply to a cancelled call.
+    /// The far end's call id prefix; empty (matching nothing a valid far
+    /// end sends) before it greeted.
+    fn remote_prefix(&self) -> &str {
+        self.0.remote_prefix.get().map_or("\0", String::as_str)
+    }
+    /// Check the far end's handshake against this session's format.
+    fn greet(
+        &self,
+        version: u32,
+        endpoint: Option<String>,
+        implementation: Option<Implementation>,
+        capabilities: Option<Vec<String>>,
+    ) -> Result<(), Error> {
+        let incompatible = |reason: String| Error::Handshake(Handshake::Incompatible(reason));
+        let Format::Endpoint(local) = &self.0.format else {
+            if version != VERSION || endpoint.is_some() {
+                return Err(incompatible(format!(
+                    "the far end speaks protocol {version}, this side {VERSION}"
+                )));
+            }
+            return Ok(());
+        };
+        if version != crate::ENDPOINT_PROTOCOL {
+            return Err(incompatible(format!(
+                "the far end speaks protocol {version}, this side {}",
+                crate::ENDPOINT_PROTOCOL
+            )));
+        }
+        let endpoint = endpoint
+            .ok_or_else(|| incompatible("the far end named no endpoint".into()))
+            .and_then(|endpoint| {
+                PeerId::new(endpoint).map_err(|error| incompatible(error.to_string()))
+            })?;
+        for (whose, expected) in [
+            ("verified", &self.0.verified),
+            ("expected", &local.expected),
+        ] {
+            if let Some(expected) = expected {
+                if expected != &endpoint {
+                    return Err(Error::Handshake(Handshake::IdentityMismatch(format!(
+                        "the far end greeted as {endpoint}, but {expected} is the {whose} endpoint"
+                    ))));
+                }
+            }
+        }
+        if endpoint == local.local {
+            return Err(Error::Handshake(Handshake::IdentityMismatch(format!(
+                "the far end greeted as this endpoint ({endpoint})"
+            ))));
+        }
+        let _ = self.0.remote_prefix.set(format!("{endpoint}:"));
+        let _ = self.0.greeting.set(Greeting {
+            endpoint,
+            implementation,
+            capabilities: capabilities.unwrap_or_default(),
+        });
+        Ok(())
+    }
     fn reply_target(&self, id: &str) -> Result<Option<Waiting>, Error> {
         let mut calls = self.0.calls.lock().unwrap();
         if let Some(waiting) = calls.waiting.remove(id) {
@@ -1156,10 +1332,17 @@ impl Connection {
         if let Some(error) = &self.0.calls.lock().unwrap().closed {
             return Err(error.clone());
         }
-        if let Frame::Hello { version } = frame {
-            if version != VERSION || self.0.ready.borrow().is_some() {
-                return Err(transport("incompatible or duplicate protocol handshake"));
+        if let Frame::Hello {
+            version,
+            endpoint,
+            implementation,
+            capabilities,
+        } = frame
+        {
+            if self.0.ready.borrow().is_some() {
+                return Err(transport("duplicate protocol handshake"));
             }
+            self.greet(version, endpoint, implementation, capabilities)?;
             self.0.ready.send_replace(Some(Ok(())));
             return Ok(());
         }
@@ -1265,7 +1448,7 @@ impl Connection {
             } => (id, path, Accepted::Await(self.export(reference)?)),
             Frame::Hello { .. } => unreachable!(),
         };
-        if !id.starts_with("node:") || path.contains(&id) {
+        if !id.starts_with(self.remote_prefix()) || path.contains(&id) {
             return Err(transport("invalid invocation identity/path"));
         }
         path.push(id.clone());
@@ -1300,7 +1483,7 @@ impl Connection {
             }
             let sequence = incoming
                 .id
-                .strip_prefix("node:")
+                .strip_prefix(self.remote_prefix())
                 .and_then(|n| n.parse::<u64>().ok())
                 .filter(|n| *n > calls.received && *n <= 9_007_199_254_740_991)
                 .ok_or_else(|| transport("invalid or repeated invocation identity"))?;

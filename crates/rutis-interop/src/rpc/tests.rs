@@ -3,6 +3,15 @@ use rutis_channel::Receiver;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+fn hello(version: u32) -> Frame {
+    Frame::Hello {
+        version,
+        endpoint: None,
+        implementation: None,
+        capabilities: None,
+    }
+}
+
 struct NoExports;
 impl Dispatch for NoExports {
     fn invoke(&self, _: &Connection, _: &str, _: &str, _: Value) -> Reply {
@@ -51,9 +60,12 @@ async fn admitted_call_pins_its_target_before_a_following_counted_release() {
         let mut reader = remote.try_clone().unwrap();
         assert!(matches!(
             read(&mut reader),
-            Frame::Hello { version: VERSION }
+            Frame::Hello {
+                version: VERSION,
+                ..
+            }
         ));
-        send(&mut remote, Frame::Hello { version: VERSION });
+        send(&mut remote, hello(VERSION));
         let Frame::Invoke {
             id,
             args: WireValue::List(args),
@@ -127,7 +139,7 @@ async fn an_old_release_does_not_remove_a_concurrent_new_grant() {
     let remote = std::thread::spawn(move || {
         let mut reader = remote.try_clone().unwrap();
         read(&mut reader);
-        send(&mut remote, Frame::Hello { version: VERSION });
+        send(&mut remote, hello(VERSION));
         let Frame::Invoke {
             id,
             args: WireValue::Reference { id: reference, .. },
@@ -202,17 +214,12 @@ async fn an_old_release_does_not_remove_a_concurrent_new_grant() {
 #[tokio::test(flavor = "current_thread")]
 async fn handshake_and_release_count_fail_closed() {
     let (peer, mut remote) = pair();
-    send(
-        &mut remote,
-        Frame::Hello {
-            version: VERSION + 1,
-        },
-    );
+    send(&mut remote, hello(VERSION + 1));
     assert!(peer.ready().await.is_err());
     peer.closed().await;
 
     let (peer, mut remote) = pair();
-    send(&mut remote, Frame::Hello { version: VERSION });
+    send(&mut remote, hello(VERSION));
     peer.ready().await.unwrap();
     let reference = peer
         .encode(&Value::callback(|_| Ok(Value::Undefined)))
@@ -235,7 +242,7 @@ async fn handshake_and_release_count_fail_closed() {
 #[tokio::test(flavor = "current_thread")]
 async fn explicit_close_interrupts_a_writer_whose_peer_stopped_reading() {
     let (peer, mut remote) = pair();
-    send(&mut remote, Frame::Hello { version: VERSION });
+    send(&mut remote, hello(VERSION));
     peer.ready().await.unwrap();
     let (entered, blocked) = mpsc::channel();
     let writing = peer.clone();
@@ -264,8 +271,14 @@ impl Remote {
             reader: stream.try_clone().unwrap(),
             writer: stream,
         };
-        assert!(matches!(remote.read(), Frame::Hello { version: VERSION }));
-        remote.send(Frame::Hello { version: VERSION });
+        assert!(matches!(
+            remote.read(),
+            Frame::Hello {
+                version: VERSION,
+                ..
+            }
+        ));
+        remote.send(hello(VERSION));
         remote
     }
     fn read(&mut self) -> Frame {
@@ -665,4 +678,110 @@ async fn a_reverse_call_through_a_relay_reaches_the_waiting_session() {
         panic!("held return expected")
     };
     assert_eq!((id.as_str(), data_of(value)), ("node:1", json!("held")));
+}
+
+mod endpoint_format {
+    use super::*;
+
+    fn id(s: &str) -> PeerId {
+        PeerId::new(s).unwrap()
+    }
+
+    struct Echo(&'static str);
+    impl Dispatch for Echo {
+        fn invoke(&self, _: &Connection, target: &str, method: &str, args: Value) -> Reply {
+            if method == "callback" {
+                // Call back through the reference the far end passed.
+                let callback = args.list()?.remove(0).reference()?;
+                return callback.call(Value::Data(json!([self.0])));
+            }
+            Ok(Value::Data(
+                json!({ "at": self.0, "target": target, "method": method }),
+            ))
+        }
+    }
+
+    fn pair_as(left: Endpoint, right: Endpoint) -> (Connection, Connection) {
+        let (a, mut b) = rutis_transport_memory::pair();
+        let mut a = a;
+        a.info.peer = Some(right.local.clone());
+        b.info.peer = Some(left.local.clone());
+        (
+            Connection::open_with(a, Arc::new(Echo("left")), Format::Endpoint(left)).unwrap(),
+            Connection::open_with(b, Arc::new(Echo("right")), Format::Endpoint(right)).unwrap(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_rust_endpoints_call_each_other_with_their_own_ids() {
+        let (main, mac) = pair_as(
+            Endpoint::rust(id("main")).expect(id("mac")),
+            Endpoint::rust(id("mac")).expect(id("main")),
+        );
+        main.ready().await.unwrap();
+        mac.ready().await.unwrap();
+        assert_eq!(main.greeting().unwrap().endpoint, id("mac"));
+        assert!(main.supports("signals") && !main.supports("plugins"));
+
+        let reply = main
+            .invoke_async("x", "ping", Value::Undefined)
+            .await
+            .unwrap();
+        assert_eq!(reply.json().unwrap()["at"], "right");
+        let reply = mac
+            .invoke_async("y", "pong", Value::Undefined)
+            .await
+            .unwrap();
+        assert_eq!(reply.json().unwrap()["at"], "left");
+
+        // A callback crosses back while its caller waits synchronously.
+        let main2 = main.clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            main2.invoke(
+                "",
+                "callback",
+                Value::List(vec![Value::callback(|args| {
+                    Ok(Value::Data(json!(format!("called by {}", args.json()?[0]))))
+                })]),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.json().unwrap(), json!("called by \"right\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_greeting_from_another_endpoint_fails_the_handshake() {
+        // The channel verified "mac", but "pi" greets.
+        let (main, pi) = pair_as(
+            Endpoint::rust(id("main")).expect(id("mac")),
+            Endpoint::rust(id("pi")),
+        );
+        assert!(matches!(
+            main.ready().await,
+            Err(Error::Handshake(Handshake::IdentityMismatch(_)))
+        ));
+        drop(pi);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_compat_far_end_is_incompatible_with_the_endpoint_format() {
+        let (a, b) = rutis_transport_memory::pair();
+        let endpoint = Connection::open_with(
+            a,
+            Arc::new(NoExports),
+            Format::Endpoint(Endpoint::rust(id("main"))),
+        )
+        .unwrap();
+        let compat = Connection::open(b, Arc::new(NoExports)).unwrap();
+        assert!(matches!(
+            endpoint.ready().await,
+            Err(Error::Handshake(Handshake::Incompatible(_)))
+        ));
+        assert!(matches!(
+            compat.ready().await,
+            Err(Error::Handshake(Handshake::Incompatible(_)))
+        ));
+    }
 }

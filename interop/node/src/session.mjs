@@ -27,7 +27,15 @@ const needsRecord = value => holdsReference(value)
 
 // The protocol version this runtime speaks; builds check it against the
 // rutis-interop crate (package.json `rutisProtocol`).
-const PROTOCOL = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).rutisProtocol
+const MANIFEST = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+const PROTOCOL = MANIFEST.rutisProtocol
+// The endpoint format: endpoint ids in the handshake and the call ids,
+// capabilities, either side calling the other.
+export const ENDPOINT_PROTOCOL = 3
+// What this implementation supports in the endpoint format. It sends
+// objects but cannot receive them, so it does not declare `objects`.
+export const CAPABILITIES = ['signals']
+const ENDPOINT_ID = /^[a-z0-9-]+$/
 
 function checkData(value, seen = new Set()) {
   if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') throw new TypeError('value requires an unsupported binding')
@@ -58,6 +66,8 @@ export class Session {
   #next = 0; #received = 0; #ref = 0; #pending = new Map(); #exports = new Map(); #identities = new WeakMap()
   #imports = new Map(); #proxies = new WeakMap(); #finalizer
   #closed; #handshake = false; #resolveReady; #rejectReady
+  // Call id prefixes: `node:` / `rust:` (compat), `<endpoint>:` (endpoint format).
+  #endpoint; #local = 'node:'; #remote = 'rust:'
   #context = new AsyncLocalStorage(); #syncPath; #waiting = []; #queued = new Set()
   #active = 0; #draining = []
   // AbortControllers for incoming calls that received a signal argument.
@@ -67,12 +77,40 @@ export class Session {
   // `settled` runs after a call or property read on an exported reference
   // returns (or its Promise settles): the owner may have changed state that
   // invoke dispatch would otherwise observe, such as replaced services.
-  constructor({ send, pump, dispatch, abort, settled }) {
+  // `endpoint` ({ local, expected?, verified? }) selects the endpoint
+  // format; without it the session speaks the compat protocol.
+  constructor({ send, pump, dispatch, abort, settled, endpoint }) {
     this.#send = send; this.#pump = pump; this.#dispatch = dispatch; this.#abort = abort; this.#settled = settled
+    if (endpoint) {
+      if (!ENDPOINT_ID.test(endpoint.local)) throw new Error(`invalid endpoint id ${endpoint.local}`)
+      this.#endpoint = endpoint; this.#local = `${endpoint.local}:`; this.#remote = undefined
+    }
     this.ready = new Promise((resolve, reject) => { this.#resolveReady = resolve; this.#rejectReady = reject })
     this.#finalizer = new FinalizationRegistry(record => this.#release(record))
   }
-  start() { this.#send(encode({ op: 'hello', version: PROTOCOL })) }
+  start() {
+    this.#send(encode(this.#endpoint
+      ? { op: 'hello', version: ENDPOINT_PROTOCOL, endpoint: this.#endpoint.local, implementation: { name: MANIFEST.name, version: MANIFEST.version }, capabilities: CAPABILITIES }
+      : { op: 'hello', version: PROTOCOL }))
+  }
+  // What the far end said of itself (endpoint format), once it greeted.
+  greeting
+  #greet(frame) {
+    if (!this.#endpoint) {
+      if (frame.version !== PROTOCOL || frame.endpoint !== undefined) throw new Error(`incompatible session: the far end speaks protocol ${frame.version}, this side ${PROTOCOL}`)
+      return
+    }
+    if (frame.version !== ENDPOINT_PROTOCOL) throw new Error(`incompatible session: the far end speaks protocol ${frame.version}, this side ${ENDPOINT_PROTOCOL}`)
+    const endpoint = frame.endpoint
+    if (typeof endpoint !== 'string' || !ENDPOINT_ID.test(endpoint)) throw new Error('incompatible session: the far end named no valid endpoint')
+    for (const [whose, expected] of [['verified', this.#endpoint.verified], ['expected', this.#endpoint.expected]]) {
+      if (expected !== undefined && expected !== endpoint) throw new Error(`endpoint mismatch: the far end greeted as ${endpoint}, but ${expected} is the ${whose} endpoint`)
+    }
+    if (endpoint === this.#endpoint.local) throw new Error(`endpoint mismatch: the far end greeted as this endpoint (${endpoint})`)
+    this.#remote = `${endpoint}:`
+    this.greeting = { endpoint, implementation: frame.implementation, capabilities: Array.isArray(frame.capabilities) ? frame.capabilities : [] }
+  }
+  supports(capability) { return this.greeting?.capabilities.includes(capability) ?? false }
   close(error = new Error('session closed')) {
     if (this.#closed) return
     this.#closed = error; this.#rejectReady(error)
@@ -80,13 +118,20 @@ export class Session {
     this.#pending.clear(); this.#exports.clear(); this.#imports.clear(); this.#queued.clear()
   }
   #fault(error) { this.close(error); this.#abort?.(error) }
+  // A call id in an invocation chain: one of either side's, possibly
+  // tagged with the session it came through (`s3/mac:4`).
+  #callId(id) {
+    if (typeof id !== 'string') return false
+    if (!this.#endpoint) return /^(node|rust):[1-9][0-9]*$/.test(id)
+    return /^(s[0-9]+\/)?[a-z0-9-]+:[1-9][0-9]*$/.test(id)
+  }
   #path() { return this.#syncPath ?? this.#context.getStore() ?? [] }
   #write(frame) { if (this.#closed) throw this.#closed; this.#send(encode(frame)) }
   #allocate() {
     if (this.#closed) throw this.#closed
     if (!this.#handshake) throw new Error('protocol handshake incomplete')
     if (!Number.isSafeInteger(++this.#next)) throw new Error('call identifiers exhausted')
-    return `node:${this.#next}`
+    return `${this.#local}${this.#next}`
   }
   #encode(value, grants, business) {
     if (value === undefined) return { type: 'undefined' }
@@ -101,6 +146,7 @@ export class Session {
         id = ++this.#ref
         if (!Number.isSafeInteger(id)) throw new Error('reference identifiers exhausted')
         const kind = typeof value === 'function' ? 'function' : value instanceof Promise ? 'future' : 'object'
+        if (kind === 'object' && this.#endpoint && !this.supports('objects')) throw new Error('the far end cannot receive object references')
         entry = { origin: [...this.#path()], value, kind, grants: 0, business, call: kind === 'future' ? this.#promiseCalls.get(value) : undefined }
         this.#identities.set(value, id); this.#exports.set(id, entry)
         if (entry.kind === 'future') {
@@ -143,7 +189,7 @@ export class Session {
       }
       case 'reference': {
         const { id, home, kind, origin } = wire.value
-        if (!Number.isSafeInteger(id) || id <= 0 || !['function', 'future', 'object'].includes(kind) || typeof home !== 'boolean' || !Array.isArray(origin) || origin.some(id => !/^(node|rust):[1-9][0-9]*$/.test(id))) throw new Error('invalid reference')
+        if (!Number.isSafeInteger(id) || id <= 0 || !['function', 'future', 'object'].includes(kind) || typeof home !== 'boolean' || !Array.isArray(origin) || origin.some(id => !this.#callId(id))) throw new Error('invalid reference')
         if (home) return this.#export(id, kind).value
         // Rust does not export objects; only JS objects travel back home.
         if (kind === 'object') throw new Error('object references exported by Rust are not supported')
@@ -221,7 +267,8 @@ export class Session {
     if (this.#closed) return
     try {
       if (frame.op === 'hello') {
-        if (frame.version !== PROTOCOL || this.#handshake) throw new Error('incompatible or duplicate protocol handshake')
+        if (this.#handshake) throw new Error('duplicate protocol handshake')
+        this.#greet(frame)
         this.#handshake = true; this.#resolveReady(); return
       }
       if (!this.#handshake) throw new Error('request before protocol handshake')
@@ -244,9 +291,9 @@ export class Session {
         if ((entry.grants -= frame.count) === 0) this.#exports.delete(frame.reference)
         return
       }
-      if (!['invoke', 'call', 'get', 'await'].includes(frame.op) || typeof frame.id !== 'string' || !frame.id.startsWith('rust:') || !Array.isArray(frame.path) || frame.path.some(id => typeof id !== 'string') || frame.path.includes(frame.id)) throw new Error('invalid invocation')
-      const sequence = Number(frame.id.slice(5))
-      if (!/^rust:[1-9][0-9]*$/.test(frame.id) || !Number.isSafeInteger(sequence) || sequence <= this.#received) throw new Error('invalid or repeated invocation identity')
+      if (!['invoke', 'call', 'get', 'await'].includes(frame.op) || typeof frame.id !== 'string' || !frame.id.startsWith(this.#remote) || !Array.isArray(frame.path) || frame.path.some(id => typeof id !== 'string') || frame.path.includes(frame.id)) throw new Error('invalid invocation')
+      const digits = frame.id.slice(this.#remote.length), sequence = Number(digits)
+      if (!/^[1-9][0-9]*$/.test(digits) || !Number.isSafeInteger(sequence) || sequence <= this.#received) throw new Error('invalid or repeated invocation identity')
       this.#received = sequence
       if (frame.op === 'call' && frame.method !== undefined && typeof frame.method !== 'string') throw new Error('invalid method')
       if (frame.op === 'get' && typeof frame.property !== 'string') throw new Error('invalid property')

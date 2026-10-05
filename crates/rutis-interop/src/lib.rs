@@ -15,6 +15,12 @@ pub mod build;
 /// speaks as `rutisProtocol` in its package.json; builds check they match.
 pub const PROTOCOL: u32 = 2;
 
+/// The endpoint session format: endpoint ids in the handshake and in call
+/// ids, capabilities, either side calling the other. Network sessions use
+/// it (WebSocket subprotocol `rutis.3`); local runtime sessions keep
+/// [`PROTOCOL`].
+pub const ENDPOINT_PROTOCOL: u32 = 3;
+
 /// Environment variable naming the npm project the mounts load from, for a
 /// binary running against a deployed copy of it.
 pub const ROOT_VARIABLE: &str = "RUTIS_INTEROP_ROOT";
@@ -94,6 +100,21 @@ pub enum Error {
     SyncWaitCycle(String),
     #[error("invalid binding value: {0}")]
     Value(String),
+    /// The session could not be established: see [`Handshake`].
+    #[error("{0}")]
+    Handshake(Handshake),
+}
+
+/// Why a session handshake failed. A link stops retrying an incompatible
+/// far end, and retries slowly one whose identity does not match.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Handshake {
+    /// Another protocol version or format, or a malformed handshake.
+    #[error("incompatible session: {0}")]
+    Incompatible(String),
+    /// The far end named an endpoint other than the one verified or expected.
+    #[error("endpoint mismatch: {0}")]
+    IdentityMismatch(String),
 }
 
 impl From<Error> for rutis::CordisError {

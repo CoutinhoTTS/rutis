@@ -313,7 +313,13 @@ mod websocket {
     use rutis_transport_websocket::{Config, ListenerConfig, WebSocketTransport};
     use tokio::io::AsyncBufReadExt;
 
-    const PROTOCOL: &str = "rutis.2";
+    const PROTOCOL: &str = "rutis.3";
+
+    fn endpoint(expected: &str) -> rutis_interop::rpc::Format {
+        rutis_interop::rpc::Format::Endpoint(
+            rutis_interop::rpc::Endpoint::rust(id("main")).expect(id(expected)),
+        )
+    }
 
     fn id(s: &str) -> PeerId {
         PeerId::new(s).unwrap()
@@ -358,7 +364,12 @@ mod websocket {
         .unwrap()
         .unwrap();
         assert_eq!(channel.info.peer, Some(id("node")));
-        let peer = Connection::open(channel, Arc::new(Service(Mutex::new(None)))).unwrap();
+        let peer = Connection::open_with(
+            channel,
+            Arc::new(Service(Mutex::new(None))),
+            endpoint("node"),
+        )
+        .unwrap();
         fixture_passes(peer, child).await;
     }
 
@@ -368,6 +379,8 @@ mod websocket {
         let mut child = tokio::process::Command::new("node")
             .arg(rpc_client())
             .arg("listen:ws://127.0.0.1:0/rutis")
+            .arg("node")
+            .arg("main")
             .env("RUTIS_INTEROP_TOKEN", "main-token")
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -398,7 +411,22 @@ mod websocket {
             )
             .await
             .unwrap();
-        let peer = Connection::open(channel, Arc::new(Service(Mutex::new(None)))).unwrap();
+        let peer = Connection::open_with(
+            channel,
+            Arc::new(Service(Mutex::new(None))),
+            endpoint("node"),
+        )
+        .unwrap();
+        assert!(peer.ready().await.is_ok());
+        assert_eq!(
+            peer.greeting()
+                .unwrap()
+                .implementation
+                .as_ref()
+                .unwrap()
+                .name,
+            "@arcships/rutis-interop"
+        );
         fixture_passes(peer, child).await;
     }
 }

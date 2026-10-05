@@ -4,8 +4,19 @@ import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { isLeaf, toCordis } from './plugin.mjs'
 
-// The channel (`fd:3`, or a socket path to dial) and the first plugin.
-const [channelSpec, pluginPath] = process.argv.slice(2)
+// `<channel> [--id <endpoint>] [--peer <endpoint>] <first plugin or anchor>`.
+// Local channels (`fd:3`, a socket path) speak the compat protocol; network
+// channels (`ws://`, `wss://`, `listen:…`) the endpoint format, as `--id`,
+// expecting `--peer` as the controller when given.
+const { channelSpec, pluginPath, endpoint } = (() => {
+  const [channelSpec, ...rest] = process.argv.slice(2)
+  const flags = {}
+  while (rest[0]?.startsWith('--')) flags[rest.shift().slice(2)] = rest.shift()
+  const network = /^(wss?|listen):/.test(channelSpec)
+  if (network && !flags.id) throw new Error(`a network channel needs --id <endpoint>: ${channelSpec}`)
+  const endpoint = network ? { local: flags.id, expected: flags.peer } : undefined
+  return { channelSpec, pluginPath: rest[0], endpoint }
+})()
 
 // The plugins' Service classes must come from the same Cordis instance as the
 // Context, so prefer the Cordis that the (first) plugin itself resolves.
@@ -410,7 +421,7 @@ function dispatch(target, method, args) {
 }
 
 // Calls on exported objects and functions may replace services too.
-peer = await Process.connect(channelSpec, dispatch, () => { if (slots.size && !closing) refresh() })
+peer = await Process.connect(channelSpec, dispatch, () => { if (slots.size && !closing) refresh() }, endpoint)
 await peer.closed()
 closing = true
 await dispose()

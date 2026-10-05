@@ -407,6 +407,7 @@ impl Process {
             Some(spawned.child),
             spawned.directory,
             started,
+            crate::rpc::Format::Compat,
         )
         .await
     }
@@ -416,12 +417,15 @@ impl Process {
     /// listens on a WebSocket and was dialed). [`Mount::launcher`] and
     /// [`Mount::anchor`] do not apply: that process was started with its own.
     /// It has no exit status here, and its end is the session's end.
+    ///
+    /// Network sessions use the endpoint [`Format`](crate::rpc::Format).
     pub async fn attach(
         channel: rutis_channel::Channel,
         mount: Mount<'_>,
+        format: crate::rpc::Format,
     ) -> Result<Arc<Self>, Error> {
         let (started, _) = Started::from(mount);
-        Self::start(channel, None, None, started).await
+        Self::start(channel, None, None, started, format).await
     }
 
     async fn start(
@@ -429,6 +433,7 @@ impl Process {
         child: Option<crate::spawn::Child>,
         directory: Option<tempfile::TempDir>,
         started: Started,
+        format: crate::rpc::Format,
     ) -> Result<Arc<Self>, Error> {
         let Started {
             plugins,
@@ -451,7 +456,7 @@ impl Process {
             hosts: Mutex::new(hosts),
             forwarded,
         });
-        let peer = Connection::open(channel, imports.clone())?;
+        let peer = Connection::open_with(channel, imports.clone(), format)?;
         peer.ready().await?;
         let process = Arc::new(Self {
             peer,
