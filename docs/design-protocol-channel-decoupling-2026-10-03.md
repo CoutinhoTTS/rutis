@@ -12,7 +12,7 @@
 - 一个 Session 使用一个逻辑 Channel；逻辑 Channel 与物理连接的映射由 Transport Adapter 决定，不要求一一对应。连接池、连接复用和多路复用不进入会话协议；框架节点组合在框架层完成。
 - 支持两种远程端点：A 为完整框架节点，两端各自管理插件，按需配置 `export`、`import`、`host`、`events`；B 为叶子语言运行时，由本地 rutis 与 loader 管理，远端不运行 rutis。
 - 两种端点共享承载、身份、link 与 Session；运行时接入独立于节点桥功能，不要求叶子运行时实现完整框架节点能力。
-- 会话对称化、端点操作契约、权限与框架节点组合由远程稿规定；rutis 内核和 Cordis 不改。
+- 会话握手与能力格式、端点操作契约、权限与框架节点组合由远程稿规定；rutis 内核和 Cordis 不改。
 - rutis-dev 开发协议、Windows 命名管道实现不在本文范围。
 
 ## 分层与插件结构
@@ -220,7 +220,7 @@ pub enum ConnectError {
 | 有序关闭 | 关闭码 1001 |
 | 接管 | link 决定同一端点 id 的新连接接管旧会话后，旧连接以 4002 关闭，reason 为 `replaced by a new connection` |
 
-拨号方向由部署配置，不区分完整框架节点或叶子运行时；方向不授予功能权限。心跳使用 WebSocket ping/pong，不注入会话协议帧。
+完整框架节点之间的拨号方向由部署配置；远程叶子运行时只监听，由控制方 link 拨号，因为叶子侧没有 link 持有重连退避（见远程稿“远端租约”）。方向不授予功能权限。心跳使用 WebSocket ping/pong，不注入会话协议帧。
 
 ## 本机子进程端点与兼容接口
 
@@ -275,6 +275,6 @@ pub enum ConnectError {
 
 ## 关联规范
 
-- [兼容层设计](design-protocol-plugin-mount.md)：帧语义按远程稿对称化；协议帧与 stdout 隔离由通道保证。
-- [远程稿](design-remote-plugins-2026-10-03.md)：两种远程端点、会话对称化、端点操作契约、共享接入插件、节点桥功能、loader 侧配套插件与权限。
+- [兼容层设计](design-protocol-plugin-mount.md)：本机运行时帧语义保持不变，新网络会话格式按远程稿；协议帧与 stdout 隔离由通道保证。
+- [远程稿](design-remote-plugins-2026-10-03.md)：两种远程端点、会话握手与能力格式、端点操作契约、共享接入插件、节点桥功能、loader 侧配套插件与权限。
 - [挂载 Cordis 插件：需求](requirements-protocol-plugins.md)：保留不修改 rutis 内核和 Cordis 的约束。
