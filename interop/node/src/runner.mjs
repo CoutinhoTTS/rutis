@@ -11,7 +11,7 @@ function cordisOf(entry) {
   try { return createRequire(entry).resolve('@deepseek-ai/cordis') } catch { return undefined }
 }
 const cordisPath = cordisOf(pluginPath)
-const { Context, resolveConfig } = await import(cordisPath ? pathToFileURL(cordisPath).href : '@deepseek-ai/cordis')
+const { Context, Inject, resolveConfig } = await import(cordisPath ? pathToFileURL(cordisPath).href : '@deepseek-ai/cordis')
 // Volatile config helpers from the cosmokit that Cordis itself uses.
 const cosmokit = await import(pathToFileURL(createRequire(cordisPath ?? fileURLToPath(import.meta.resolve('@deepseek-ai/cordis'))).resolve('@deepseek-ai/cosmokit')).href).catch(() => ({}))
 let peer
@@ -23,7 +23,11 @@ let disposing
 let version = 0
 let emits = new Set() // events the rutis side may emit here
 // Rows: plugins rutis-loader manages one by one in this Context (`rows.*`).
-const rows = new Map() // key -> { fiber, inner, config }
+const rows = new Map() // key -> { fiber, inner, config, exports }
+// rutis services registered one by one (`hosts.*`): name -> withdraw
+const hosts = new Map()
+// What this runner supports beyond protocol 2, reported by `mount`.
+const FEATURES = ['rows.v2', 'hosts']
 
 // Each exported service slot is projected as a sequence of object handles.
 // A handle always addresses the object it was created for; when the slot
@@ -41,8 +45,8 @@ const identity = value => (value !== null && (typeof value === 'object' || typeo
 // it, like any native consumer: Cordis gates it on availability including
 // Service.check(), and effects that service methods create through the
 // caller's context belong to this fiber and are disposed with it.
-function exporter(name, slot) {
-  return ctx.plugin({
+function exporter(name, slot, parent = ctx) {
+  return parent.plugin({
     name: `interop-export:${name}`,
     inject: [name],
     apply(scope) {
@@ -136,26 +140,77 @@ const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeO
 // One row: `isolate` as [name, label] pairs (rows naming a label share its
 // scope), `inject` as extra service names gating the row. With `inject`, the
 // plugin runs inside a gate fiber (`inner`), from the row's latest config.
-async function loadRow([key, entry, config, isolate, inject]) {
+async function loadRow([key, entry, config, isolate, inject, exports]) {
   if (rows.has(key)) throw new Error(`row ${key} is already loaded`)
+  const names = Object.keys(exports ?? {})
+  for (const name of names) {
+    if (name.includes('#')) throw new Error(`service name ${name} cannot be projected`)
+    const owner = [...rows].find(([, row]) => row.exports.includes(name))
+    if (owner || slots.has(name)) throw new Error(`service ${name} is already exported${owner ? ` by row ${owner[0]}` : ''}`)
+  }
   const plugin = await pluginOf(entry)
   let scope = ctx
   for (const [name, label] of isolate ?? []) scope = scope.isolate(name, Symbol.for(`rutis-row:${label}`))
-  const row = { fiber: undefined, inner: undefined, config }
+  const row = { fiber: undefined, inner: undefined, config, exports: names }
   const fiber = fiberOf(inject?.length
     ? scope.plugin({ name: `row:${key}`, inject, apply(gated) { row.inner = fiberOf(gated.plugin(plugin, row.config)) } })
     : scope.plugin(plugin, config))
   row.fiber = fiber
   if (!inject?.length) row.inner = fiber
   rows.set(key, row)
+  // The row's services are read from its own scope, like a consumer of it
+  // would, so an isolated row exports the service of its isolated scope.
+  for (const name of names) {
+    const slot = { methods: new Set(Object.keys(exports[name] ?? {})), scope: undefined, object: undefined, identity: undefined, handle: null, generation: 0, version: 0 }
+    slots.set(name, slot)
+    slot.exporter = exporter(name, slot, scope)
+  }
   try {
     await fiber.await()
   } catch (error) {
-    rows.delete(key)
-    await fiber.dispose()
+    await unloadRow(key)
     throw error
   }
   return null
+}
+
+// Exporters first: their withdrawal reaches rutis (the service's consumers
+// stop) before the plugin itself goes away.
+async function unloadRow(key) {
+  const row = rows.get(key)
+  if (!row) return null
+  rows.delete(key)
+  for (const name of row.exports) {
+    const slot = slots.get(name)
+    await slot?.exporter?.dispose()
+    if (slot) retire(slot.handle)
+    slots.delete(name)
+  }
+  await row.fiber.dispose()
+  return null
+}
+
+// What rutis-loader needs before loading a plugin: its config schema, the
+// services it injects (all required in Cordis), and the services it provides
+// to rutis with their method kinds, from `rutis.provides` in its package.json.
+async function describe(entry) {
+  const plugin = await pluginOf(entry)
+  const schema = plugin.Config ?? plugin.schema
+  return {
+    config: schema ? toJsonSchema(schema) : null,
+    inject: Object.keys(Inject.resolve(plugin.inject)),
+    provides: await providesOf(entry),
+  }
+}
+
+async function providesOf(entry) {
+  const { readFile } = await import('node:fs/promises')
+  const { dirname, join } = await import('node:path')
+  for (let dir = dirname(entry); ; dir = dirname(dir)) {
+    const text = await readFile(join(dir, 'package.json'), 'utf8').catch(() => undefined)
+    if (text !== undefined) return JSON.parse(text).rutis?.provides ?? {}
+    if (dirname(dir) === dir) return {}
+  }
 }
 
 // A new config for a row. Volatile values are committed into the running
@@ -276,7 +331,7 @@ function mount(args) {
         return done
       })
     }
-    return { services: Object.fromEntries([...slots].map(([name, slot]) => [name, [slot.handle, slot.version]])) }
+    return { services: Object.fromEntries([...slots].map(([name, slot]) => [name, [slot.handle, slot.version]])), features: FEATURES }
   })()
 }
 
@@ -304,15 +359,21 @@ function dispatch(target, method, args) {
       }
       case 'rows.load': return loadRow(args ?? [])
       case 'rows.update': return updateRow(args ?? [])
-      case 'rows.unload': {
-        const row = rows.get(args?.[0])
-        rows.delete(args?.[0])
-        return row ? row.fiber.dispose().then(() => null) : null
+      case 'rows.unload': return unloadRow(args?.[0])
+      case 'rows.schema': return describe(args?.[0])
+      case 'hosts.provide': {
+        // A rutis service, registered for the rows that use it; rutis counts
+        // the users and withdraws it after the last one.
+        const [name, methods] = args ?? []
+        if (hosts.has(name)) throw new Error(`host service ${name} is already provided`)
+        hosts.set(name, ctx.provide(name, hostProxy(name, methods ?? {})))
+        return null
       }
-      case 'rows.schema': return pluginOf(args?.[0]).then(plugin => {
-        const schema = plugin.Config ?? plugin.schema
-        return schema ? toJsonSchema(schema) : null
-      })
+      case 'hosts.withdraw': {
+        const withdraw = hosts.get(args?.[0])
+        hosts.delete(args?.[0])
+        return withdraw ? Promise.resolve(withdraw()).then(() => null) : null
+      }
       case 'release': {
         const entry = handles.get(args?.[0])
         if (entry) { entry.released = true; if (!entry.current) handles.delete(args[0]) }

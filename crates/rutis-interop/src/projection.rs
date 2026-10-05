@@ -63,6 +63,19 @@ impl Projection {
         name: &str,
         make: fn(Arc<Process>, String) -> T,
     ) {
+        self.service_keyed(name, TypeKey::of::<T>(), move |process, handle| {
+            Arc::new(make(process, handle))
+        });
+    }
+
+    /// Declare an exported slot published under `key`, for example a
+    /// `dyn HostDispatch` under [`crate::host_key`].
+    pub fn service_keyed<T: ?Sized + Send + Sync + 'static>(
+        &self,
+        name: &str,
+        key: TypeKey,
+        mut make: impl FnMut(Arc<Process>, String) -> Arc<T> + Send + 'static,
+    ) {
         let mut binding: Option<(Disposer, ServiceWriter<T>)> = None;
         // A proxy whose publication failed is kept for the retry: it holds its
         // handle, and dropping it would release that handle on the Cordis side.
@@ -79,14 +92,14 @@ impl Projection {
             };
             let proxy = match candidate.take() {
                 Some((kept, proxy)) if kept == handle => proxy,
-                _ => Arc::new(make(process.clone(), handle.clone())),
+                _ => make(process.clone(), handle.clone()),
             };
             let published = match binding.as_ref() {
                 Some((_, writer)) => writer
                     .set(ctx, proxy.clone())
                     .map_err(|error| Error::Value(error.to_string())),
                 None => ctx
-                    .provide_mut_as(TypeKey::of::<T>(), proxy.clone())
+                    .provide_mut_as(key.clone(), proxy.clone())
                     .map(|registered| binding = Some(registered))
                     .map_err(|error| Error::Value(error.to_string())),
             };

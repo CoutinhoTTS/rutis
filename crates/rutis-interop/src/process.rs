@@ -20,6 +20,19 @@ pub trait ServiceEvents: Send + Sync + 'static {
 /// registers a proxy under `name` whose calls arrive here.
 pub trait HostDispatch: Send + Sync + 'static {
     fn invoke(&self, method: &str, args: RpcValue) -> Reply;
+
+    /// The methods as `{ method: "sync" | "async" }`, when the service knows
+    /// them; otherwise whoever registers it with a runtime supplies them.
+    fn methods(&self) -> Option<Value> {
+        None
+    }
+
+    /// The process whose plugin serves this service, when it is one
+    /// ([`crate::RowService`]): a row of that same process uses the plugin
+    /// natively instead of through a proxy.
+    fn origin(&self) -> Option<&Process> {
+        None
+    }
 }
 
 /// One host-provided service: its Cordis name, the bound methods as
@@ -32,12 +45,21 @@ pub struct Host {
 
 type Slots = Arc<Mutex<HashMap<String, (Option<String>, u64)>>>;
 
+/// A host service registered with the Node side, and how many leases use
+/// it. Hosts of a mount stay for the process's lifetime.
+struct HostEntry {
+    dispatch: Arc<dyn HostDispatch>,
+    leases: usize,
+}
+
 /// Records the newest handle per slot and forwards newer changes; serves
 /// calls to host-provided services.
 struct Imports {
     slots: Slots,
     events: Option<Arc<dyn ServiceEvents>>,
-    hosts: HashMap<String, Arc<dyn HostDispatch>>,
+    /// Observers of the services rows export, by service name.
+    exported: Mutex<HashMap<String, Arc<dyn ServiceEvents>>>,
+    hosts: Mutex<HashMap<String, HostEntry>>,
     forwarded: Option<Arc<dyn EventSink>>,
 }
 
@@ -73,7 +95,11 @@ impl Imports {
             *entry = (handle.clone(), version);
         }
         if let Some(events) = &self.events {
-            events.changed(&name, handle, version);
+            events.changed(&name, handle.clone(), version);
+        }
+        let exported = self.exported.lock().unwrap().get(&name).cloned();
+        if let Some(observer) = exported {
+            observer.changed(&name, handle, version);
         }
     }
 }
@@ -82,7 +108,10 @@ impl Dispatch for Imports {
         if let Some(name) = target.strip_prefix("host:") {
             let host = self
                 .hosts
+                .lock()
+                .unwrap()
                 .get(name)
+                .map(|entry| entry.dispatch.clone())
                 .ok_or_else(|| Error::Value(format!("no host service {name}")))?;
             return host.invoke(method, args);
         }
@@ -235,7 +264,62 @@ pub struct Process {
     imports: Arc<Imports>,
     runtime: tokio::runtime::Handle,
     child: Child,
+    /// Reported by the runner when mounting.
+    features: std::sync::OnceLock<Vec<String>>,
+    /// The services each loaded row exports, by row key.
+    exports: Mutex<HashMap<String, Vec<String>>>,
+    /// Serializes `hosts.provide` / `hosts.withdraw`, so a lease returns only
+    /// once its service is registered on the Node side, and a withdrawal
+    /// never overtakes the registration it undoes.
+    host_changes: tokio::sync::Mutex<()>,
     _directory: tempfile::TempDir,
+}
+
+/// What a plugin module declares, for rutis-loader (see
+/// [`Process::describe_row`]).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RowSchema {
+    /// The JSON Schema of the config, if the plugin declares one.
+    pub config: Option<Value>,
+    /// The services the plugin injects; Cordis has only required ones.
+    #[serde(default)]
+    pub inject: Vec<String>,
+    /// The services it provides to rutis: `{ name: { method: "sync" | "async" } }`.
+    #[serde(default)]
+    pub provides: serde_json::Map<String, Value>,
+}
+
+/// One row's use of a host service (see [`Process::lease_host`]).
+pub struct HostLease {
+    process: Option<Arc<Process>>,
+    name: String,
+}
+
+impl HostLease {
+    /// Give the lease back; the last one withdraws the service from Cordis.
+    pub async fn release(mut self) -> Result<(), Error> {
+        match self.process.take() {
+            Some(process) => process.release_host(&self.name).await,
+            None => Ok(()),
+        }
+    }
+}
+
+/// A lease dropped without [`HostLease::release`] is released by a task on
+/// the process's runtime, best effort: while that runtime shuts down the task
+/// may never run, and the count stays raised. That is harmless only because
+/// the count lives in the process, which goes away with the runtime. A lease
+/// that may outlive its process's runtime must be released explicitly.
+impl Drop for HostLease {
+    fn drop(&mut self) {
+        if let Some(process) = self.process.take() {
+            let name = std::mem::take(&mut self.name);
+            let runtime = process.runtime.clone();
+            runtime.spawn(async move {
+                let _ = process.release_host(&name).await;
+            });
+        }
+    }
 }
 
 impl Process {
@@ -317,7 +401,13 @@ impl Process {
             .collect();
         let hosts = hosts
             .into_iter()
-            .map(|host| (host.name, host.dispatch))
+            .map(|host| {
+                let entry = HostEntry {
+                    dispatch: host.dispatch,
+                    leases: 1,
+                };
+                (host.name, entry)
+            })
             .collect();
         let plugin = match (plugins.first(), anchor) {
             (Some((plugin, _)), _) => *plugin,
@@ -369,7 +459,8 @@ impl Process {
         let imports = Arc::new(Imports {
             slots: Slots::default(),
             events,
-            hosts,
+            exported: Mutex::default(),
+            hosts: Mutex::new(hosts),
             forwarded,
         });
         let child = Child::watch(child);
@@ -381,6 +472,9 @@ impl Process {
             imports,
             runtime: tokio::runtime::Handle::current(),
             child,
+            features: std::sync::OnceLock::new(),
+            exports: Mutex::default(),
+            host_changes: tokio::sync::Mutex::new(()),
             _directory: directory,
         });
         let mounted = process
@@ -395,6 +489,10 @@ impl Process {
         for (name, (handle, version)) in slots {
             process.imports.update(name, handle, version);
         }
+        // A runner older than 0.3.0 reports no features.
+        let features: Vec<String> =
+            crate::decode(mounted.get("features").cloned().unwrap_or(json!([])))?;
+        let _ = process.features.set(features);
         Ok(process)
     }
 
@@ -419,6 +517,58 @@ impl Process {
         .map(|_| ())
     }
 
+    /// Load row `key` like [`Process::load_row`], exporting the services in
+    /// `exports` (`{ name: { method: "sync" | "async" } }`) to `observer`:
+    /// it hears every change of each service, read from the row's scope,
+    /// until the row is unloaded. A name another row exports is refused.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn load_row_exporting(
+        &self,
+        key: &str,
+        entry: &Path,
+        config: Value,
+        isolate: &[(String, String)],
+        inject: &[String],
+        exports: &serde_json::Map<String, Value>,
+        observer: Arc<dyn ServiceEvents>,
+    ) -> Result<(), Error> {
+        if !exports.is_empty() {
+            self.require("rows.v2")?;
+        }
+        let names: Vec<String> = exports.keys().cloned().collect();
+        {
+            // Registered before loading: the row's services may appear
+            // while it starts.
+            let mut exported = self.imports.exported.lock().unwrap();
+            if let Some(name) = names.iter().find(|name| exported.contains_key(*name)) {
+                return Err(Error::Value(format!("service {name} is already exported")));
+            }
+            for name in &names {
+                exported.insert(name.clone(), observer.clone());
+            }
+        }
+        self.exports.lock().unwrap().insert(key.to_owned(), names);
+        let loaded = self
+            .call_async(
+                "",
+                "rows.load",
+                json!([key, entry, config, isolate, inject, exports]),
+            )
+            .await;
+        if loaded.is_err() {
+            self.forget_exports(key);
+        }
+        loaded.map(|_| ())
+    }
+
+    fn forget_exports(&self, key: &str) {
+        let names = self.exports.lock().unwrap().remove(key);
+        let mut exported = self.imports.exported.lock().unwrap();
+        for name in names.into_iter().flatten() {
+            exported.remove(&name);
+        }
+    }
+
     /// Give row `key` a new config. Cordis commits volatile values in place
     /// (`loader/volatile-update`, as dsh's loader does); any other change
     /// restarts the row with the config. An inactive row keeps it for its
@@ -431,16 +581,112 @@ impl Process {
 
     /// Dispose row `key`.
     pub async fn unload_row(&self, key: &str) -> Result<(), Error> {
-        self.call_async("", "rows.unload", json!([key]))
-            .await
-            .map(|_| ())
+        let unloaded = self.call_async("", "rows.unload", json!([key])).await;
+        // After the call: the withdrawals of the row's services arrive
+        // before its reply.
+        self.forget_exports(key);
+        unloaded.map(|_| ())
     }
 
-    /// The JSON Schema of the plugin at `entry` (its schemastery `Config`
-    /// converted), or `None` when it declares none.
-    pub async fn row_schema(&self, entry: &Path) -> Result<Option<Value>, Error> {
-        let schema = self.call_async("", "rows.schema", json!([entry])).await?;
-        Ok((!schema.is_null()).then_some(schema))
+    /// What the plugin at `entry` declares: its config schema (schemastery
+    /// `Config` converted), the services it injects, and the services it
+    /// provides to rutis.
+    pub async fn describe_row(&self, entry: &Path) -> Result<RowSchema, Error> {
+        self.require("rows.v2")?;
+        crate::decode(self.call_async("", "rows.schema", json!([entry])).await?)
+    }
+
+    /// Whether the Node runtime supports `feature` (reported when mounting).
+    pub fn supports(&self, feature: &str) -> bool {
+        self.features
+            .get()
+            .is_some_and(|features| features.iter().any(|f| f == feature))
+    }
+
+    fn require(&self, feature: &str) -> Result<(), Error> {
+        match self.supports(feature) {
+            true => Ok(()),
+            false => Err(Error::Value(format!(
+                "the Node runtime lacks `{feature}`: @arcships/rutis-interop 0.3.0 or later is required"
+            ))),
+        }
+    }
+
+    /// Lease the host service `name` for a row: the first lease registers
+    /// it with the Node side (methods from `methods`, else from
+    /// [`HostDispatch::methods`]); the last one released withdraws it. A
+    /// newer lease's dispatch replaces the older one's, since rows restart
+    /// when their provider changes.
+    pub async fn lease_host(
+        self: &Arc<Self>,
+        name: &str,
+        dispatch: Arc<dyn HostDispatch>,
+        methods: Option<Value>,
+    ) -> Result<HostLease, Error> {
+        self.require("hosts")?;
+        let _changing = self.host_changes.lock().await;
+        let first = {
+            let mut hosts = self.imports.hosts.lock().unwrap();
+            match hosts.get_mut(name) {
+                Some(entry) => {
+                    entry.leases = entry
+                        .leases
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Value(format!("host lease overflow for {name}")))?;
+                    entry.dispatch = dispatch.clone();
+                    false
+                }
+                None => {
+                    hosts.insert(
+                        name.to_owned(),
+                        HostEntry {
+                            dispatch: dispatch.clone(),
+                            leases: 1,
+                        },
+                    );
+                    true
+                }
+            }
+        };
+        if first {
+            let methods = methods
+                .or_else(|| dispatch.methods())
+                .unwrap_or_else(|| json!({}));
+            if let Err(error) = self
+                .call_async("", "hosts.provide", json!([name, methods]))
+                .await
+            {
+                self.imports.hosts.lock().unwrap().remove(name);
+                return Err(error);
+            }
+        }
+        Ok(HostLease {
+            process: Some(self.clone()),
+            name: name.to_owned(),
+        })
+    }
+
+    async fn release_host(&self, name: &str) -> Result<(), Error> {
+        let _changing = self.host_changes.lock().await;
+        let last = {
+            let mut hosts = self.imports.hosts.lock().unwrap();
+            let Some(entry) = hosts.get_mut(name) else {
+                return Ok(());
+            };
+            entry.leases -= 1;
+            let last = entry.leases == 0;
+            if last {
+                hosts.remove(name);
+            }
+            last
+        };
+        match last {
+            true => self
+                .call_async("", "hosts.withdraw", json!([name]))
+                .await
+                .map(|_| ()),
+            false => Ok(()),
+        }
     }
 
     /// The handle of the object currently in an exported slot, if available.

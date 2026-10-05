@@ -15,7 +15,7 @@ rutis 应用可以直接挂载已发布的 Cordis（Node）插件：插件在真
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-credentials-local": "0.2.0-rc.1",
-    "@arcships/rutis-interop": "0.2.0"
+    "@arcships/rutis-interop": "0.3.0"
   }
 }
 ```
@@ -32,11 +32,11 @@ npm --prefix cordis ci
 [dependencies]
 rutis = "…"
 # 与 npm 运行时 @arcships/rutis-interop 同版本发布。
-rutis-interop = "0.2"
+rutis-interop = "0.3"
 tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
-rutis-interop = "0.2"
+rutis-interop = "0.3"
 
 [package.metadata.rutis-interop]
 npm = "cordis"                   # 第 1 步的 npm 项目，相对 Cargo.toml
@@ -137,7 +137,7 @@ RUTIS_INTEROP_ROOT=/opt/app/cordis /opt/app/my-app
 
 ## 逐个装载（rows）
 
-`Mount { anchor: Some(package_json), .. }` 不带插件时启动一个空的 Cordis Context，之后用 `Process::load_row` / `unload_row` 逐个装载、卸载插件，`row_schema` 读取插件 schemastery `Config` 转成的 JSON Schema。rutis-loader 的 `InteropResolver` 就是这样把 JavaScript 插件作为行来管理的。
+`Mount { anchor: Some(package_json), .. }` 不带插件时启动一个空的 Cordis Context，之后用 `Process::load_row` / `unload_row` 逐个装载、卸载插件，`describe_row` 读取插件声明的内容：schemastery `Config` 转成的 JSON Schema、`inject` 的服务名，以及包的 `package.json` 里 `rutis.provides` 声明的、要提供给 rutis 的服务和方法形状。`load_row_exporting` 装载时把这些服务投到 rutis（`row_projection`，键为 `host_key(name)`）；`lease_host` 按行向 Cordis 注册宿主服务，最后一个使用者释放后撤销。rutis-loader 的 `InteropResolver` 就是这样把 JavaScript 插件作为行来管理的。
 
 要按 rutis 的生命周期管理这个 Context，挂载 `CordisRuntimePlugin`。它是一个普通插件：apply 时启动 Node 进程，提供 `CordisRuntime` 服务；清理时先撤销服务，再关闭进程。
 

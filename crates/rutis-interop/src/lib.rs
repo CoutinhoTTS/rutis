@@ -45,6 +45,8 @@ mod projection;
 #[cfg(unix)]
 mod protocol;
 #[cfg(unix)]
+mod rows;
+#[cfg(unix)]
 pub mod rpc;
 #[cfg(unix)]
 mod runtime;
@@ -56,9 +58,11 @@ pub use events::{EmitToCordis, EventSink, Events};
 #[cfg(unix)]
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
-pub use process::{Host, HostDispatch, Mount, Process, ServiceEvents};
+pub use process::{Host, HostDispatch, HostLease, Mount, Process, RowSchema, ServiceEvents};
 #[cfg(unix)]
 pub use projection::Projection;
+#[cfg(unix)]
+pub use rows::{row_projection, RowService};
 #[cfg(unix)]
 pub use runtime::{host_key, CordisRuntime, CordisRuntimePlugin, RuntimeHandle, RuntimeState};
 pub use serde;
