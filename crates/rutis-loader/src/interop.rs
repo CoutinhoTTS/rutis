@@ -37,7 +37,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, Plugin, PluginFactory, TypeKey};
-use rutis_interop::{host_key, row_projection, HostDispatch, HostLease, Process, RuntimeHandle};
+use rutis_interop::{
+    host_key, row_projection, HostDispatch, HostLease, Process, Projection, Runtime, RuntimeHandle,
+};
 use serde_json::{json, Map, Value};
 
 use crate::{
@@ -343,66 +345,18 @@ impl Plugin for JsRow {
                 .runtime()
                 .clone();
             let process = runtime.process().clone();
-            // The shared services the plugin injects, registered in Cordis
-            // for as long as the row runs. One served by a row of this same
-            // process is already there natively.
+            // Every lease taken is released on every path: by the cleanup
+            // once the row runs, here when it does not get that far. The
+            // kernel waits for apply to finish, so this frame always gets
+            // to release them.
             let mut leases: Vec<HostLease> = Vec::new();
-            for name in &self.gated {
-                let dispatch = ctx.require_as::<dyn HostDispatch>(host_key(name))?;
-                if dispatch
-                    .origin()
-                    .is_some_and(|origin| std::ptr::eq(origin, &*process))
-                {
-                    continue;
+            let (key, projection) = match self.start(ctx, &runtime, &mut leases).await {
+                Ok(started) => started,
+                Err(error) => {
+                    release(leases).await;
+                    return Err(error);
                 }
-                let lease = process
-                    .lease_host(name, dispatch, runtime.host_methods(name))
-                    .await
-                    .map_err(failed)?;
-                leases.push(lease);
-            }
-            // The fiber identity keys the row on the Cordis side: unique, and
-            // new for every generation.
-            let key = ctx.instance().to_string();
-            let row = ctx
-                .get::<Loader>()
-                .and_then(|loader| loader.row(ctx.instance()));
-            let (isolate, inject) = row.map(|row| (row.isolate, row.inject)).unwrap_or_default();
-            // The row's services are published from this fiber, so they go
-            // when it does.
-            let projection = row_projection(&self.provides);
-            projection.attach(ctx, process.clone())?;
-            if let Err(error) = process
-                .load_row_exporting(
-                    &key,
-                    &self.entry,
-                    self.config.clone(),
-                    &isolate,
-                    &inject,
-                    &self.provides,
-                    projection.clone(),
-                )
-                .await
-            {
-                projection.close();
-                return Err(failed(error));
-            }
-            // Volatile-only changes go to Cordis, which commits them in place.
-            let listening = ctx.events().on(
-                ctx,
-                &volatile_key(ctx),
-                Forward {
-                    key: key.clone(),
-                    process: process.clone(),
-                },
-            );
-            if let Err(error) = listening {
-                // The plugin is loaded, but no cleanup will be registered for
-                // it: undo the load here. The leases go with this frame.
-                projection.withdraw().await;
-                let _ = process.unload_row(&key).await;
-                return Err(error);
-            }
+            };
             Ok(Effect::AsyncDisposer(Box::new(move || {
                 Box::pin(async move {
                     // The row's services go first, and their users stop,
@@ -411,9 +365,7 @@ impl Plugin for JsRow {
                     let unloaded = process.unload_row(&key).await;
                     // After the unload: the plugin never sees a service it
                     // injects go away before it does.
-                    for lease in leases {
-                        let _ = lease.release().await;
-                    }
+                    release(leases).await;
                     match unloaded {
                         // The process is gone, and the row with it.
                         Ok(()) | Err(rutis_interop::Error::Transport(_)) => Ok(()),
@@ -422,6 +374,89 @@ impl Plugin for JsRow {
                 })
             })))
         })
+    }
+}
+
+impl JsRow {
+    /// Lease the shared services the plugin injects into `leases`, then
+    /// load it into the runtime. Returns its key there and the projection
+    /// of its services; on failure nothing of the load remains, and the
+    /// caller releases the leases.
+    async fn start(
+        &self,
+        ctx: &Ctx,
+        runtime: &Arc<Runtime>,
+        leases: &mut Vec<HostLease>,
+    ) -> Result<(String, Arc<Projection>), CordisError> {
+        let process = runtime.process();
+        // The shared services the plugin injects, registered in Cordis for
+        // as long as the row runs. One served by a row of this same process
+        // is already there natively.
+        for name in &self.gated {
+            let dispatch = ctx.require_as::<dyn HostDispatch>(host_key(name))?;
+            if dispatch
+                .origin()
+                .is_some_and(|origin| std::ptr::eq(origin, &**process))
+            {
+                continue;
+            }
+            let lease = process
+                .lease_host(name, dispatch, runtime.host_methods(name))
+                .await
+                .map_err(failed)?;
+            leases.push(lease);
+        }
+        // The fiber identity keys the row on the Cordis side: unique, and
+        // new for every generation.
+        let key = ctx.instance().to_string();
+        let row = ctx
+            .get::<Loader>()
+            .and_then(|loader| loader.row(ctx.instance()));
+        let (isolate, inject) = row.map(|row| (row.isolate, row.inject)).unwrap_or_default();
+        // The row's services are published from this fiber, so they go when
+        // it does.
+        let projection = row_projection(&self.provides);
+        projection.attach(ctx, process.clone())?;
+        if let Err(error) = process
+            .load_row_exporting(
+                &key,
+                &self.entry,
+                self.config.clone(),
+                &isolate,
+                &inject,
+                &self.provides,
+                projection.clone(),
+            )
+            .await
+        {
+            projection.close();
+            return Err(failed(error));
+        }
+        // Volatile-only changes go to Cordis, which commits them in place.
+        let listening = ctx.events().on(
+            ctx,
+            &volatile_key(ctx),
+            Forward {
+                key: key.clone(),
+                process: process.clone(),
+            },
+        );
+        if let Err(error) = listening {
+            // The plugin is loaded, but no cleanup will be registered for it:
+            // undo the load here.
+            projection.withdraw().await;
+            let _ = process.unload_row(&key).await;
+            return Err(error);
+        }
+        Ok((key, projection))
+    }
+}
+
+/// Give the leases back; a process that is gone has nothing left to
+/// withdraw.
+async fn release(leases: Vec<HostLease>) {
+    for lease in leases {
+        let _ = lease.release().await;
     }
 }
 

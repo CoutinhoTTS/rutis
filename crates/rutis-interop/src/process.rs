@@ -332,36 +332,19 @@ pub struct RowSchema {
     pub provides: serde_json::Map<String, Value>,
 }
 
-/// One row's use of a host service (see [`Process::lease_host`]).
+/// One row's use of a host service (see [`Process::lease_host`]). Give it
+/// back with [`HostLease::release`]: dropping it releases nothing, and the
+/// service stays registered in the runtime.
+#[must_use = "a lease is given back only by HostLease::release"]
 pub struct HostLease {
-    process: Option<Arc<Process>>,
+    process: Arc<Process>,
     name: String,
 }
 
 impl HostLease {
     /// Give the lease back; the last one withdraws the service from Cordis.
-    pub async fn release(mut self) -> Result<(), Error> {
-        match self.process.take() {
-            Some(process) => process.release_host(&self.name).await,
-            None => Ok(()),
-        }
-    }
-}
-
-/// A lease dropped without [`HostLease::release`] is released by a task on
-/// the process's runtime, best effort: while that runtime shuts down the task
-/// may never run, and the count stays raised. That is harmless only because
-/// the count lives in the process, which goes away with the runtime. A lease
-/// that may outlive its process's runtime must be released explicitly.
-impl Drop for HostLease {
-    fn drop(&mut self) {
-        if let Some(process) = self.process.take() {
-            let name = std::mem::take(&mut self.name);
-            let runtime = process.runtime.clone();
-            runtime.spawn(async move {
-                let _ = process.release_host(&name).await;
-            });
-        }
+    pub async fn release(self) -> Result<(), Error> {
+        self.process.release_host(&self.name).await
     }
 }
 
@@ -733,7 +716,7 @@ impl Process {
             }
         }
         Ok(HostLease {
-            process: Some(self.clone()),
+            process: self.clone(),
             name: name.to_owned(),
         })
     }
