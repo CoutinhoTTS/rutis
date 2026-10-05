@@ -235,6 +235,10 @@ fn finish_pack(
     std_library: &str,
 ) -> Result<(), String> {
     let output = args.output.clone().ok_or("--output is required")?;
+    let workspace = manifest
+        .parent()
+        .ok_or("the manifest has no parent directory")?
+        .to_owned();
     let sdk_hash = string(sdk, "artifact_sha256")?;
     let bytes = fs::read(library).map_err(|e| format!("{}: {e}", library.display()))?;
     check_allocator(&bytes, sdk_target)?;
@@ -271,11 +275,18 @@ fn finish_pack(
         interfaces.insert(name.to_owned(), requirement.to_owned());
     }
     let library_sha = sha256_bytes(&bytes);
-    let rustc = command_output(Command::new("rustc").arg("--version"))?
-        .trim()
-        .to_owned();
+    let rustc = command_output(
+        Command::new("rustc")
+            .arg("--version")
+            .current_dir(&workspace),
+    )?
+    .trim()
+    .to_owned();
     if rustc != string(sdk, "rustc")? {
-        return Err("plugin rustc differs from the published SDK".into());
+        return Err(format!(
+            "this rustc is {rustc}; the bundle's SDK was built with {}; use the bundle's rust-toolchain.toml",
+            string(sdk, "rustc")?
+        ));
     }
     let locked_sha = sha256_file(&lock_path(manifest)?)?;
 
@@ -465,14 +476,24 @@ fn pack_plugin_bundle(args: &Args) -> Result<(), String> {
         .ok_or("the manifest has no parent directory")?
         .to_owned();
 
-    // The compiler is checked before anything else: a mismatched rustc fails
-    // deep inside metadata loading (E0514) with a far less helpful error.
-    // The commands run in the plugin workspace so rustup picks the bundle's
-    // rust-toolchain.toml the author installed there, not whatever the
-    // rutis repository uses.
+    // The manifest is checked before the toolchain: a blacklisted direct
+    // dependency fails fast, without rustup or cargo touching anything.
+    check_bundle_manifest(&manifest)?;
+    // The plugin workspace's rust-toolchain.toml is what rustup picks when
+    // cargo runs there; it must match the bundle's pin exactly, or the
+    // plugin links a libstd the runtime bundle does not ship. cargo xtask's
+    // own toolchain comes from the rutis repository's workspace, so the
+    // check reads the file rather than asking rustup.
+    let bundle_channel = toolchain_channel(&bundle_dir)?;
+    let workspace_channel = toolchain_channel(&workspace)?;
+    if workspace_channel != bundle_channel {
+        return Err(format!(
+            "the plugin workspace pins {workspace_channel}, but the bundle's SDK was built with {bundle_channel}; align the workspace's rust-toolchain.toml with the bundle's"
+        ));
+    }
     let rustc = command_output(
-        Command::new("rustc")
-            .arg("--version")
+        Command::new("rustup")
+            .args(["run", &bundle_channel, "rustc", "--version"])
             .current_dir(&workspace),
     )?
     .trim()
@@ -483,20 +504,21 @@ fn pack_plugin_bundle(args: &Args) -> Result<(), String> {
             string(sdk, "rustc")?
         ));
     }
-    let host = command_output(Command::new("rustc").arg("-vV").current_dir(&workspace))?
-        .lines()
-        .find_map(|line| line.strip_prefix("host: "))
-        .ok_or("rustc -vV printed no host")?
-        .to_owned();
+    let host = command_output(
+        Command::new("rustup")
+            .args(["run", &bundle_channel, "rustc", "-vV"])
+            .current_dir(&workspace),
+    )?
+    .lines()
+    .find_map(|line| line.strip_prefix("host: "))
+    .ok_or("rustc -vV printed no host")?
+    .to_owned();
     if host != sdk_target {
         return Err(format!(
             "host target {host} differs from the bundle's {sdk_target}"
         ));
     }
 
-    // The manifest is checked before the lock file: a blacklisted direct
-    // dependency fails fast, without cargo touching the network or the graph.
-    check_bundle_manifest(&manifest)?;
     // A standalone workspace may not have a lock file yet. A stale one is
     // the author's to fix — regenerating it here would silently re-resolve
     // every dependency to its newest version.
@@ -555,9 +577,9 @@ fn pack_plugin_bundle(args: &Args) -> Result<(), String> {
         sdk_target,
     )?);
 
-    let mut command = Command::new("cargo");
+    let mut command = Command::new("rustup");
     command
-        .args(["build", "--release", "--locked", "--manifest-path"])
+        .args(["run", &bundle_channel, "cargo", "build", "--release", "--locked", "--manifest-path"])
         .arg(&manifest);
     if !args.features.is_empty() {
         command.args(["--features", &args.features]);
@@ -750,6 +772,26 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
             .map(|cwd| cwd.join(path))
             .map_err(|e| format!("current dir: {e}"))
     }
+}
+
+/// The channel a bundle pins, read from its rust-toolchain.toml. cargo
+/// xtask's own toolchain comes from the rutis repository's workspace, so
+/// the pin must be requested explicitly (rustup run <channel>) instead of
+/// relying on a plugin workspace's rust-toolchain.toml being picked up.
+fn toolchain_channel(dir: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(dir.join("rust-toolchain.toml"))
+        .map_err(|e| format!("{}/rust-toolchain.toml: {e}", dir.display()))?;
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("channel") {
+            if let Some(eq) = rest.find('=') {
+                let value = rest[eq + 1..].trim().trim_matches('"').to_owned();
+                if !value.is_empty() {
+                    return Ok(value);
+                }
+            }
+        }
+    }
+    Err(format!("{}/rust-toolchain.toml has no channel", dir.display()))
 }
 
 fn home_dir() -> Result<PathBuf, String> {

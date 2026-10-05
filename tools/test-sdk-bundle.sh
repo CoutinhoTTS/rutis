@@ -363,28 +363,27 @@ grep -Eq 'tokio_stream|tokio-stream|pin_project' "$base/e2d.stdout" || {
   exit 1
 }
 
-# E7: a non-pinned toolchain is refused before anything is built, with the
-# bundle's pin named — never the misleading E0514 from metadata loading.
-# rustup lists both the channel (1.98.1-x86_64-...) and aliases like
-# stable-x86_64-... for the same version; only a genuinely different
-# version exercises the refusal.
-pinned_version="$(grep '^channel' "$base/sdk-bundle/rust-toolchain.toml" | sed 's/.*= *"//;s/"//')"
-other_toolchain="$(rustup toolchain list 2>/dev/null | awk -v p="$pinned_version" '$0 !~ "^"p"-" {print $1; exit}')"
-if test -n "$other_toolchain"; then
-  echo "[sdk-bundle-test] E7: non-pinned toolchain is refused first"
-  if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS RUSTUP_TOOLCHAIN="$other_toolchain" \
-    cargo xtask pack-plugin --manifest-path "$base/external/plugin-v1/Cargo.toml" \
-    --bundle "$base/sdk-bundle" --features export --output "$base/bad-out" \
-    > "$base/e7.stdout" 2>&1; then
-    echo "a non-pinned toolchain was accepted" >&2
-    exit 1
-  fi
-  grep -Fq 'rust-toolchain.toml' "$base/e7.stdout"
-  if grep -q 'E0514' "$base/e7.stdout"; then
-    echo "the check surfaced as E0514 instead of the version check" >&2
-    exit 1
-  fi
+# E7: the packer refuses a plugin workspace whose rust-toolchain.toml does
+# not match the bundle's pin, with the pin named — never the misleading
+# E0514 from metadata loading. The refusal is a plain string comparison of
+# `rustc --version` run in the plugin workspace against the bundle's pin;
+# the workspace's own pin is what rustup picks when cargo runs there.
+echo "[sdk-bundle-test] E7: a mismatched workspace pin is refused"
+sed -i 's/channel = "1.98.1"/channel = "1.94.0"/' "$base/external/plugin-v1/rust-toolchain.toml"
+rm -rf "$base/external/plugin-v1/target"
+if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo xtask pack-plugin \
+  --manifest-path "$base/external/plugin-v1/Cargo.toml" \
+  --bundle "$base/sdk-bundle" --features export --output "$base/bad-out" \
+  > "$base/e7.stdout" 2>&1; then
+  echo "a mismatched workspace pin was accepted" >&2
+  exit 1
 fi
+grep -Fq 'rust-toolchain.toml' "$base/e7.stdout"
+if grep -q 'E0514' "$base/e7.stdout"; then
+  echo "the check surfaced as E0514 instead of the version check" >&2
+  exit 1
+fi
+sed -i 's/channel = "1.94.0"/channel = "1.98.1"/' "$base/external/plugin-v1/rust-toolchain.toml"
 
 # E8b: an ambient RUSTFLAGS replaces the injected flags entirely; the packer
 # refuses up front instead of silently building against nothing.
