@@ -611,11 +611,18 @@ class Peer:
         return result
 
     def notify(self, target: str, method: str, args: list) -> None:
-        """Fire and forget: an async call whose result nobody awaits."""
+        """Fire and forget: a call whose result nobody awaits. It is sent
+        before this returns, so it goes out ahead of anything sent later,
+        such as the reply of the call that caused it."""
         if self.closed_error is not None:
             return
-        task = self.loop.create_task(self.call_async(target, method, args))
-        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        if threading.get_ident() != self._thread:
+            self.loop.call_soon_threadsafe(self.notify, target, method, args)
+            return
+        try:
+            self._request("invoke", {"target": target, "method": method}, args, lambda _result: None)
+        except Exception:  # noqa: BLE001 - nobody awaits a notification
+            pass
 
     async def drain(self) -> None:
         if self._active:

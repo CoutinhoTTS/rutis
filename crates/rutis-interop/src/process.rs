@@ -616,11 +616,30 @@ impl Process {
         loaded.map(|_| ())
     }
 
+    /// Stop following the services row `key` exported, withdrawing them
+    /// first. The runtime withdraws them before it answers `rows.unload`,
+    /// but its notification runs as a task of its own and may reach the
+    /// observer only after this: without the withdrawal here, a late one
+    /// finds no observer and the service stays projected.
     fn forget_exports(&self, key: &str) {
         let names = self.exports.lock().unwrap().remove(key);
-        let mut exported = self.imports.exported.lock().unwrap();
-        for name in names.into_iter().flatten() {
-            exported.remove(&name);
+        let observers: Vec<_> = {
+            let mut exported = self.imports.exported.lock().unwrap();
+            names
+                .into_iter()
+                .flatten()
+                .filter_map(|name| exported.remove(&name).map(|observer| (name, observer)))
+                .collect()
+        };
+        for (name, observer) in observers {
+            let version = self
+                .imports
+                .slots
+                .lock()
+                .unwrap()
+                .get(&name)
+                .map_or(0, |(_, version)| *version);
+            observer.changed(&name, None, version);
         }
     }
 
