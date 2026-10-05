@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
+import { isLeaf, toCordis } from './plugin.mjs'
 
 const [socketPath, pluginPath] = process.argv.slice(2)
 
@@ -27,7 +28,7 @@ const rows = new Map() // key -> { fiber, inner, config, exports }
 // rutis services registered one by one (`hosts.*`): name -> withdraw
 const hosts = new Map()
 // What this runner supports beyond protocol 2, reported by `mount`.
-const FEATURES = ['rows.v2', 'hosts']
+const FEATURES = ['rows.v2', 'hosts', 'leaf.js']
 
 // Each exported service slot is projected as a sequence of object handles.
 // A handle always addresses the object it was created for; when the slot
@@ -124,6 +125,13 @@ function dispose() {
 // A plugin module: an `apply` export is a function plugin; otherwise the
 // default export, which is how packaged plugins ship their Service class.
 async function pluginOf(entry) {
+  const declared = await declaredOf(entry)
+  return isLeaf(declared) ? toCordis(declared) : declared
+}
+
+// The module's plugin as written: a leaf plugin (`definePlugin`), or a
+// Cordis plugin.
+async function declaredOf(entry) {
   const own = cordisOf(entry)
   if (cordisPath && own && own !== cordisPath) {
     throw new Error(`${entry} resolves a different Cordis (${own}) than ${pluginPath} (${cordisPath})`)
@@ -194,7 +202,10 @@ async function unloadRow(key) {
 // services it injects (all required in Cordis), and the services it provides
 // to rutis with their method kinds, from `rutis.provides` in its package.json.
 async function describe(entry) {
-  const plugin = await pluginOf(entry)
+  const declared = await declaredOf(entry)
+  // A leaf plugin declares everything in code.
+  if (isLeaf(declared)) return { config: declared.config ?? null, inject: declared.inject, provides: declared.provides }
+  const plugin = declared
   const schema = plugin.Config ?? plugin.schema
   return {
     config: schema ? toJsonSchema(schema) : null,

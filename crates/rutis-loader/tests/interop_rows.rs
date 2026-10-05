@@ -2,7 +2,7 @@
 //! services resolved between rows natively, per-row load/update/unload,
 //! isolate and inject forwarded, schemastery schema exported; services
 //! shared with rutis by name (multilanguage M1).
-#![cfg(all(unix, feature = "interop"))]
+#![cfg(all(unix, feature = "node"))]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use rutis::{Ctx, FiberState, FiberView};
 use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, CordisRuntimePlugin, HostDispatch};
+use rutis_interop::{host_key, HostDispatch, RuntimePlugin};
 use rutis_loader::{
-    Chain, CordisRuntimeRows, EntryStatus, InteropResolver, Layer, Loader, LoaderError,
-    LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin, ServiceCatalog,
+    Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin,
+    Patch, RuntimeRows, RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value};
 
@@ -319,9 +319,9 @@ async fn mount(root: &Ctx, package: PathBuf, shared: &[&str]) -> (Loader, FiberV
     for name in shared {
         catalog.register_shared(*name);
     }
-    let runtime = CordisRuntimePlugin::new(package, node_package().join("package.json"))
+    let runtime = RuntimePlugin::node(package, node_package().join("package.json"))
         .host("probe", json!({ "record": "sync" }));
-    let resolver = Arc::new(InteropResolver::new(runtime.handle()).with_catalog(&catalog));
+    let resolver = Arc::new(InteropResolver::node(runtime.handle()).with_catalog(&catalog));
     let runtime = root.plugin(runtime);
     let options = LoaderOptions {
         catalog,
@@ -490,7 +490,7 @@ async fn a_dead_process_stops_the_rows_until_restart() {
     })
     .await;
     assert_eq!(runtime.state().state, FiberState::Active);
-    let runtime_key = rutis::TypeKey::of::<CordisRuntimeRows>();
+    let runtime_key = RuntimeRows::key("node");
     let waiting = root
         .diagnostics()
         .plugins
@@ -582,9 +582,9 @@ async fn rows_resolved_offline_wait_for_what_they_inject() {
         .unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("probe").register_shared("greeter");
-    let runtime = CordisRuntimePlugin::new(node_package(), node_package().join("package.json"))
+    let runtime = RuntimePlugin::node(node_package(), node_package().join("package.json"))
         .host("probe", json!({ "record": "sync" }));
-    let resolver = Arc::new(InteropResolver::new(runtime.handle()).with_catalog(&catalog));
+    let resolver = Arc::new(InteropResolver::node(runtime.handle()).with_catalog(&catalog));
     let options = LoaderOptions {
         catalog,
         ..LoaderOptions::default()
@@ -629,8 +629,8 @@ async fn a_runtime_that_cannot_start_does_not_block_resolution() {
     let (provider, _, _) = write_plugins(dir.path());
     let root = Ctx::root().unwrap();
     // No Node runtime here: the mount fails.
-    let runtime = CordisRuntimePlugin::new(dir.path(), node_package().join("package.json"));
-    let resolver = InteropResolver::new(runtime.handle());
+    let runtime = RuntimePlugin::node(dir.path(), node_package().join("package.json"));
+    let resolver = InteropResolver::node(runtime.handle());
     let runtime = root.plugin(runtime);
     let _ = (&runtime).await;
     assert_eq!(runtime.state().state, FiberState::Failed);
@@ -706,7 +706,7 @@ async fn a_starting_runtime_can_be_disposed_or_restarted() {
     let dir = tempfile::tempdir().unwrap();
     let package = hanging_runtime(dir.path());
     let root = Ctx::root().unwrap();
-    let runtime = CordisRuntimePlugin::new(&package, node_package().join("package.json"));
+    let runtime = RuntimePlugin::node(&package, node_package().join("package.json"));
     let handle = runtime.handle();
     let runtime = root.plugin(runtime);
 

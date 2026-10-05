@@ -42,6 +42,12 @@ jobs:
       # dsh (web UI and agent loop) served by aimux in the rutis-dsh host.
       - run: npm --prefix crates/rutis-dsh/dsh ci
       - run: npm --prefix crates/rutis-dsh/dsh test
+      # The Python runtime (rutis-loader multilang tests run it).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m unittest discover -s tests
+        working-directory: interop/python
 
       - name: cargo test (workspace)
         run: cargo test --workspace
@@ -52,6 +58,15 @@ jobs:
 
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
+
+      # Each language runtime builds on its own: an application compiles only
+      # the languages it enables.
+      - name: cargo check (one language at a time)
+        run: |
+          cargo check -p rutis-interop --no-default-features --all-targets
+          cargo check -p rutis-interop --no-default-features --features python --all-targets
+          cargo check -p rutis-loader --features node --all-targets
+          cargo check -p rutis-loader --features python --all-targets
 
   # rutis 相对 crates.io 最新版的公开 API 变化：发现破坏性变更时给出警告，
   # 并在 job 摘要中列出，提示发布时需要提升的版本；不使 CI 失败（0.x 允许在

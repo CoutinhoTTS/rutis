@@ -1,8 +1,11 @@
-//! A Cordis runtime as a rutis plugin: one Node process and one empty Cordis
-//! Context, whose lifetime is the plugin's.
+//! A language runtime as a rutis plugin: one process, whose lifetime is the
+//! plugin's. The Node runtime runs an empty Cordis Context
+//! ([`RuntimePlugin::node`], feature `node`); the Python runtime runs leaf
+//! plugins ([`RuntimePlugin::python`], feature `python`). Both speak the
+//! same protocol and row contract, so nothing below depends on the language.
 //!
 //! Plugins loaded into it one by one (`Process::load_row`) depend on the
-//! [`CordisRuntime`] service, so they wait for the runtime natively and stop
+//! [`Runtime`] service, so they wait for the runtime natively and stop
 //! when it goes away. The runtime itself depends on nothing: each plugin
 //! leases the host services it uses (`Process::lease_host`), so the waiting
 //! falls on that plugin, and runtimes never wait for each other.
@@ -18,18 +21,24 @@ use tokio::task::JoinHandle;
 
 use crate::{HostDispatch, Mount, Process};
 
-/// The service a running Cordis runtime provides.
-pub struct CordisRuntime {
+/// The service a running runtime provides.
+pub struct Runtime {
     process: Arc<Process>,
     hosts: Arc<HashMap<String, Value>>,
 }
 
-impl CordisRuntime {
+impl Runtime {
     pub fn process(&self) -> &Arc<Process> {
         &self.process
     }
 
-    /// The methods declared with [`CordisRuntimePlugin::host`] for `name`.
+    /// The key the runtime named `name` provides this service under
+    /// ([`RuntimePlugin::named`]; `"node"` by default).
+    pub fn key(name: &str) -> TypeKey {
+        TypeKey::keyed_dynamic::<Runtime>(name.to_owned())
+    }
+
+    /// The methods declared with [`RuntimePlugin::host`] for `name`.
     pub fn host_methods(&self, name: &str) -> Option<Value> {
         self.hosts.get(name).cloned()
     }
@@ -46,7 +55,7 @@ pub fn host_key(name: &str) -> TypeKey {
 pub enum RuntimeState {
     /// No generation is running: not applied yet, or disposed.
     Idle,
-    /// A generation is starting the Node process.
+    /// A generation is starting the process.
     Starting,
     Ready(Arc<Process>),
     /// The last generation failed to start, or its process ended on its own.
@@ -56,12 +65,19 @@ pub enum RuntimeState {
 /// Observes a runtime from code that is not a plugin (a loader resolver).
 #[derive(Clone)]
 pub struct RuntimeHandle {
+    name: String,
     anchor: PathBuf,
     state: watch::Receiver<RuntimeState>,
 }
 
 impl RuntimeHandle {
-    /// The `package.json` plugins and Cordis resolve from.
+    /// The runtime's name ([`RuntimePlugin::named`]).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The `package.json` plugins and Cordis resolve from (for a Python
+    /// runtime, the project directory).
     pub fn anchor(&self) -> &Path {
         &self.anchor
     }
@@ -87,28 +103,48 @@ impl RuntimeHandle {
 
 /// The runtime plugin. Mount it before the plugins that load into it.
 ///
-/// When the Node process ends on its own, the plugin withdraws its service
+/// One runtime is one process of one language: the Node runtime runs a
+/// Cordis Context ([`RuntimePlugin::node`]); a Python runtime runs leaf
+/// plugins ([`RuntimePlugin::python`]). Both speak the same protocol
+/// and the same `rows.*` / `hosts.*` contract. An application gets only the
+/// runtimes it mounts, and compiles only the languages it enables.
+///
+/// When the process ends on its own, the plugin withdraws its service
 /// and stays Active: dependent plugins stop and wait, as for any provider
 /// that goes away. Restarting it (`FiberView::restart`) is the
 /// application's decision.
-pub struct CordisRuntimePlugin {
+pub struct RuntimePlugin {
+    runtime: String,
+    label: String,
     node_package: PathBuf,
     anchor: PathBuf,
+    launcher: Option<crate::Launcher>,
     hosts: Arc<HashMap<String, Value>>,
     state: Arc<watch::Sender<RuntimeState>>,
 }
 
-impl CordisRuntimePlugin {
-    /// `node_package`: the rutis-interop npm runtime (`interop/node`, or a
-    /// deployed `@arcships/rutis-interop`). `anchor`: the `package.json`
-    /// plugins and Cordis resolve from.
-    pub fn new(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
+impl RuntimePlugin {
+    /// The Node runtime, named `"node"`. `node_package`: the rutis-interop
+    /// npm runtime (`interop/node`, or a deployed `@arcships/rutis-interop`).
+    /// `anchor`: the `package.json` plugins and Cordis resolve from.
+    #[cfg(feature = "node")]
+    pub fn node(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
         Self {
+            runtime: "node".into(),
+            label: "node-runtime".into(),
             node_package: node_package.into(),
             anchor: anchor.into(),
+            launcher: None,
             hosts: Arc::default(),
             state: Arc::new(watch::channel(RuntimeState::Idle).0),
         }
+    }
+
+    /// The Node runtime, as [`RuntimePlugin::node`].
+    #[cfg(feature = "node")]
+    #[deprecated(since = "0.3.0", note = "use RuntimePlugin::node")]
+    pub fn new(node_package: impl Into<PathBuf>, anchor: impl Into<PathBuf>) -> Self {
+        Self::node(node_package, anchor)
     }
 
     /// Declare the methods `{ method: "sync" | "async" }` of the rutis
@@ -120,17 +156,89 @@ impl CordisRuntimePlugin {
         self
     }
 
+    /// A Python runtime named `"py"`: `python3 -m rutis_runtime`, with the
+    /// SDK directory `sdk` (`interop/python`) on `PYTHONPATH`, importing
+    /// plugin modules from `project`. Python 3.12 or later.
+    #[cfg(feature = "python")]
+    pub fn python(sdk: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
+        let (sdk, project) = (sdk.into(), project.into());
+        // Ahead of whatever the application already puts on the path.
+        let mut path = std::ffi::OsString::from(&sdk);
+        path.push(":");
+        path.push(&project);
+        if let Some(inherited) = std::env::var_os("PYTHONPATH").filter(|p| !p.is_empty()) {
+            path.push(":");
+            path.push(inherited);
+        }
+        let launcher = crate::Launcher::new("python3")
+            .arg("-m")
+            .arg("rutis_runtime")
+            .env("PYTHONPATH", path)
+            .env("PYTHONUNBUFFERED", "1")
+            // A plugin imported again after an edit must not come from a
+            // bytecode file written in the same second as the old source.
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .cwd(&project);
+        Self {
+            runtime: "py".into(),
+            label: "python-runtime".into(),
+            node_package: sdk,
+            anchor: project,
+            launcher: Some(launcher),
+            hosts: Arc::default(),
+            state: Arc::new(watch::channel(RuntimeState::Idle).0),
+        }
+    }
+
+    /// Run the Python runtime with this interpreter instead of `python3`.
+    #[cfg(feature = "python")]
+    pub fn interpreter(mut self, program: impl Into<std::ffi::OsString>) -> Self {
+        if let Some(launcher) = &mut self.launcher {
+            launcher.program = program.into();
+        }
+        self
+    }
+
+    /// Start the runtime process with `launcher` (another language, or
+    /// another way to start one). The launcher receives the socket path and
+    /// the anchor as its last two arguments.
+    pub fn launcher(
+        name: impl Into<String>,
+        launcher: crate::Launcher,
+        anchor: impl Into<PathBuf>,
+    ) -> Self {
+        let runtime: String = name.into();
+        Self {
+            label: format!("{runtime}-runtime"),
+            runtime,
+            node_package: launcher.cwd.clone().unwrap_or_default(),
+            anchor: anchor.into(),
+            launcher: Some(launcher),
+            hosts: Arc::default(),
+            state: Arc::new(watch::channel(RuntimeState::Idle).0),
+        }
+    }
+
+    /// Name the runtime: its service is keyed by the name
+    /// ([`Runtime::key`]), so runtimes of several languages, or
+    /// several of one language, live side by side.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.runtime = name.into();
+        self
+    }
+
     pub fn handle(&self) -> RuntimeHandle {
         RuntimeHandle {
+            name: self.runtime.clone(),
             anchor: self.anchor.clone(),
             state: self.state.subscribe(),
         }
     }
 }
 
-impl Plugin for CordisRuntimePlugin {
+impl Plugin for RuntimePlugin {
     fn name(&self) -> &str {
-        "cordis-runtime"
+        &self.label
     }
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
@@ -144,6 +252,7 @@ impl Plugin for CordisRuntimePlugin {
                     &self.node_package,
                     Mount {
                         anchor: Some(&self.anchor),
+                        launcher: self.launcher.as_ref(),
                         ..Mount::default()
                     },
                 ) => Some(mounted),
@@ -198,10 +307,13 @@ impl Plugin for CordisRuntimePlugin {
                     false => Err(error),
                 };
             }
-            let disposer = ctx.provide(CordisRuntime {
-                process: process.clone(),
-                hosts: self.hosts.clone(),
-            })?;
+            let disposer = ctx.provide_as(
+                Runtime::key(&self.runtime),
+                Arc::new(Runtime {
+                    process: process.clone(),
+                    hosts: self.hosts.clone(),
+                }),
+            )?;
             *service.lock().unwrap() = Some(disposer);
             // The watcher starts last, so every failure above leaves no task
             // holding the process. A process that already ended is seen at
@@ -226,8 +338,8 @@ async fn watch_exit(
 ) {
     process.closed().await;
     let status = process.exit_status().map_or_else(
-        || "Cordis runtime disconnected".to_owned(),
-        |status| format!("Cordis process {status}"),
+        || "runtime disconnected".to_owned(),
+        |status| format!("runtime process {status}"),
     );
     state.send_replace(RuntimeState::Down(status));
     withdraw(&service).await;
@@ -237,7 +349,15 @@ async fn withdraw(service: &Mutex<Option<Disposer>>) {
     let disposer = service.lock().unwrap().take();
     if let Some(disposer) = disposer {
         if let Err(error) = disposer.dispose().await {
-            eprintln!("rutis-interop: cannot withdraw the Cordis runtime: {error}");
+            eprintln!("rutis-interop: cannot withdraw the runtime: {error}");
         }
     }
 }
+
+/// The former name of [`RuntimePlugin`].
+#[deprecated(since = "0.3.0", note = "renamed to RuntimePlugin")]
+pub type CordisRuntimePlugin = RuntimePlugin;
+
+/// The former name of [`Runtime`].
+#[deprecated(since = "0.3.0", note = "renamed to Runtime")]
+pub type CordisRuntime = Runtime;

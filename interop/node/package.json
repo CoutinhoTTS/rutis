@@ -11,6 +11,13 @@
   "homepage": "https://github.com/arcships/rutis/tree/main/crates/rutis-interop#readme",
   "rutisProtocol": 2,
   "type": "module",
+  "exports": {
+    "./plugin": {
+      "types": "./src/plugin.d.ts",
+      "default": "./src/plugin.mjs"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "src"
   ],

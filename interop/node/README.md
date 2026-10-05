@@ -4,6 +4,7 @@ The Node side of [rutis-interop](https://github.com/arcships/rutis/tree/main/cra
 
 - `src/generate.mjs` generates the Rust bindings during the application's Cargo build.
 - `src/runner.mjs` runs the mounted plugins in a real Cordis `Context`, talking to the rutis process over a Unix socket.
+- `@arcships/rutis-interop/plugin` exports `definePlugin` for leaf plugins: a plugin that only uses services (`ctx.use`), provides services (`ctx.provide`) and returns a cleanup, without Cordis. rutis-loader loads it into the same Cordis `Context` as Cordis plugins.
 
 Install it in the npm project next to your rutis application, together with the plugins you mount; the `rutis-interop` crate finds it at `node_modules/@arcships/rutis-interop`. The crate and this package must speak the same protocol version (`rutisProtocol`); the build checks it.
 

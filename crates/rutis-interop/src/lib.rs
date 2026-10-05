@@ -1,4 +1,6 @@
-//! Compatibility layer for mounting Cordis plugins in rutis applications.
+//! Plugins of other languages in rutis applications: language runtimes
+//! (Node with Cordis, feature `node`; Python, feature `python`) and the
+//! compatibility layer for mounting Cordis plugins.
 //!
 //! Everything here uses public rutis API only. Generated bindings cover typed
 //! value methods and follow service replacement; the shared RPC layer also
@@ -6,6 +8,7 @@
 //! `docs/design-protocol-plugin-mount.md` for the covered surface and the
 //! boundary rules for Cordis plugins.
 
+#[cfg(feature = "node")]
 pub mod build;
 
 /// Wire protocol version. The Node runtime package declares the version it
@@ -58,13 +61,19 @@ pub use events::{EmitToCordis, EventSink, Events};
 #[cfg(unix)]
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
-pub use process::{Host, HostDispatch, HostLease, Mount, Process, RowSchema, ServiceEvents};
+pub use process::{
+    Host, HostDispatch, HostLease, Launcher, Mount, Process, RowSchema, ServiceEvents,
+};
 #[cfg(unix)]
 pub use projection::Projection;
 #[cfg(unix)]
 pub use rows::{row_projection, RowService};
 #[cfg(unix)]
-pub use runtime::{host_key, CordisRuntime, CordisRuntimePlugin, RuntimeHandle, RuntimeState};
+#[allow(deprecated)]
+pub use runtime::{
+    host_key, CordisRuntime, CordisRuntimePlugin, Runtime, RuntimeHandle, RuntimePlugin,
+    RuntimeState,
+};
 pub use serde;
 pub use serde_json;
 

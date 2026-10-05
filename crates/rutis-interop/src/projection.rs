@@ -158,6 +158,32 @@ impl Projection {
         }
     }
 
+    /// Withdraw every published service now and wait until that is done:
+    /// the kernel stops their consumers first. Then stop following changes,
+    /// as [`Projection::close`]. A plugin that unloads its provider calls
+    /// this first, so the provider outlives everything that uses it.
+    pub async fn withdraw(&self) {
+        let (target, mut slots) = {
+            let mut state = self.state.lock().unwrap();
+            (state.target.take(), std::mem::take(&mut state.slots))
+        };
+        let Some((ctx, process)) = target else {
+            return;
+        };
+        let mut withdrawals = Vec::new();
+        for slot in slots.values_mut() {
+            if let Some(apply) = slot.apply.as_mut() {
+                if let Ok(Some(withdrawal)) = apply(&ctx, &process, None) {
+                    withdrawals.push(withdrawal);
+                }
+            }
+        }
+        for withdrawal in withdrawals {
+            withdrawal.await;
+        }
+        drop(slots);
+    }
+
     /// Stop following changes and drop the bindings' writers, which hold the
     /// process; the plugin's own effects withdraw the registrations.
     pub fn close(&self) {

@@ -32,15 +32,28 @@ impl RowService {
 
 impl HostDispatch for RowService {
     fn invoke(&self, method: &str, args: RpcValue) -> Reply {
+        let target = self.process.connection();
+        // A call from another runtime's session carries that session's
+        // chain, which must be rebased for this one.
+        let source = crate::rpc::caller().filter(|source| source.tag() != target.tag());
         match self.methods.get(method).and_then(Value::as_str) {
             Some("async") => {
-                let connection = self.process.connection().clone();
+                let connection = target.clone();
                 let (handle, method) = (self.handle.clone(), method.to_owned());
-                Ok(RpcValue::future(async move {
+                let call = async move {
                     crate::rpc::settle(connection.invoke_async(&handle, &method, args).await?).await
-                }))
+                };
+                Ok(match source {
+                    Some(source) => RpcValue::future(target.forward_async(&source, call)),
+                    None => RpcValue::future(call),
+                })
             }
-            Some(_) => self.process.connection().invoke(&self.handle, method, args),
+            Some(_) => match source {
+                Some(source) => {
+                    target.forward(&source, || target.invoke(&self.handle, method, args))
+                }
+                None => target.invoke(&self.handle, method, args),
+            },
             None => Err(crate::Error::Value(format!(
                 "unknown service method {}.{method}",
                 self.handle
