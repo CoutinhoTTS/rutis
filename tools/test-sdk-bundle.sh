@@ -365,11 +365,11 @@ grep -Eq 'tokio_stream|tokio-stream|pin_project' "$base/e2d.stdout" || {
 
 # E7: a non-pinned toolchain is refused before anything is built, with the
 # bundle's pin named — never the misleading E0514 from metadata loading.
-# The test only runs when the runner has a *different-version* toolchain
-# installed; matching the pinned version is the expected happy path, not
-# the failure we assert.
+# rustup lists both the channel (1.98.1-x86_64-...) and aliases like
+# stable-x86_64-... for the same version; only a genuinely different
+# version exercises the refusal.
 pinned_version="$(grep '^channel' "$base/sdk-bundle/rust-toolchain.toml" | sed 's/.*= *"//;s/"//')"
-other_toolchain="$(rustup toolchain list 2>/dev/null | grep -v "^${pinned_version} " | head -1 | awk '{print $1}')"
+other_toolchain="$(rustup toolchain list 2>/dev/null | awk -v p="$pinned_version" '$0 !~ "^"p"-" {print $1; exit}')"
 if test -n "$other_toolchain"; then
   echo "[sdk-bundle-test] E7: non-pinned toolchain is refused first"
   if with_timeout 900 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS RUSTUP_TOOLCHAIN="$other_toolchain" \
