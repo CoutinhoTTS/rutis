@@ -13,7 +13,7 @@ use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin};
 
 use crate::{
     EventsPlugin, ExportPlugin, HostPlugin, ImportPlugin, LinkConfig, LinkPlugin, LinkState,
-    PluginCatalog, RuntimeAccessPlugin,
+    PluginCatalog, RuntimeAccessPlugin, ServiceKeys,
 };
 
 /// What a peer composition runs on its link.
@@ -30,6 +30,9 @@ pub struct Features {
     /// Plugins this node hosts for the peer: opening a host gives the peer
     /// the management of what the catalog holds.
     pub host: Option<Arc<dyn PluginCatalog>>,
+    /// How the host maps the service names of a row's `isolate` and
+    /// `inject` to keys; by default `host_key(name)`.
+    pub host_services: Option<ServiceKeys>,
     /// The peer is the runtime instance of this name
     /// (`RuntimeSession#<name>`).
     pub runtime: Option<String>,
@@ -116,10 +119,14 @@ fn spawn(ctx: &Ctx, link: &LinkConfig, features: &Features, part: Part) -> Optio
                 .ok()
                 .map(|plugin| ctx.plugin(plugin))
         }
-        Part::Host => features
-            .host
-            .clone()
-            .map(|catalog| ctx.plugin(HostPlugin::new(peer, catalog))),
+        Part::Host => features.host.clone().map(|catalog| {
+            let host = HostPlugin::new(peer, catalog);
+            let host = match &features.host_services {
+                Some(services) => host.services(services.clone()),
+                None => host,
+            };
+            ctx.plugin(host)
+        }),
         Part::Runtime => features
             .runtime
             .as_deref()

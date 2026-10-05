@@ -7,6 +7,14 @@
 //! plugins.unload(key)
 //! ```
 //!
+//! `isolate` ([service name, label] pairs) and `inject` (service names) are
+//! the row's, as the peer's loader has them: the plugin runs with each
+//! named service isolated under its label (labels are the peer's, kept
+//! apart from every other peer's), and waits for each injected service as
+//! for its own dependencies. Names map to keys as the host was told
+//! ([`HostPlugin::services`]; by default `host_key(name)`, rutis services
+//! by name); a name it cannot map refuses the load.
+//!
 //! What it loads belongs to its own subtree: when the host goes (the link
 //! ended, or it was unloaded), so do they. Opening a host to a peer gives
 //! that peer the management of this node's installed plugins: open it only
@@ -83,28 +91,50 @@ impl PluginCatalog for StaticCatalog {
     }
 }
 
-/// A catalog's factory as a factory a fiber owns.
-struct Shared(Arc<dyn PluginFactory<Json>>);
-impl PluginFactory<Json> for Shared {
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    fn injects(&self) -> &[TypeKey] {
-        self.0.injects()
-    }
-    fn validate_config(&self, config: &Json) -> Result<(), CordisError> {
-        self.0.validate_config(config)
-    }
-    fn build(&self, config: &Json) -> Result<Box<dyn Plugin>, CordisError> {
-        self.0.build(config)
+/// A catalog's factory as a factory a fiber owns, with the row's injected
+/// services added to its own dependencies.
+struct Shared {
+    factory: Arc<dyn PluginFactory<Json>>,
+    injects: Vec<TypeKey>,
+}
+
+impl Shared {
+    fn new(factory: Arc<dyn PluginFactory<Json>>, extra: Vec<TypeKey>) -> Self {
+        let mut injects = factory.injects().to_vec();
+        for key in extra {
+            if !injects.contains(&key) {
+                injects.push(key);
+            }
+        }
+        Self { factory, injects }
     }
 }
+
+impl PluginFactory<Json> for Shared {
+    fn name(&self) -> &str {
+        self.factory.name()
+    }
+    fn injects(&self) -> &[TypeKey] {
+        &self.injects
+    }
+    fn validate_config(&self, config: &Json) -> Result<(), CordisError> {
+        self.factory.validate_config(config)
+    }
+    fn build(&self, config: &Json) -> Result<Box<dyn Plugin>, CordisError> {
+        self.factory.build(config)
+    }
+}
+
+/// Maps a service name of a row's `isolate` or `inject` to its key.
+pub type ServiceKeys = Arc<dyn Fn(&str) -> Option<TypeKey> + Send + Sync>;
 
 /// Serves `plugins.*` to `Peer#<peer>` from `catalog`.
 pub struct HostPlugin {
     label: String,
+    peer: PeerId,
     injects: [TypeKey; 1],
     catalog: Arc<dyn PluginCatalog>,
+    services: ServiceKeys,
 }
 
 impl HostPlugin {
@@ -112,14 +142,25 @@ impl HostPlugin {
         Self {
             label: format!("rutis-bridge/host#{peer}"),
             injects: [peer_key(&peer)],
+            peer,
             catalog,
+            services: Arc::new(|name: &str| Some(rutis_interop::host_key(name))),
         }
+    }
+
+    /// How the service names of a row's `isolate` and `inject` map to keys
+    /// here (a loader's service catalog); `None` refuses the load.
+    pub fn services(mut self, services: ServiceKeys) -> Self {
+        self.services = services;
+        self
     }
 }
 
 struct Host {
     ctx: Ctx,
+    peer: PeerId,
     catalog: Arc<dyn PluginCatalog>,
+    services: ServiceKeys,
     loaded: Mutex<HashMap<String, FiberView>>,
 }
 
@@ -174,7 +215,30 @@ impl Host {
         let key: String = rutis_interop::decode(args.next().unwrap_or_default())?;
         let name: String = rutis_interop::decode(args.next().unwrap_or_default())?;
         let config = args.next().unwrap_or(Json::Null);
+        let isolate: Vec<(String, String)> = match args.next() {
+            None | Some(Json::Null) => Vec::new(),
+            Some(isolate) => rutis_interop::decode(isolate)?,
+        };
+        let inject: Vec<String> = match args.next() {
+            None | Some(Json::Null) => Vec::new(),
+            Some(inject) => rutis_interop::decode(inject)?,
+        };
         self.installed(&name)?;
+        let key_of = |service: &str| {
+            (self.services)(service).ok_or_else(|| {
+                Error::Value(format!("{service} is not a service {name} can use here"))
+            })
+        };
+        // The row's scope: each isolated service under its label, kept
+        // apart from other peers' labels.
+        let mut scope = self.ctx.clone();
+        for (service, label) in &isolate {
+            scope = scope.isolate(key_of(service)?, &format!("peer:{}/{label}", self.peer));
+        }
+        let extra = inject
+            .iter()
+            .map(|service| key_of(service))
+            .collect::<Result<Vec<_>, _>>()?;
         let host = self.clone();
         Ok(Value::future(async move {
             let found = host
@@ -187,7 +251,7 @@ impl Host {
                 if loaded.contains_key(&key) {
                     return Err(Error::Value(format!("{key} is already loaded")));
                 }
-                let view = host.ctx.plugin_with(Shared(found.factory), config);
+                let view = scope.plugin_with(Shared::new(found.factory, extra), config);
                 loaded.insert(key, view.clone());
                 view
             };
@@ -258,7 +322,9 @@ impl Plugin for HostPlugin {
             })?;
             let host = Arc::new(Host {
                 ctx: ctx.clone(),
+                peer: self.peer.clone(),
                 catalog: self.catalog.clone(),
+                services: self.services.clone(),
                 loaded: Mutex::default(),
             });
             let offered: Offered = peer

@@ -283,6 +283,10 @@ impl HostDispatch for Remote {
     }
 }
 
+/// The newest the peer said of a name: provided at `version`, or, with no
+/// `provided`, withdrawn at it. A withdrawal is kept so an older
+/// announcement arriving after it (calls are dispatched concurrently) does
+/// not bring the service back.
 struct Imported {
     version: u64,
     provided: Option<Disposer>,
@@ -343,7 +347,10 @@ impl Importer {
         }
         let previous = services.remove(&name);
         let key = host_key(&name);
-        if previous.is_none() && self.ctx.get_as::<dyn HostDispatch>(key.clone()).is_some() {
+        let replacing = previous
+            .as_ref()
+            .is_some_and(|previous| previous.provided.is_some());
+        if !replacing && self.ctx.get_as::<dyn HostDispatch>(key.clone()).is_some() {
             return Err(Error::Value(format!(
                 "{name} is already provided here: the import from {} is refused",
                 self.peer
@@ -388,11 +395,22 @@ impl Importer {
             .json()?;
         let name: String = rutis_interop::decode(fields["name"].clone())?;
         let version: u64 = rutis_interop::decode(fields["version"].clone())?;
+        if !self.names.contains(&name) {
+            return Ok(Value::Undefined);
+        }
         let removed = {
             let mut services = self.services.lock().unwrap();
             match services.get(&name) {
-                Some(current) if current.version < version => services.remove(&name),
-                _ => None,
+                Some(current) if current.version >= version => None,
+                // Withdrawn at `version`, even if not (yet) announced: an
+                // older announcement is stale.
+                _ => services.insert(
+                    name,
+                    Imported {
+                        version,
+                        provided: None,
+                    },
+                ),
             }
         };
         if let Some(mut removed) = removed {

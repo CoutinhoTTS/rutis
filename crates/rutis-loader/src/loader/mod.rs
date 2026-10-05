@@ -206,6 +206,14 @@ pub struct Loader {
     inner: Arc<Inner>,
 }
 
+impl Loader {
+    /// The key the catalog gives the service `name`.
+    #[cfg(feature = "peer")]
+    pub(crate) fn service_key(&self, name: &str) -> Option<rutis::TypeKey> {
+        self.inner.catalog.key(name).cloned()
+    }
+}
+
 struct Inner {
     resolver: Arc<dyn Resolver>,
     persist: Arc<dyn Persist>,

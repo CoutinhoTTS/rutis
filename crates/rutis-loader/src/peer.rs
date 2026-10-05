@@ -475,6 +475,14 @@ impl NodeConfig {
                 .map(|loader| {
                     Arc::new(LoaderCatalog::new(loader)) as Arc<dyn rutis_bridge::PluginCatalog>
                 }),
+            // The peer's rows name services as this loader's catalog does.
+            host_services: (self.host)
+                .then(|| loader.cloned())
+                .flatten()
+                .map(|loader| {
+                    Arc::new(move |name: &str| loader.service_key(name))
+                        as rutis_bridge::ServiceKeys
+                }),
             runtime: self.runtime.clone(),
         }
     }

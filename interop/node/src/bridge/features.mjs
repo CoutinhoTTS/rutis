@@ -69,29 +69,35 @@ export const Import = {
   apply(ctx, { peer, services }) {
     const wanted = new Set(services ?? [])
     ctx.plugin(gated(`import:${peer}`, peer, (scope, link) => {
+      // The newest the peer said of each name: provided at `version`
+      // (`withdraw` set), or withdrawn at it. A withdrawal is kept so an
+      // older announcement arriving after it does not bring the service back.
       const current = new Map()
       const unregister = link.register('services', (_target, method, [fields]) => {
         const { name, version } = fields ?? {}
         if (method === 'services.withdraw') {
+          if (!wanted.has(name)) return
           const known = current.get(name)
-          if (known && known.version < version) { current.delete(name); known.withdraw() }
+          if (known && known.version >= version) return
+          current.set(name, { version, withdraw: undefined })
+          known?.withdraw?.()
           return
         }
         if (method !== 'services.announce') throw new Error(`${method} is not offered here`)
         if (!wanted.has(name)) return
         const known = current.get(name)
         if (known && known.version >= version) return
-        if (!known && scope.get(name, false) !== undefined) {
+        if (!known?.withdraw && scope.get(name, false) !== undefined) {
           throw new Error(`${name} is already provided here: the import from ${peer} is refused`)
         }
         const { service, shape } = fields
         const object = Object.fromEntries(Object.keys(shape ?? {}).map(method => [method, (...args) => service[method](...args)]))
-        known?.withdraw()
+        known?.withdraw?.()
         current.set(name, { version, withdraw: scope.provide(name, object) })
       })
       scope.effect(() => () => {
         unregister()
-        for (const { withdraw } of current.values()) withdraw()
+        for (const { withdraw } of current.values()) withdraw?.()
         current.clear()
       })
     }))
@@ -129,27 +135,40 @@ export const Host = {
     }
     ctx.plugin(gated(`host:${peer}`, peer, (scope, link) => {
       const loaded = new Map()
+      // A hosted row runs in its scope: each [name, label] of `isolate`
+      // isolated (labels are the peer's, apart from other peers'), gated on
+      // the services `inject` names, as the runner runs a row.
+      const start = entry => {
+        const fiber = entry.inject.length
+          ? entry.scope.plugin({ name: `host:${peer}:${entry.key}`, inject: entry.inject, apply(gate) { gate.plugin(entry.plugin, entry.config) } })
+          : entry.scope.plugin(entry.plugin, entry.config)
+        entry.fiber = fiberOf(fiber)
+      }
       const unregister = link.register('plugins', async (_target, method, args) => {
         if (method === 'plugins.describe') {
           const { declared, version } = await locate(args[0])
           return { schema: declared?.Config ? toJsonSchema(declared.Config) : null, version, integrity: null }
         }
         if (method === 'plugins.load') {
-          const [key, name, config] = args
+          const [key, name, config, isolate, inject] = args
           if (loaded.has(key)) throw new Error(`${key} is already loaded`)
           const { plugin } = await locate(name)
-          const fiber = fiberOf(scope.plugin(plugin, config ?? {}))
-          loaded.set(key, { plugin, fiber })
-          await fiber.await()
+          let rowScope = scope
+          for (const [service, label] of isolate ?? []) rowScope = rowScope.isolate(service, Symbol.for(`rutis-peer:${peer}/${label}`))
+          const entry = { key, plugin, config: config ?? {}, scope: rowScope, inject: inject ?? [], fiber: undefined }
+          start(entry)
+          loaded.set(key, entry)
+          await entry.fiber.await()
           return null
         }
         if (method === 'plugins.update') {
           const [key, config] = args
           const entry = loaded.get(key)
           if (!entry) throw new Error(`${key} is not loaded`)
-          // A new config restarts it.
+          // A new config restarts it, in the same scope.
           await entry.fiber.dispose()
-          entry.fiber = fiberOf(scope.plugin(entry.plugin, config ?? {}))
+          entry.config = config ?? {}
+          start(entry)
           await entry.fiber.await()
           return null
         }

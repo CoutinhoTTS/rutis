@@ -488,3 +488,248 @@ async fn a_composition_changes_one_feature_and_keeps_its_session() {
         .await
         .is_err());
 }
+
+/// Provides `host_key("svc")`; counts its starts.
+struct Provider(Arc<AtomicU64>);
+impl PluginFactory<Json> for Provider {
+    fn build(&self, _: &Json) -> Result<Box<dyn Plugin>, CordisError> {
+        Ok(Box::new(Providing(self.0.clone())))
+    }
+}
+struct Providing(Arc<AtomicU64>);
+impl Plugin for Providing {
+    fn name(&self) -> &str {
+        "provider"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ctx.provide_as::<dyn HostDispatch>(host_key("svc"), clock(0))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// A hosted plugin runs in its row's scope: what the row isolates stays out
+/// of the host's scope, and what the row injects is waited for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosted_plugin_keeps_its_rows_isolate_and_inject() {
+    let (main, mac, _link) = linked().await;
+    let starts = Arc::new(AtomicU64::new(0));
+    let catalog =
+        StaticCatalog::new().with("provider", Described::default(), Provider(starts.clone()));
+    mac.plugin(HostPlugin::new(id("main"), Arc::new(catalog)));
+    let at_main = main.get_as::<Peer>(peer_key(&id("mac"))).unwrap();
+    let mut offers = at_main.offers();
+    eventually(|| offers.borrow_and_update().epoch("plugins"), "the host").await;
+    let session = at_main.connection();
+    let load = |args: Json| {
+        let session = session.clone();
+        async move {
+            let reply = session
+                .invoke_async("", "plugins.load", args.into())
+                .await?;
+            settle(reply).await
+        }
+    };
+
+    // Isolated: provided in the row's own scope, not the host's.
+    load(json!(["iso", "provider", {}, [["svc", "L"]], []]))
+        .await
+        .unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert!(
+        mac.get_as::<dyn HostDispatch>(host_key("svc")).is_none(),
+        "an isolated service stays in the row's scope"
+    );
+
+    // Injected: it waits for `needed`, then starts.
+    let pending = tokio::spawn(load(json!([
+        "dep",
+        "provider",
+        {},
+        [["svc", "M"]],
+        ["needed"]
+    ])));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        1,
+        "it waits for what the row injects"
+    );
+    let _needed = mac
+        .provide_as::<dyn HostDispatch>(host_key("needed"), clock(0))
+        .unwrap();
+    eventually(
+        || (starts.load(Ordering::SeqCst) == 2).then_some(()),
+        "the start once it is there",
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), pending).await;
+}
+
+/// A service name the host cannot map refuses the load: it is not dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosted_plugin_with_an_unknown_service_is_refused() {
+    let (main, mac, _link) = linked().await;
+    let starts = Arc::new(AtomicU64::new(0));
+    let catalog =
+        StaticCatalog::new().with("provider", Described::default(), Provider(starts.clone()));
+    mac.plugin(
+        HostPlugin::new(id("main"), Arc::new(catalog)).services(Arc::new(|name: &str| {
+            (name == "svc").then(|| host_key(name))
+        })),
+    );
+    let at_main = main.get_as::<Peer>(peer_key(&id("mac"))).unwrap();
+    let mut offers = at_main.offers();
+    eventually(|| offers.borrow_and_update().epoch("plugins"), "the host").await;
+    let refused = at_main
+        .connection()
+        .invoke_async(
+            "",
+            "plugins.load",
+            json!(["x", "provider", {}, [], ["unknown"]]).into(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("unknown is not a service"),
+        "{refused}"
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
+
+/// A withdrawal is remembered: an older announcement arriving after it (the
+/// far end's calls are dispatched concurrently) does not bring it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_announcement_older_than_a_withdrawal_is_stale() {
+    let (main, mac, _link) = linked().await;
+    mac.plugin(ImportPlugin::new(id("main"), ["clock"]));
+    let at_main = main.get_as::<Peer>(peer_key(&id("mac"))).unwrap();
+    let mut offers = at_main.offers();
+    eventually(
+        || offers.borrow_and_update().epoch("services"),
+        "the importer",
+    )
+    .await;
+    let session = at_main.connection();
+    let announce = |version: u64| {
+        let session = session.clone();
+        async move {
+            let record = Value::Record(
+                [
+                    ("name".to_owned(), Value::Data(json!("clock"))),
+                    (
+                        "service".to_owned(),
+                        Value::Record(
+                            [("now".to_owned(), Value::callback(|_| Ok(json!(7).into())))].into(),
+                        ),
+                    ),
+                    ("shape".to_owned(), Value::Data(json!({ "now": "sync" }))),
+                    ("version".to_owned(), Value::Data(json!(version))),
+                ]
+                .into(),
+            );
+            let reply = session
+                .invoke_async("", "services.announce", Value::List(vec![record]))
+                .await
+                .unwrap();
+            settle(reply).await.unwrap();
+        }
+    };
+    let withdraw = |version: u64| {
+        let session = session.clone();
+        async move {
+            let reply = session
+                .invoke_async(
+                    "",
+                    "services.withdraw",
+                    json!([{ "name": "clock", "version": version }]).into(),
+                )
+                .await
+                .unwrap();
+            settle(reply).await.unwrap();
+        }
+    };
+
+    announce(1).await;
+    eventually(
+        || mac.get_as::<dyn HostDispatch>(host_key("clock")),
+        "clock imported",
+    )
+    .await;
+    withdraw(3).await;
+    eventually(
+        || {
+            mac.get_as::<dyn HostDispatch>(host_key("clock"))
+                .is_none()
+                .then_some(())
+        },
+        "clock withdrawn",
+    )
+    .await;
+    announce(2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        mac.get_as::<dyn HostDispatch>(host_key("clock")).is_none(),
+        "an announcement older than the withdrawal is stale"
+    );
+    // A newer one provides it again.
+    announce(4).await;
+    eventually(
+        || mac.get_as::<dyn HostDispatch>(host_key("clock")),
+        "clock again",
+    )
+    .await;
+}
+
+/// An importer restarted at once looks, to the exporter, like `services`
+/// offered anew with no withdrawal seen in between (the two changes merged):
+/// it announces again all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exporter_announces_again_to_a_new_offer_it_never_saw_withdrawn() {
+    let (main, mac, _link) = linked().await;
+    let _clock = main
+        .provide_as::<dyn HostDispatch>(host_key("clock"), clock(0))
+        .unwrap();
+    // mac's importer, as a handler that counts the announcements.
+    let at_mac = mac.get_as::<Peer>(peer_key(&id("main"))).unwrap();
+    let announced = Arc::new(AtomicU64::new(0));
+    let count = announced.clone();
+    let _services = at_mac
+        .register(
+            "services",
+            Arc::new(
+                move |_: &rutis_interop::rpc::Connection, _: &str, method: &str, _| {
+                    if method == "services.announce" {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(Value::Undefined)
+                },
+            ),
+        )
+        .unwrap();
+    main.plugin(ExportPlugin::new(id("mac"), ["clock"]));
+    eventually(
+        || (announced.load(Ordering::SeqCst) == 1).then_some(()),
+        "the first announcement",
+    )
+    .await;
+
+    // `services` offered again, registered anew: one change, as main sees it.
+    let reply = at_mac
+        .connection()
+        .invoke_async(
+            "",
+            "link.offers",
+            json!([{ "families": ["services"], "version": 1_000_000, "since": { "services": 999_999 } }]).into(),
+        )
+        .await
+        .unwrap();
+    settle(reply).await.unwrap();
+    eventually(
+        || (announced.load(Ordering::SeqCst) == 2).then_some(()),
+        "the announcement to the new offer",
+    )
+    .await;
+}

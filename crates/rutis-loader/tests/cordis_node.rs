@@ -127,7 +127,11 @@ async fn a_rutis_node_and_a_cordis_node_share_services_rows_and_events() {
     (&main.plugin(plugin)).await.unwrap();
     main.plugin(PeerRowsPlugin::new(id("mac"), rows));
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
-        { "id": "g", "name": "peer:mac/greeter-js", "config": { "text": "from rutis" } }
+        { "id": "g", "name": "peer:mac/greeter-js", "config": { "text": "from rutis" } },
+        // Its scope crosses: it waits for what it injects, and runs with
+        // what it isolates in a scope of its own.
+        { "id": "gated", "name": "peer:mac/greeter-js", "config": { "text": "gated" }, "inject": ["absent"] },
+        { "id": "isolated", "name": "peer:mac/greeter-js", "config": { "text": "isolated" }, "isolate": { "calendar": true } }
     ] }]))
     .unwrap();
     loader
@@ -184,6 +188,12 @@ async fn a_rutis_node_and_a_cordis_node_share_services_rows_and_events() {
 
     // A rutis row hosted in Cordis.
     eventually(saw("greeter: from rutis"), "the hosted row").await;
+    eventually(saw("greeter: isolated"), "the isolated row").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        saw("greeter: gated")().is_none(),
+        "a hosted row waits for what it injects"
+    );
 
     // tick goes there, tock comes back.
     main.events()
@@ -206,6 +216,71 @@ async fn a_rutis_node_and_a_cordis_node_share_services_rows_and_events() {
     // Removing the row unloads it there.
     loader.reconcile(vec![], None).await.unwrap();
     eventually(saw("greeter gone: from rutis"), "the hosted row unloaded").await;
+
+    // Cordis remembers a withdrawal of the clock: an older announcement
+    // arriving after it is stale, a newer one provides it again (its user
+    // starts once more each time).
+    let clock_uses = || {
+        said.lock()
+            .unwrap()
+            .iter()
+            .filter(|line| *line == "clock: 42")
+            .count()
+    };
+    let used = clock_uses();
+    let session = main
+        .get_as::<rutis_bridge::Peer>(rutis_bridge::peer_key(&id("mac")))
+        .unwrap()
+        .connection()
+        .clone();
+    let send = |method: &'static str, fields: RpcValue| {
+        let session = session.clone();
+        async move {
+            let reply = session
+                .invoke_async("", method, RpcValue::List(vec![fields]))
+                .await
+                .unwrap();
+            settle(reply).await.unwrap();
+        }
+    };
+    let announcement = |version: u64| {
+        RpcValue::Record(
+            [
+                ("name".to_owned(), RpcValue::Data(json!("clock"))),
+                (
+                    "service".to_owned(),
+                    RpcValue::Record(
+                        [(
+                            "now".to_owned(),
+                            RpcValue::callback(|_| Ok(json!(42).into())),
+                        )]
+                        .into(),
+                    ),
+                ),
+                ("shape".to_owned(), RpcValue::Data(json!({ "now": "sync" }))),
+                ("version".to_owned(), RpcValue::Data(json!(version))),
+            ]
+            .into(),
+        )
+    };
+    send(
+        "services.withdraw",
+        RpcValue::Data(json!({ "name": "clock", "version": 1000 })),
+    )
+    .await;
+    send("services.announce", announcement(999)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        clock_uses(),
+        used,
+        "a stale announcement brings nothing back"
+    );
+    send("services.announce", announcement(1001)).await;
+    eventually(
+        || (clock_uses() == used + 1).then_some(()),
+        "the clock again",
+    )
+    .await;
     child.start_kill().unwrap();
 }
 
