@@ -21,17 +21,6 @@ from .runner import Runtime
 
 
 def open_channel(spec: str):
-    if spec.startswith("listen:"):
-        from . import websocket
-        from .peer import ENDPOINT_PROTOCOL
-
-        return websocket.listen_once(
-            spec[len("listen:"):],
-            f"rutis.{ENDPOINT_PROTOCOL}",
-            os.environ.get("RUTIS_INTEROP_TOKEN"),
-            os.environ.get("RUTIS_INTEROP_CERT"),
-            os.environ.get("RUTIS_INTEROP_KEY"),
-        )
     if spec.startswith("fd:"):
         return socket.socket(fileno=int(spec[len("fd:"):]))
     path = spec[len("unix:"):] if spec.startswith("unix:") else spec
@@ -61,19 +50,71 @@ def parse(argv: list[str]) -> tuple[str, dict | None, str]:
     return channel, endpoint, rest[0]
 
 
+class Session:
+    """One control session and the lease it holds: the rows, proxies and
+    references of one controller."""
+
+    def __init__(self, channel, endpoint: dict | None):
+        self.channel = channel
+        self.runtime = Runtime()
+        self.peer = Peer(channel, self.runtime.dispatch, settled=None, endpoint=endpoint)
+        self.runtime.peer = self.peer
+
+    def start(self) -> None:
+        self.peer.start()
+
+    async def end(self, replaced: bool = False) -> None:
+        """End the lease: no frame of this session is read any more, then
+        every row and proxy goes."""
+        if replaced and hasattr(self.channel, "replaced"):
+            self.channel.replaced()
+        self.peer.close(ConnectionError("replaced by a new connection" if replaced else "session ended"))
+        self.runtime.closing = True
+        await self.runtime.dispose()
+
+
 async def run(channel: str, endpoint: dict | None, project: str) -> None:
     if project and project not in sys.path:
         sys.path.insert(0, project)
-    # Listening may wait long for the controller: not on the event loop.
-    connection = await asyncio.to_thread(open_channel, channel)
-    runtime = Runtime()
-    peer = Peer(connection, runtime.dispatch, settled=None, endpoint=endpoint)
-    runtime.peer = peer
-    peer.start()
-    await peer.ready
-    await peer.closed
-    runtime.closing = True
-    await runtime.dispose()
+    if channel.startswith("listen:"):
+        await serve(channel[len("listen:"):], endpoint)
+        return
+    session = Session(open_channel(channel), endpoint)
+    session.start()
+    await session.peer.closed
+    await session.end()
+
+
+async def serve(spec: str, endpoint: dict) -> None:
+    """A runtime that stays up and listens: it serves one controller at a
+    time, a newer connection taking over, and cleans each lease up when it
+    ends. A new session is greeted only once the old lease is gone."""
+    from . import websocket
+    from .peer import ENDPOINT_PROTOCOL
+
+    listener = await asyncio.to_thread(
+        websocket.listen,
+        spec,
+        f"rutis.{ENDPOINT_PROTOCOL}",
+        os.environ.get("RUTIS_INTEROP_TOKEN"),
+        os.environ.get("RUTIS_INTEROP_CERT"),
+        os.environ.get("RUTIS_INTEROP_KEY"),
+    )
+    current: Session | None = None
+    accepting = asyncio.ensure_future(asyncio.to_thread(listener.accept))
+    while True:
+        waiting = {accepting} | ({current.peer.closed} if current else set())
+        done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+        if accepting in done:
+            channel = accepting.result()
+            accepting = asyncio.ensure_future(asyncio.to_thread(listener.accept))
+            if current is not None:
+                await current.end(replaced=True)
+            current = Session(channel, endpoint)
+            current.start()
+        elif current is not None and current.peer.closed in done:
+            await current.end()
+            current = None
 
 
 def main() -> None:

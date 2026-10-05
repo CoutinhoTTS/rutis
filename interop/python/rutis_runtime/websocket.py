@@ -99,17 +99,36 @@ def _print_address(address: str) -> None:
     print(f"rutis-interop: listening on {address}", file=sys.stderr, flush=True)
 
 
-def listen_once(
+class Listener:
+    """A WebSocket listener for the controlling rutis: every connection
+    that presents the token and speaks the protocol is accepted; which one
+    is the session is the runtime's decision (a newer one takes over)."""
+
+    def __init__(self, server, accepted: queue.Queue, address: str):
+        self._server = server
+        self._accepted = accepted
+        self.address = address
+
+    def accept(self) -> "WebSocketChannel":
+        """Block until the next authenticated connection."""
+        return self._accepted.get()
+
+    def close(self) -> None:
+        """Stop accepting; established connections stay."""
+        threading.Thread(target=self._server.shutdown, kwargs={"close_connections": False}, daemon=True).start()
+
+
+def listen(
     spec: str,
     protocol: str,
     token: str | None,
     cert: str | None = None,
     key: str | None = None,
     announce=_print_address,
-):
+) -> Listener:
     """Listen on `spec` (ws:// on loopback, or wss:// with `cert` and `key`)
-    and return the channel of the first connection that presents `token` and
-    speaks `protocol`. `announce` gets the bound address (stderr by default)."""
+    for connections that present `token` and speak `protocol`. `announce`
+    gets the bound address (stderr by default)."""
     url = urlsplit(spec)
     secure = url.scheme == "wss"
     host = url.hostname or "127.0.0.1"
@@ -143,16 +162,11 @@ def listen_once(
         return None
 
     accepted: queue.Queue = queue.Queue()
-    taken = threading.Event()
 
     def handler(connection) -> None:
-        if taken.is_set():
-            connection.close(GOING_AWAY, "this endpoint serves one session")
-            return
-        taken.set()
         ended = threading.Event()
         accepted.put(WebSocketChannel(connection, ended))
-        # Returning closes the connection: hold it until the session ends.
+        # Returning closes the connection: hold it until its session ends.
         ended.wait()
 
     ping, timeout = _heartbeat()
@@ -173,9 +187,23 @@ def listen_once(
     )
     bound_host, bound_port = server.socket.getsockname()[:2]
     shown = f"[{bound_host}]" if ":" in bound_host else bound_host
-    announce(f"{url.scheme}://{shown}:{bound_port}{path}")
+    address = f"{url.scheme}://{shown}:{bound_port}{path}"
+    announce(address)
     threading.Thread(target=server.serve_forever, name="rutis-websocket", daemon=True).start()
-    channel = accepted.get()
-    # One session: stop accepting; the established connection stays.
-    threading.Thread(target=server.shutdown, kwargs={"close_connections": False}, daemon=True).start()
+    return Listener(server, accepted, address)
+
+
+def listen_once(
+    spec: str,
+    protocol: str,
+    token: str | None,
+    cert: str | None = None,
+    key: str | None = None,
+    announce=_print_address,
+):
+    """The channel of the first connection to `spec` (see [`listen`]); the
+    listener then stops accepting."""
+    listener = listen(spec, protocol, token, cert, key, announce)
+    channel = listener.accept()
+    listener.close()
     return channel

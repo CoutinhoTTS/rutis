@@ -5,20 +5,26 @@ import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { isLeaf, toCordis } from './plugin.mjs'
 
-// `<channel> [--id <endpoint>] [--peer <endpoint>] <first plugin or anchor>`.
-// Local channels (`fd:3`, a socket path) speak the compat protocol; network
-// channels (`ws://`, `wss://`, `listen:…`) the endpoint format, as `--id`,
-// expecting `--peer` as the controller when given.
-const { channelSpec, pluginPath, endpoint } = (() => {
+// `<channel> [--id <endpoint>] [--peer <endpoint>] [--format endpoint] <first plugin or anchor>`.
+// Local channels (`fd:3`, a socket path) speak the compat protocol unless
+// `--format endpoint`; network channels (`ws://`, `wss://`) the endpoint
+// format, as `--id`, expecting `--peer` as the controller when given.
+// `listen:…` serves controllers one session at a time (serve.mjs).
+const { channelSpec, pluginPath, endpoint, flags } = (() => {
   const [channelSpec, ...rest] = process.argv.slice(2)
   const flags = {}
   while (rest[0]?.startsWith('--')) flags[rest.shift().slice(2)] = rest.shift()
-  const network = /^(wss?|listen):/.test(channelSpec)
+  const network = /^(wss?|listen):/.test(channelSpec) || flags.format === 'endpoint'
   if (network && !flags.id) throw new Error(`a network channel needs --id <endpoint>: ${channelSpec}`)
   // A runner is a runtime: the controller manages its rows.
   const endpoint = network ? { local: flags.id, expected: flags.peer, declare: ['runtime'] } : undefined
-  return { channelSpec, pluginPath: rest[0], endpoint }
+  return { channelSpec, pluginPath: rest[0], endpoint, flags }
 })()
+
+if (channelSpec.startsWith('listen:')) {
+  const { serve } = await import('./serve.mjs')
+  await serve({ spec: channelSpec.slice('listen:'.length), id: flags.id, peer: flags.peer, anchor: pluginPath })
+}
 
 // The plugins' Service classes must come from the same Cordis instance as the
 // Context, so prefer the Cordis that the (first) plugin itself resolves.
