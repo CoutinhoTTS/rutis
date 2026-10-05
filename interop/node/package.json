@@ -20,6 +20,7 @@
       "types": "./src/plugin.d.ts",
       "default": "./src/plugin.mjs"
     },
+    "./bridge": "./src/bridge/index.mjs",
     "./package.json": "./package.json"
   },
   "files": [

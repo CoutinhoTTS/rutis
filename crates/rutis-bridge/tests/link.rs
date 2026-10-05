@@ -418,7 +418,7 @@ async fn a_far_end_without_the_required_contract_stops_the_link() {
     let main = app(
         &transport,
         StaticIdentity::new(id("main")).accept_token("mac-token", id("mac")),
-        LinkConfig::listen(id("mac"), "memory", "main", "main-in").declare("node"),
+        LinkConfig::listen(id("mac"), "memory", "main", "main-in"),
     )
     .await;
     // mac requires a runtime; main is a node.

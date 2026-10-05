@@ -78,8 +78,8 @@ pub struct LinkConfig {
     /// (`runtime`, `node`); without them the link stops, as for an
     /// incompatible far end.
     pub require: Vec<String>,
-    /// Capabilities this end declares besides the session's own, such as
-    /// `node`.
+    /// Capabilities this end declares besides the session's own and
+    /// `node`, which every rutis link declares.
     pub declare: Vec<String>,
 }
 
@@ -281,6 +281,8 @@ impl Link {
         let operations = Arc::new(Operations::default());
         let mut endpoint =
             Endpoint::rust(self.identity.local().clone()).expect(self.config.peer.clone());
+        // A rutis endpoint is a full framework node.
+        endpoint.capabilities.push("node".into());
         endpoint
             .capabilities
             .extend(self.config.declare.iter().cloned());

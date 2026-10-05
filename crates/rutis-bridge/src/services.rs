@@ -221,26 +221,51 @@ impl ImportPlugin {
     }
 }
 
-/// One imported service: calls go to the far end's references.
+/// One imported service: calls go to the far end, through one function
+/// reference per method, or one object reference (as Cordis sends a
+/// service object).
 struct Remote {
-    methods: BTreeMap<String, (Reference, bool)>,
+    target: Target,
+    asynchronous: HashSet<String>,
     shape: Json,
+}
+
+enum Target {
+    Functions(BTreeMap<String, Reference>),
+    Object(Reference),
+}
+
+enum Call {
+    Function(Reference),
+    Method(Reference, String),
 }
 
 impl HostDispatch for Remote {
     fn invoke(&self, method: &str, args: Value) -> Reply {
-        let (reference, asynchronous) = self
-            .methods
-            .get(method)
-            .ok_or_else(|| Error::Value(format!("unknown method {method}")))?;
-        if *asynchronous {
+        let unknown = || Error::Value(format!("unknown method {method}"));
+        let call = match &self.target {
+            Target::Functions(methods) => {
+                Call::Function(methods.get(method).ok_or_else(unknown)?.clone())
+            }
+            Target::Object(object) => {
+                self.shape.get(method).ok_or_else(unknown)?;
+                Call::Method(object.clone(), method.to_owned())
+            }
+        };
+        if self.asynchronous.contains(method) {
             // The far end answers with its own future: wait for that too.
-            let reference = reference.clone();
             return Ok(Value::future(async move {
-                rutis_interop::rpc::settle(reference.call_async(args).await?).await
+                let reply = match call {
+                    Call::Function(reference) => reference.call_async(args).await?,
+                    Call::Method(object, method) => object.call_method_async(&method, args).await?,
+                };
+                rutis_interop::rpc::settle(reply).await
             }));
         }
-        reference.call(args)
+        match call {
+            Call::Function(reference) => reference.call(args),
+            Call::Method(object, method) => object.call_method(&method, args),
+        }
     }
 
     fn methods(&self) -> Option<Json> {
@@ -278,19 +303,26 @@ impl Importer {
             // Not imported here: the reference is dropped, which releases it.
             return Ok(Value::Undefined);
         }
-        let Value::Record(record) = take(&mut fields, "service")? else {
-            return Err(Error::Value("a service crosses as a record".into()));
-        };
         let kinds: BTreeMap<String, String> = rutis_interop::decode(shape.clone())?;
-        let methods = record
-            .into_iter()
-            .map(|(method, value)| {
-                let asynchronous = kinds.get(&method).is_some_and(|kind| kind == "async");
-                value
-                    .reference()
-                    .map(|reference| (method, (reference, asynchronous)))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let asynchronous = kinds
+            .iter()
+            .filter(|(_, kind)| *kind == "async")
+            .map(|(method, _)| method.clone())
+            .collect();
+        let target = match take(&mut fields, "service")? {
+            Value::Record(record) => Target::Functions(
+                record
+                    .into_iter()
+                    .map(|(method, value)| value.reference().map(|reference| (method, reference)))
+                    .collect::<Result<BTreeMap<_, _>, _>>()?,
+            ),
+            Value::Reference(object) if object.is_object() => Target::Object(object),
+            _ => {
+                return Err(Error::Value(
+                    "a service crosses as a record of functions or an object".into(),
+                ))
+            }
+        };
         let mut services = self.services.lock().unwrap();
         if services
             .get(&name)
@@ -308,7 +340,14 @@ impl Importer {
         }
         let provided = self
             .ctx
-            .provide_as::<dyn HostDispatch>(key, Arc::new(Remote { methods, shape }))
+            .provide_as::<dyn HostDispatch>(
+                key,
+                Arc::new(Remote {
+                    target,
+                    asynchronous,
+                    shape,
+                }),
+            )
             .map_err(|error| Error::Value(error.to_string()))?;
         services.insert(
             name,

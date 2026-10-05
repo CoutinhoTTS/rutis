@@ -97,17 +97,20 @@ export class Session {
   // What the far end said of itself (endpoint format), once it greeted.
   greeting
   #greet(frame) {
+    // Handshake failures carry what they mean for a link: stop on an
+    // incompatible far end, retry slowly on a mismatched identity.
+    const fail = (category, message) => Object.assign(new Error(message), { category })
     if (!this.#endpoint) {
-      if (frame.version !== PROTOCOL || frame.endpoint !== undefined) throw new Error(`incompatible session: the far end speaks protocol ${frame.version}, this side ${PROTOCOL}`)
+      if (frame.version !== PROTOCOL || frame.endpoint !== undefined) throw fail('incompatible', `incompatible session: the far end speaks protocol ${frame.version}, this side ${PROTOCOL}`)
       return
     }
-    if (frame.version !== ENDPOINT_PROTOCOL) throw new Error(`incompatible session: the far end speaks protocol ${frame.version}, this side ${ENDPOINT_PROTOCOL}`)
+    if (frame.version !== ENDPOINT_PROTOCOL) throw fail('incompatible', `incompatible session: the far end speaks protocol ${frame.version}, this side ${ENDPOINT_PROTOCOL}`)
     const endpoint = frame.endpoint
-    if (typeof endpoint !== 'string' || !ENDPOINT_ID.test(endpoint)) throw new Error('incompatible session: the far end named no valid endpoint')
+    if (typeof endpoint !== 'string' || !ENDPOINT_ID.test(endpoint)) throw fail('incompatible', 'incompatible session: the far end named no valid endpoint')
     for (const [whose, expected] of [['verified', this.#endpoint.verified], ['expected', this.#endpoint.expected]]) {
-      if (expected !== undefined && expected !== endpoint) throw new Error(`endpoint mismatch: the far end greeted as ${endpoint}, but ${expected} is the ${whose} endpoint`)
+      if (expected !== undefined && expected !== endpoint) throw fail('auth-rejected', `endpoint mismatch: the far end greeted as ${endpoint}, but ${expected} is the ${whose} endpoint`)
     }
-    if (endpoint === this.#endpoint.local) throw new Error(`endpoint mismatch: the far end greeted as this endpoint (${endpoint})`)
+    if (endpoint === this.#endpoint.local) throw fail('auth-rejected', `endpoint mismatch: the far end greeted as this endpoint (${endpoint})`)
     this.#remote = `${endpoint}:`
     this.greeting = { endpoint, implementation: frame.implementation, capabilities: Array.isArray(frame.capabilities) ? frame.capabilities : [] }
   }
