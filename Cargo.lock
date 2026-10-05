@@ -3257,6 +3257,7 @@ dependencies = [
  "rutis-bridge",
  "rutis-channel",
  "rutis-interop",
+ "rutis-transport-memory",
  "serde_json",
  "socket2",
  "thiserror 2.0.20",

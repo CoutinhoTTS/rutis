@@ -418,9 +418,9 @@ fn panic_error(panic: Box<dyn std::any::Any + Send>) -> Error {
 tokio::task_local! { static ASYNC_PATH: Vec<String>; }
 thread_local! { static SYNC_PATH: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; }
 thread_local! { static CALLER: RefCell<Option<Connection>> = const { RefCell::new(None) }; }
-/// The session whose `invoke` is being dispatched on this thread, if any. A
-/// dispatcher that forwards the call to another session passes it to
-/// [`Connection::forward`].
+/// The session whose call (an `invoke`, or a call of a function this side
+/// exported) is being dispatched on this thread, if any. Code that calls
+/// another session on its behalf passes it to [`Connection::forward`].
 pub fn caller() -> Option<Connection> {
     CALLER.with(|caller| caller.borrow().clone())
 }
@@ -1601,7 +1601,12 @@ impl Connection {
                     }));
             }
             Accepted::Call(object, args) => {
-                self.respond(id, object.call(args));
+                // A function this side exported, called by this session: code
+                // in it that calls another session forwards from this one.
+                let previous = CALLER.with(|caller| caller.replace(Some(self.clone())));
+                let result = object.call(args);
+                CALLER.with(|caller| caller.replace(previous));
+                self.respond(id, result);
                 drop(_flight);
             }
             Accepted::Invoke(target, method, args) => {

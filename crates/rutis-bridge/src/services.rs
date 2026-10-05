@@ -225,6 +225,8 @@ impl ImportPlugin {
 /// reference per method, or one object reference (as Cordis sends a
 /// service object).
 struct Remote {
+    /// The session the service is on.
+    session: Connection,
     target: Target,
     asynchronous: HashSet<String>,
     shape: Json,
@@ -252,19 +254,32 @@ impl HostDispatch for Remote {
                 Call::Method(object.clone(), method.to_owned())
             }
         };
+        // Called on behalf of another session (re-exported to a third
+        // node, say): that session's call chain is rebased for this one, so
+        // a call back reaches the caller that waits for it.
+        let source =
+            rutis_interop::rpc::caller().filter(|source| source.tag() != self.session.tag());
         if self.asynchronous.contains(method) {
             // The far end answers with its own future: wait for that too.
-            return Ok(Value::future(async move {
+            let call = async move {
                 let reply = match call {
                     Call::Function(reference) => reference.call_async(args).await?,
                     Call::Method(object, method) => object.call_method_async(&method, args).await?,
                 };
                 rutis_interop::rpc::settle(reply).await
-            }));
+            };
+            return Ok(match source {
+                Some(source) => Value::future(self.session.forward_async(&source, call)),
+                None => Value::future(call),
+            });
         }
-        match call {
+        let call = || match call {
             Call::Function(reference) => reference.call(args),
             Call::Method(object, method) => object.call_method(&method, args),
+        };
+        match source {
+            Some(source) => self.session.forward(&source, call),
+            None => call(),
         }
     }
 
@@ -280,6 +295,7 @@ struct Imported {
 
 struct Importer {
     ctx: Ctx,
+    session: Connection,
     peer: PeerId,
     names: HashSet<String>,
     services: Mutex<HashMap<String, Imported>>,
@@ -343,6 +359,7 @@ impl Importer {
             .provide_as::<dyn HostDispatch>(
                 key,
                 Arc::new(Remote {
+                    session: self.session.clone(),
                     target,
                     asynchronous,
                     shape,
@@ -424,6 +441,7 @@ impl Plugin for ImportPlugin {
                 .ok_or_else(|| failed(&self.label, "the peer is gone"))?;
             let importer = Arc::new(Importer {
                 ctx: ctx.clone(),
+                session: peer.connection().clone(),
                 peer: self.peer.clone(),
                 names: self.names.clone(),
                 services: Mutex::default(),

@@ -27,3 +27,4 @@ rutis-channel = { path = "../rutis-channel", features = ["testing"] }
 rcgen = "0.14"
 rutis-interop = { path = "../rutis-interop", default-features = false }
 serde_json = "1"
+rutis-transport-memory = { path = "../rutis-transport-memory" }
