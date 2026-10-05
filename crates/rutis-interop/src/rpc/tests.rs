@@ -552,6 +552,7 @@ async fn a_reverse_call_through_a_relay_reaches_the_waiting_session() {
     let (a_tag, b_tag) = (a.tag().to_owned(), b.tag().to_owned());
 
     let (b_waiting, b_waits) = mpsc::channel();
+    let (b_ready, b_readied) = mpsc::channel();
     let user = std::thread::spawn(move || {
         let mut b = Remote::start(rb);
         // B's own synchronous call node:1, held open by Rust.
@@ -592,6 +593,9 @@ async fn a_reverse_call_through_a_relay_reaches_the_waiting_session() {
     let owner = std::thread::spawn(move || {
         let mut a = Remote::start(ra);
         b_waits.recv().unwrap();
+        // Rust must have read B's handshake before A's call is forwarded
+        // there; it reads it on B's reader thread, apart from this one.
+        b_readied.recv().unwrap();
         a.send(Frame::Invoke {
             id: "node:1".into(),
             path: vec![],
@@ -599,15 +603,19 @@ async fn a_reverse_call_through_a_relay_reaches_the_waiting_session() {
             method: "forward".into(),
             args: WireValue::List(vec![reference(1, Kind::Function, false)]),
         });
+        let frame = a.read();
         let Frame::Call {
             id,
             path,
             reference: 1,
             args,
             ..
-        } = a.read()
+        } = frame
         else {
-            panic!("callback expected")
+            panic!(
+                "callback expected, got {}",
+                serde_json::to_string(&frame).unwrap()
+            )
         };
         // A finds its own waiting node:1 in the chain.
         assert_eq!(
@@ -626,8 +634,9 @@ async fn a_reverse_call_through_a_relay_reaches_the_waiting_session() {
         assert_eq!((id.as_str(), data_of(value)), ("node:1", json!(5)));
         a
     });
-    a.ready().await.unwrap();
     b.ready().await.unwrap();
+    b_ready.send(()).unwrap();
+    a.ready().await.unwrap();
     let mut user = tokio::task::spawn_blocking(move || user.join().unwrap())
         .await
         .unwrap();
