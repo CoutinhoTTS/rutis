@@ -70,7 +70,8 @@ pub use events::{EmitToCordis, EventSink, Events};
 pub use objects::{arg, decode_value, JsError, ObjectRef, RemoteFunction};
 #[cfg(unix)]
 pub use process::{
-    Host, HostDispatch, HostLease, Launcher, Mount, Process, RowSchema, ServiceEvents,
+    runtime_session_key, Host, HostDispatch, HostLease, Launcher, Mount, Process, RowSchema,
+    RuntimeSession, ServiceEvents,
 };
 #[cfg(unix)]
 pub use projection::Projection;

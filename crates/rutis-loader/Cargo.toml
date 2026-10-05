@@ -34,3 +34,6 @@ runtimes = ["dep:rutis-interop"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 tempfile = "3"
+rutis-bridge = { path = "../rutis-bridge" }
+rutis-channel = { path = "../rutis-channel" }
+rutis-transport-websocket = { path = "../rutis-transport-websocket" }

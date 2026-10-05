@@ -24,10 +24,11 @@ pub trait HostDispatch: Send + Sync + 'static {
         None
     }
 
-    /// The process whose plugin serves this service, when it is one
-    /// ([`crate::RowService`]): a row of that same process uses the plugin
-    /// natively instead of through a proxy.
-    fn origin(&self) -> Option<&Process> {
+    /// The runtime session whose plugin serves this service, when it is
+    /// one ([`crate::RowService`]), as its [`Connection::tag`]: a row of that
+    /// same session uses the plugin natively instead of through a proxy. A
+    /// tag names one session of one runtime instance, wherever it runs.
+    fn origin(&self) -> Option<&str> {
         None
     }
 }
@@ -186,6 +187,15 @@ impl Dispatch for Imports {
     }
 }
 
+/// What the `mount` call sends.
+struct MountRest {
+    plugins: Vec<Value>,
+    services: Value,
+    forwarded_names: Vec<String>,
+    emits: Vec<String>,
+    provided: serde_json::Map<String, Value>,
+}
+
 /// A mount's parts, once split from where the process comes from.
 struct Started {
     plugins: Vec<(std::path::PathBuf, Value)>,
@@ -262,6 +272,29 @@ pub struct Process {
     /// never overtakes the registration it undoes.
     host_changes: tokio::sync::Mutex<()>,
     _directory: Option<tempfile::TempDir>,
+    /// For a runtime on a session something else owns (a link): what routes
+    /// the runtime's calls here. The session is not this process's to close.
+    routed: Option<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+/// A session with a runtime that something else owns, such as a link to a
+/// remote runtime. A [`crate::RuntimePlugin::remote`] runs its rows on it.
+pub trait RuntimeSession: Send + Sync + 'static {
+    /// The session, ready.
+    fn connection(&self) -> Connection;
+
+    /// Route the runtime's calls into rutis (`host:<name>`, `service`,
+    /// `event`) to `dispatch` while the returned guard lives.
+    fn route(
+        &self,
+        dispatch: Arc<dyn Dispatch>,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Error>;
+}
+
+/// The key the runtime session named `name` is provided under
+/// (`RuntimeSession#gpu`).
+pub fn runtime_session_key(name: &str) -> rutis::TypeKey {
+    rutis::TypeKey::keyed_dynamic::<dyn RuntimeSession>(name.to_owned())
 }
 
 /// What a plugin module declares, for rutis-loader (see
@@ -435,6 +468,14 @@ impl Process {
         started: Started,
         format: crate::rpc::Format,
     ) -> Result<Arc<Self>, Error> {
+        let (imports, rest) = Self::imports(started);
+        let peer = Connection::open_with(channel, imports.clone(), format)?;
+        peer.ready().await?;
+        Self::finish(peer, imports, child, directory, None, rest).await
+    }
+
+    /// What serves the runtime's calls into rutis, and the rest of the mount.
+    fn imports(started: Started) -> (Arc<Imports>, MountRest) {
         let Started {
             plugins,
             services,
@@ -456,8 +497,52 @@ impl Process {
             hosts: Mutex::new(hosts),
             forwarded,
         });
-        let peer = Connection::open_with(channel, imports.clone(), format)?;
-        peer.ready().await?;
+        let rest = MountRest {
+            plugins,
+            services,
+            forwarded_names,
+            emits,
+            provided,
+        };
+        (imports, rest)
+    }
+
+    /// Run a mount on `session`, a runtime session something else owns:
+    /// its calls into rutis are routed here while the process lives, and
+    /// disposing or dropping the process leaves the session open.
+    pub async fn over(
+        session: Arc<dyn RuntimeSession>,
+        mount: Mount<'_>,
+    ) -> Result<Arc<Self>, Error> {
+        let (started, _) = Started::from(mount);
+        let (imports, rest) = Self::imports(started);
+        let routed = session.route(imports.clone())?;
+        Self::finish(
+            session.connection(),
+            imports,
+            None,
+            None,
+            Some(routed),
+            rest,
+        )
+        .await
+    }
+
+    async fn finish(
+        peer: Connection,
+        imports: Arc<Imports>,
+        child: Option<crate::spawn::Child>,
+        directory: Option<tempfile::TempDir>,
+        routed: Option<Box<dyn std::any::Any + Send + Sync>>,
+        rest: MountRest,
+    ) -> Result<Arc<Self>, Error> {
+        let MountRest {
+            plugins,
+            services,
+            forwarded_names,
+            emits,
+            provided,
+        } = rest;
         let process = Arc::new(Self {
             peer,
             imports,
@@ -467,6 +552,7 @@ impl Process {
             exports: Mutex::default(),
             host_changes: tokio::sync::Mutex::new(()),
             _directory: directory,
+            routed,
         });
         let mounted = process
             .call_async(
@@ -781,6 +867,11 @@ impl Process {
     }
 
     pub async fn dispose(&self) -> Result<(), Error> {
+        // A session something else owns stays, and so does its runtime; its
+        // rows were unloaded one by one.
+        if self.routed.is_some() {
+            return Ok(());
+        }
         let result = self.call_async("", "dispose", Value::Null).await;
         self.peer
             .close(Error::Transport("plugin has been disposed".into()));
@@ -810,6 +901,9 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        self.peer.close(Error::Transport("process dropped".into()));
+        // A session something else owns stays; only the routing goes.
+        if self.routed.is_none() {
+            self.peer.close(Error::Transport("process dropped".into()));
+        }
     }
 }

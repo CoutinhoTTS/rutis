@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isAbsolute } from 'node:path'
 import { Process } from './client.mjs'
 import { toJsonSchema } from './schema.mjs'
 import { isLeaf, toCordis } from './plugin.mjs'
@@ -137,7 +138,24 @@ function dispose() {
 
 // A plugin module: an `apply` export is a function plugin; otherwise the
 // default export, which is how packaged plugins ship their Service class.
+// A plugin path, from a row's entry: a file path, a file URL, or (for a
+// controller elsewhere, which cannot see this machine's files) an npm name
+// or subpath resolved from this runtime's anchor. An unknown name is a
+// NotFound the controller reports as unresolved.
+function located(entry) {
+  if (entry.startsWith('file:')) return fileURLToPath(entry)
+  if (isAbsolute(entry)) return entry
+  try { return createRequire(pluginPath).resolve(entry) }
+  catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND' && error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error
+    const missing = new Error(`no plugin ${entry} here`)
+    missing.name = 'NotFound'
+    throw missing
+  }
+}
+
 async function pluginOf(entry) {
+  entry = located(entry)
   const declared = await declaredOf(entry)
   return isLeaf(declared) ? toCordis(declared) : declared
 }
@@ -215,6 +233,7 @@ async function unloadRow(key) {
 // services it injects (all required in Cordis), and the services it provides
 // to rutis with their method kinds, from `rutis.provides` in its package.json.
 async function describe(entry) {
+  entry = located(entry)
   const declared = await declaredOf(entry)
   // A leaf plugin declares everything in code.
   if (isLeaf(declared)) return { config: declared.config ?? null, inject: declared.inject, provides: declared.provides }

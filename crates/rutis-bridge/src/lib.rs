@@ -16,6 +16,7 @@ mod identity;
 mod link;
 mod peer;
 mod registration;
+mod runtime;
 
 pub use identity::{
     fingerprint, identity_key, Credential, Identity, IdentityPlugin, Presented, StaticIdentity,
@@ -25,6 +26,7 @@ pub use peer::{family, peer_key, Handler, Offered, Offers, Peer};
 pub use registration::{
     Deliver, Refusal, Registered, Registration, RegistrationError, Registrations, Ticket,
 };
+pub use runtime::RuntimeAccessPlugin;
 
 /// One kind of carrier, as its plugin provides it.
 pub trait Transport: Send + Sync + 'static {

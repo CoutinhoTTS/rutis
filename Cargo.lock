@@ -3197,7 +3197,10 @@ name = "rutis-loader"
 version = "0.2.0"
 dependencies = [
  "rutis",
+ "rutis-bridge",
+ "rutis-channel",
  "rutis-interop",
+ "rutis-transport-websocket",
  "schemars",
  "serde",
  "serde_json",

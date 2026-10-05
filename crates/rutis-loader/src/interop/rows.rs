@@ -85,7 +85,7 @@ impl Plugin for RuntimeRowsPlugin {
                 for id in rows {
                     // A row that fails to resolve reports it in its status;
                     // the others still start.
-                    if let Err(error) = loader.reload(&id).await {
+                    if let Err(error) = loader.refresh(&id).await {
                         eprintln!("rutis-loader: cannot resolve row {id} again: {error}");
                     }
                 }

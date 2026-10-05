@@ -375,6 +375,22 @@ impl Loader {
     /// fails, or rows newly fail with it, the previous module stays (and is
     /// reloaded after a failed apply) and the error is returned.
     pub async fn reload(&self, id: &str) -> Result<ReconcileReport, LoaderError> {
+        self.resolve_again(id, false).await
+    }
+
+    /// Resolve a row whose resolution was provisional (made while what can
+    /// describe it was unreachable) again: as [`Loader::reload`], except that
+    /// a failure replaces the provisional resolution, so the row shows it
+    /// (`Unresolved`) instead of starting on the placeholder.
+    pub(crate) async fn refresh(&self, id: &str) -> Result<ReconcileReport, LoaderError> {
+        self.resolve_again(id, true).await
+    }
+
+    async fn resolve_again(
+        &self,
+        id: &str,
+        provisional: bool,
+    ) -> Result<ReconcileReport, LoaderError> {
         let inner = &self.inner;
         let _op = inner.op.lock().await;
         inner.check_open()?;
@@ -397,8 +413,8 @@ impl Loader {
             Ok(resolved) => resolved,
             Err(error) => {
                 // A row that never resolved shows the new reason; a running
-                // module stays.
-                if !matches!(previous, Some(Ok(_))) {
+                // module stays, unless it was only a placeholder.
+                if provisional || !matches!(previous, Some(Ok(_))) {
                     inner
                         .state
                         .lock()

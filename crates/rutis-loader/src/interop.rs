@@ -73,6 +73,14 @@ impl Naming {
     /// runtime's.
     fn entry(&self, runtime: &RuntimeHandle, name: &str) -> Option<PathBuf> {
         match self {
+            // A remote runtime finds its plugins where it runs: the name
+            // goes as it is, and it answers `rows.schema` for it. Files and
+            // absolute paths are this machine's, so they are refused.
+            #[cfg(feature = "node")]
+            Naming::Npm if runtime.is_remote() => {
+                let local = name.starts_with("file:") || Path::new(name).is_absolute();
+                (!local).then(|| PathBuf::from(name))
+            }
             #[cfg(feature = "node")]
             Naming::Npm => resolve_entry(runtime.anchor(), name),
             Naming::Modules { prefix } => {
@@ -219,7 +227,9 @@ impl Resolver for InteropResolver {
             // A runtime that loads by module name is asked every time: a
             // reload must see the module's current declarations, and there
             // is no package version to tell that it changed.
-            if self.naming.caches() {
+            // Nothing here says when a remote runtime's plugin changed.
+            let caches = self.naming.caches() && !self.runtime.is_remote();
+            if caches {
                 if let Some(found) = self.resolved.lock().unwrap().get(name) {
                     return Ok(found.clone());
                 }
@@ -248,18 +258,25 @@ impl Resolver for InteropResolver {
                     foreign_scope: true,
                 }));
             };
-            let described =
-                process
-                    .describe_row(&entry)
-                    .await
-                    .map_err(|e| LoaderError::Resolve {
+            let described = process
+                .describe_row(&entry)
+                .await
+                .map_err(|error| match error {
+                    // The runtime looked and found no such plugin.
+                    rutis_interop::Error::Remote { name: kind, .. } if kind == "NotFound" => {
+                        LoaderError::NotFound {
+                            name: name.to_owned(),
+                        }
+                    }
+                    error => LoaderError::Resolve {
                         name: name.to_owned(),
-                        message: e.to_string(),
-                    })?;
+                        message: error.to_string(),
+                    },
+                })?;
             // A leaf runtime has no dependency resolution of its own: every
             // service its plugins inject waits in rutis. In Cordis, only the
             // shared names do; the others resolve natively.
-            let leaf = process.supports("leaf");
+            let leaf = self.runtime.supports("leaf");
             let gated: Vec<String> = described
                 .inject
                 .iter()
@@ -279,13 +296,13 @@ impl Resolver for InteropResolver {
                 meta: json!({
                     "source": "interop",
                     "entry": entry,
-                    "version": self.naming.version(&entry),
+                    "version": (!self.runtime.is_remote()).then(|| self.naming.version(&entry)).flatten(),
                     "inject": described.inject,
                     "provides": described.provides,
                 }),
                 foreign_scope: true,
             });
-            if self.naming.caches() {
+            if caches {
                 self.resolved
                     .lock()
                     .unwrap()
@@ -433,7 +450,7 @@ impl JsRow {
             let dispatch = ctx.require_as::<dyn HostDispatch>(host_key(name))?;
             if dispatch
                 .origin()
-                .is_some_and(|origin| std::ptr::eq(origin, &**process))
+                .is_some_and(|origin| origin == process.connection().tag())
             {
                 continue;
             }

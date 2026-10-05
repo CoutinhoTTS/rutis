@@ -72,6 +72,7 @@ pub enum RuntimeState {
 pub struct RuntimeHandle {
     name: String,
     anchor: PathBuf,
+    remote: bool,
     state: watch::Receiver<RuntimeState>,
 }
 
@@ -91,6 +92,21 @@ impl RuntimeHandle {
         self.state.borrow().clone()
     }
 
+    /// Whether the runtime runs elsewhere ([`RuntimePlugin::remote`]): its
+    /// plugins are found where it runs, not under [`RuntimeHandle::anchor`].
+    pub fn is_remote(&self) -> bool {
+        self.remote
+    }
+
+    /// Whether the running runtime reported `feature` (`rows.v2`, `hosts`,
+    /// `leaf`, …); `false` while none runs.
+    pub fn supports(&self, feature: &str) -> bool {
+        match &*self.state.borrow() {
+            RuntimeState::Ready(process) => process.supports(feature),
+            _ => false,
+        }
+    }
+
     /// The running process. Waits while a generation is starting; `None`
     /// when no generation is running.
     pub async fn ready(&self) -> Option<Arc<Process>> {
@@ -104,6 +120,15 @@ impl RuntimeHandle {
             _ => None,
         }
     }
+}
+
+/// Where a runtime's session comes from.
+#[derive(Clone)]
+enum Source {
+    /// A process this plugin starts.
+    Spawn,
+    /// `RuntimeSession#<name>`, which something else (a link) provides.
+    Session([TypeKey; 1]),
 }
 
 /// The runtime plugin. Mount it before the plugins that load into it.
@@ -121,6 +146,8 @@ impl RuntimeHandle {
 pub struct RuntimePlugin {
     runtime: String,
     label: String,
+    /// Where its session comes from.
+    source: Source,
     node_package: PathBuf,
     anchor: PathBuf,
     launcher: Option<crate::Launcher>,
@@ -137,6 +164,7 @@ impl RuntimePlugin {
         Self {
             runtime: "node".into(),
             label: "node-runtime".into(),
+            source: Source::Spawn,
             node_package: node_package.into(),
             anchor: anchor.into(),
             launcher: None,
@@ -188,6 +216,7 @@ impl RuntimePlugin {
         Self {
             runtime: "py".into(),
             label: "python-runtime".into(),
+            source: Source::Spawn,
             node_package: sdk,
             anchor: project,
             launcher: Some(launcher),
@@ -217,10 +246,31 @@ impl RuntimePlugin {
         let runtime: String = name.into();
         Self {
             label: format!("{runtime}-runtime"),
+            source: Source::Spawn,
             runtime,
             node_package: launcher.cwd.clone().unwrap_or_default(),
             anchor: anchor.into(),
             launcher: Some(launcher),
+            hosts: Arc::default(),
+            state: Arc::new(watch::channel(RuntimeState::Idle).0),
+        }
+    }
+
+    /// A runtime this side does not start: its session is
+    /// `RuntimeSession#<name>`, provided by whatever reaches it (a link to a
+    /// remote runtime, through the bridge's runtime access plugin). It waits
+    /// for that session and stops when it goes; a new session is a new
+    /// generation of the runtime, whose rows are loaded again. Row names are
+    /// resolved where the runtime runs.
+    pub fn remote(name: impl Into<String>) -> Self {
+        let runtime: String = name.into();
+        Self {
+            label: format!("{runtime}-runtime"),
+            source: Source::Session([crate::runtime_session_key(&runtime)]),
+            runtime,
+            node_package: PathBuf::new(),
+            anchor: PathBuf::new(),
+            launcher: None,
             hosts: Arc::default(),
             state: Arc::new(watch::channel(RuntimeState::Idle).0),
         }
@@ -238,6 +288,7 @@ impl RuntimePlugin {
         RuntimeHandle {
             name: self.runtime.clone(),
             anchor: self.anchor.clone(),
+            remote: matches!(self.source, Source::Session(_)),
             state: self.state.subscribe(),
         }
     }
@@ -248,21 +299,47 @@ impl Plugin for RuntimePlugin {
         &self.label
     }
 
+    fn injects(&self) -> &[TypeKey] {
+        match &self.source {
+            Source::Spawn => &[],
+            Source::Session(session) => session,
+        }
+    }
+
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             self.state.send_replace(RuntimeState::Starting);
             // Node may hang before it connects; dispose or restart cancels
             // this generation, and dropping the mount kills the half-started
             // process.
+            let start = async {
+                match &self.source {
+                    Source::Spawn => {
+                        Process::mount(
+                            &self.node_package,
+                            Mount {
+                                anchor: Some(&self.anchor),
+                                launcher: self.launcher.as_ref(),
+                                ..Mount::default()
+                            },
+                        )
+                        .await
+                    }
+                    Source::Session([key]) => {
+                        let session = ctx
+                            .get_as::<dyn crate::RuntimeSession>(key.clone())
+                            .ok_or_else(|| {
+                                crate::Error::Value(format!(
+                                    "the session of the {} runtime is gone",
+                                    self.runtime
+                                ))
+                            })?;
+                        Process::over(session, Mount::default()).await
+                    }
+                }
+            };
             let mounted = tokio::select! {
-                mounted = Process::mount(
-                    &self.node_package,
-                    Mount {
-                        anchor: Some(&self.anchor),
-                        launcher: self.launcher.as_ref(),
-                        ..Mount::default()
-                    },
-                ) => Some(mounted),
+                mounted = start => Some(mounted),
                 _ = ctx.cancelled() => None,
             };
             // Cancelled (dispose, restart) while starting: the dropped start,
