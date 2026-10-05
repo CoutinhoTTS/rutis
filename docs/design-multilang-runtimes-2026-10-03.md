@@ -1,6 +1,6 @@
 # 多语言插件：每种语言一个运行时插件（设计稿）
 
-状态：设计稿，未实现。日期：2026-10-03。
+状态：设计稿，未实现。日期：2026-10-03。M1 的实施设计见 [多语言插件 M1](design-multilang-m1-2026-10-04.md)。
 依据：[多语言决策记录](decision-multilang-2026-10-03.md)（#107，本文修订其中几项，见 §十）、[Cordis 运行时插件化](design-cordis-runtime-plugin-2026-10-03.md)（#109）、[rutis-loader 设计](design-rutis-loader-2026-10-02.md)、[兼容层设计](design-protocol-plugin-mount.md)、调研报告 [plan/analysis/multilang](plan/analysis/multilang/README.md)。
 基准：`main` `a078630`。
 

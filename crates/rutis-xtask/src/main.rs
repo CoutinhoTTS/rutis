@@ -13,16 +13,33 @@ const ALLOCATOR_SYMBOLS: [&str; 3] = ["__rust_alloc", "__rust_dealloc", "__rust_
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("inspect") {
-        if let Err(error) = inspect(&args[1..]) {
-            eprintln!("inspect: {error}");
+    match args.first().map(String::as_str) {
+        Some("inspect") => {
+            if let Err(error) = inspect(&args[1..]) {
+                eprintln!("inspect: {error}");
+                process::exit(1);
+            }
+        }
+        Some("pack-sdk-bundle") => {
+            if let Err(error) = pack_sdk_bundle(&args[1..]) {
+                eprintln!("pack-sdk-bundle: {error}");
+                process::exit(1);
+            }
+        }
+        Some("pack-plugin") => {
+            if let Err(error) = run(args) {
+                eprintln!("pack-plugin: {error}");
+                process::exit(1);
+            }
+        }
+        Some(other) => {
+            eprintln!("unknown command: {other}");
             process::exit(1);
         }
-        return;
-    }
-    if let Err(error) = run(args) {
-        eprintln!("pack-plugin: {error}");
-        process::exit(1);
+        None => {
+            eprintln!("usage: cargo xtask pack-plugin … | pack-sdk-bundle … | inspect …");
+            process::exit(1);
+        }
     }
 }
 
@@ -79,6 +96,7 @@ struct Args {
     anchor_package: Option<String>,
     anchor_features: String,
     prebuilt_library: Option<PathBuf>,
+    bundle: Option<PathBuf>,
     interfaces: Vec<String>,
 }
 
@@ -111,6 +129,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--anchor-package" => args.anchor_package = Some(value()?),
             "--anchor-features" => args.anchor_features = value()?,
             "--prebuilt-library" => args.prebuilt_library = Some(value()?.into()),
+            "--bundle" => args.bundle = Some(value()?.into()),
             "--interface" => args.interfaces.push(value()?),
             _ => return Err(format!("unknown argument: {name}")),
         }
@@ -120,12 +139,20 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
 
 fn run(raw: Vec<String>) -> Result<(), String> {
     let args = parse_args(raw)?;
+    if args.bundle.is_some() {
+        if args.sdk_manifest.is_some() || args.sdk_file.is_some() {
+            return Err("--bundle cannot be combined with --sdk-manifest/--sdk-file".into());
+        }
+        if args.prebuilt_library.is_some() {
+            return Err("--bundle cannot be combined with --prebuilt-library".into());
+        }
+        return pack_plugin_bundle(&args);
+    }
     let required =
         |value: &Option<PathBuf>, name: &str| value.clone().ok_or(format!("{name} is required"));
     let manifest = canonical(&required(&args.manifest_path, "--manifest-path")?)?;
     let release = read_toml(&required(&args.sdk_manifest, "--sdk-manifest")?)?;
     let sdk_file = required(&args.sdk_file, "--sdk-file")?;
-    let output = required(&args.output, "--output")?;
     let sdk = table(&release, "sdk")?;
     let sdk_hash = string(sdk, "artifact_sha256")?;
     let sdk_target = string(sdk, "target")?;
@@ -135,7 +162,6 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     }
     let std_library = rutis_dylib_meta::std_reference(&sdk_bytes, sdk_target)?;
     let cargo_toml = read_toml(&manifest)?;
-    let package = table(&cargo_toml, "package")?;
     check_shared_duplicates(&manifest)?;
 
     let library = match &args.prebuilt_library {
@@ -195,7 +221,26 @@ fn run(raw: Vec<String>) -> Result<(), String> {
         }
     };
 
-    let bytes = fs::read(&library).map_err(|e| format!("{}: {e}", library.display()))?;
+    finish_pack(&args, &library, &manifest, sdk, sdk_target, &std_library)
+}
+
+/// Everything after the plugin binary exists: binary checks, identity
+/// cross-checks and the output directory with plugin.toml.
+fn finish_pack(
+    args: &Args,
+    library: &Path,
+    manifest: &Path,
+    sdk: &toml::Value,
+    sdk_target: &str,
+    std_library: &str,
+) -> Result<(), String> {
+    let output = args.output.clone().ok_or("--output is required")?;
+    let workspace = manifest
+        .parent()
+        .ok_or("the manifest has no parent directory")?
+        .to_owned();
+    let sdk_hash = string(sdk, "artifact_sha256")?;
+    let bytes = fs::read(library).map_err(|e| format!("{}: {e}", library.display()))?;
     check_allocator(&bytes, sdk_target)?;
     let boot = rutis_dylib_meta::read_boot(&bytes, sdk_target)?;
     let sdk_library = rutis_dylib_meta::sdk_reference(sdk_target)?;
@@ -211,12 +256,14 @@ fn run(raw: Vec<String>) -> Result<(), String> {
         sdk_target,
         &rutis_dylib_meta::SharedLibraries {
             sdk: &sdk_library,
-            std: &std_library,
+            std: std_library,
         },
     )?;
     if boot.sdk_id != string(sdk, "id")? || boot.sdk_artifact != sdk_hash {
         return Err("plugin boot identity differs from the published SDK".into());
     }
+    let cargo_toml = read_toml(manifest)?;
+    let package = table(&cargo_toml, "package")?;
     if boot.version != string(package, "version")? {
         return Err("plugin boot version differs from Cargo.toml".into());
     }
@@ -228,13 +275,20 @@ fn run(raw: Vec<String>) -> Result<(), String> {
         interfaces.insert(name.to_owned(), requirement.to_owned());
     }
     let library_sha = sha256_bytes(&bytes);
-    let rustc = command_output(Command::new("rustc").arg("--version"))?
-        .trim()
-        .to_owned();
+    let rustc = command_output(
+        Command::new("rustc")
+            .arg("--version")
+            .current_dir(&workspace),
+    )?
+    .trim()
+    .to_owned();
     if rustc != string(sdk, "rustc")? {
-        return Err("plugin rustc differs from the published SDK".into());
+        return Err(format!(
+            "this rustc is {rustc}; the bundle's SDK was built with {}; use the bundle's rust-toolchain.toml",
+            string(sdk, "rustc")?
+        ));
     }
-    let locked_sha = sha256_file(&lock_path(&manifest)?)?;
+    let locked_sha = sha256_file(&lock_path(manifest)?)?;
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -270,6 +324,303 @@ fn run(raw: Vec<String>) -> Result<(), String> {
     fs::write(output.join("plugin.toml"), content).map_err(|e| e.to_string())?;
     println!("{}", output.display());
     Ok(())
+}
+
+/// An sdk-bundle as produced by `pack-sdk-bundle`
+/// (design-sdk-build-package §三).
+struct SdkBundle {
+    lib: PathBuf,
+    deps: PathBuf,
+}
+
+/// Read and fully verify an sdk-bundle: the manifest format, the `[sdk]`
+/// identity against sdk.toml, and every listed file's hash. A bundle that
+/// lost a file or was tampered with fails here, before anything is built.
+fn read_bundle(dir: &Path) -> Result<(SdkBundle, toml::Value), String> {
+    let bundle_toml = read_toml(&dir.join("bundle.toml"))?;
+    if bundle_toml
+        .get("format_version")
+        .and_then(toml::Value::as_integer)
+        != Some(1)
+    {
+        return Err("unsupported bundle format; use a pack-plugin that matches this bundle".into());
+    }
+    let identity = table(&bundle_toml, "sdk")?;
+    let release = read_toml(&dir.join("sdk.toml"))?;
+    let sdk = table(&release, "sdk")?;
+    for key in ["version", "id", "artifact_sha256"] {
+        if string(identity, key)? != string(sdk, key)? {
+            return Err(format!("bundle.toml and sdk.toml disagree on {key}"));
+        }
+    }
+    let files = bundle_toml
+        .get("files")
+        .and_then(toml::Value::as_table)
+        .ok_or("bundle.toml has no [files] manifest")?;
+    if files.is_empty() {
+        return Err("bundle.toml lists no files".into());
+    }
+    for (rel, hash) in files {
+        let expected = hash
+            .as_str()
+            .ok_or(format!("files.{rel} is not a string"))?;
+        let actual =
+            sha256_file(&dir.join(rel)).map_err(|_| format!("the bundle is missing {rel}"))?;
+        if actual != expected {
+            return Err(format!(
+                "{rel} differs from the bundle manifest; the bundle is incomplete or was modified"
+            ));
+        }
+    }
+    Ok((
+        SdkBundle {
+            lib: dir.join("lib"),
+            deps: dir.join("deps"),
+        },
+        release,
+    ))
+}
+
+/// A plugin packed with `--bundle` must take every shared crate from the
+/// SDK's re-exports. A direct dependency would build a second, incompatible
+/// copy in the plugin graph (the anchor mode requires the rutis-sdk
+/// dependency because it builds the SDK in the same graph; --bundle does
+/// not build it). The check parses the manifest instead of relying on a
+/// rustc error: with the injected --extern in RUSTFLAGS, a source rutis-sdk
+/// build dies in its build.rs classifying an unknown RUSTFLAGS argument.
+fn check_bundle_manifest(manifest: &Path) -> Result<(), String> {
+    let cargo_toml = read_toml(manifest)?;
+    let mut offenders = Vec::new();
+    // A dependency is a plain name (`tokio = "1"`) or a table that may
+    // rename it (`foo = { package = "tokio" }`); the blacklist applies to
+    // the package name either way.
+    fn dependency_name(key: &str, value: &toml::Value) -> String {
+        value
+            .get("package")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(key)
+            .to_owned()
+    }
+    fn scan(section: Option<&toml::Value>, where_: &str, offenders: &mut Vec<String>) {
+        if let Some(deps) = section.and_then(toml::Value::as_table) {
+            for (key, value) in deps {
+                let name = dependency_name(key, value);
+                if name == "rutis-sdk" || SHARED_CRATES.contains(&name.as_str()) {
+                    offenders.push(format!("{name} ({where_})"));
+                }
+            }
+        }
+    }
+    scan(
+        cargo_toml.get("dependencies"),
+        "dependencies",
+        &mut offenders,
+    );
+    if let Some(targets) = cargo_toml.get("target").and_then(toml::Value::as_table) {
+        for cfg in targets.values() {
+            scan(
+                cfg.get("dependencies"),
+                "target dependencies",
+                &mut offenders,
+            );
+        }
+    }
+    if !offenders.is_empty() {
+        return Err(format!(
+            "the plugin declares {} as a direct dependency; with --bundle, shared crates come from the rutis_sdk re-exports (rutis_sdk::rutis, ::tokio, ::serde_json) — remove the direct dependency",
+            offenders.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Even without a direct dependency, a private dependency can pull
+/// rutis-sdk into the resolved graph; the source build would then die in
+/// its build.rs classifying the injected --extern as an unknown RUSTFLAGS
+/// argument. `cargo tree -i` prints the reverse dependency path that
+/// introduced it; a non-zero exit means the crate is not in the graph.
+fn check_bundle_manifest_tree(manifest: &Path, workspace: &Path) -> Result<(), String> {
+    let output = Command::new("cargo")
+        .args(["tree", "-i", "rutis-sdk", "--locked", "--manifest-path"])
+        .arg(manifest)
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "rutis-sdk entered the plugin graph through a private dependency (the reverse path below shows who introduced it):\n{path}\
+                 remove that dependency; with --bundle the SDK comes from the bundle, not from source"
+        ));
+    }
+    Ok(())
+}
+
+/// `pack-plugin --bundle <dir>`: build a plugin against the prebuilt SDK in
+/// an sdk-bundle. No host sources, no SDK rebuild, no feature-graph
+/// unification (design-sdk-build-package §四).
+fn pack_plugin_bundle(args: &Args) -> Result<(), String> {
+    let bundle_dir = canonical(args.bundle.as_ref().ok_or("--bundle needs a directory")?)?;
+    let (bundle, release) = read_bundle(&bundle_dir)?;
+    let sdk = table(&release, "sdk")?;
+    let sdk_hash = string(sdk, "artifact_sha256")?;
+    let sdk_target = string(sdk, "target")?;
+
+    let manifest = canonical(
+        args.manifest_path
+            .as_ref()
+            .ok_or("--manifest-path is required")?,
+    )?;
+    let workspace = manifest
+        .parent()
+        .ok_or("the manifest has no parent directory")?
+        .to_owned();
+
+    // The manifest is checked before the toolchain: a blacklisted direct
+    // dependency fails fast, without rustup or cargo touching anything.
+    check_bundle_manifest(&manifest)?;
+    // The plugin workspace's rust-toolchain.toml is what rustup picks when
+    // cargo runs there; it must match the bundle's pin exactly, or the
+    // plugin links a libstd the runtime bundle does not ship. cargo xtask's
+    // own toolchain comes from the rutis repository's workspace, so the
+    // check reads the file rather than asking rustup.
+    let bundle_channel = toolchain_channel(&bundle_dir)?;
+    let workspace_channel = toolchain_channel(&workspace)?;
+    if workspace_channel != bundle_channel {
+        return Err(format!(
+            "the plugin workspace pins {workspace_channel}, but the bundle's SDK was built with {bundle_channel}; align the workspace's rust-toolchain.toml with the bundle's"
+        ));
+    }
+    let rustc = command_output(
+        Command::new("rustup")
+            .args(["run", &bundle_channel, "rustc", "--version"])
+            .current_dir(&workspace),
+    )?
+    .trim()
+    .to_owned();
+    if rustc != string(sdk, "rustc")? {
+        return Err(format!(
+            "this rustc is {rustc}; the bundle's SDK was built with {}; use the bundle's rust-toolchain.toml",
+            string(sdk, "rustc")?
+        ));
+    }
+    let host = command_output(
+        Command::new("rustup")
+            .args(["run", &bundle_channel, "rustc", "-vV"])
+            .current_dir(&workspace),
+    )?
+    .lines()
+    .find_map(|line| line.strip_prefix("host: "))
+    .ok_or("rustc -vV printed no host")?
+    .to_owned();
+    if host != sdk_target {
+        return Err(format!(
+            "host target {host} differs from the bundle's {sdk_target}"
+        ));
+    }
+
+    // A standalone workspace may not have a lock file yet. A stale one is
+    // the author's to fix — regenerating it here would silently re-resolve
+    // every dependency to its newest version.
+    if lock_path(&manifest).is_err() {
+        run_command(
+            Command::new("cargo")
+                .args(["generate-lockfile", "--manifest-path"])
+                .arg(&manifest)
+                .current_dir(&workspace),
+        )?;
+    } else if !Command::new("cargo")
+        .args(["tree", "-d", "--locked", "--manifest-path"])
+        .arg(&manifest)
+        .current_dir(&workspace)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Err(
+            "the plugin workspace's Cargo.lock is out of date with its Cargo.toml (or cargo is offline); run `cargo update --workspace` there and retry"
+                .into(),
+        );
+    }
+    check_bundle_manifest_tree(&manifest, &workspace)?;
+    check_shared_duplicates(&manifest)?;
+
+    // The packer owns the environment. An ambient RUSTFLAGS would replace
+    // the injected flags entirely (cargo never appends the variable to the
+    // config), which fails later with a misleading E0463.
+    for var in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+        if let Some(value) = env::var_os(var) {
+            if !value.is_empty() {
+                return Err(format!(
+                    "{var} is set; it would replace the injected SDK flags — unset it and retry"
+                ));
+            }
+        }
+    }
+
+    let cargo_toml = read_toml(&manifest)?;
+    let package = string(table(&cargo_toml, "package")?, "name")?;
+    let lib_name = cargo_toml
+        .get("lib")
+        .and_then(|lib| lib.get("name"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or(package)
+        .to_owned();
+    let target_dir = match &args.target_dir {
+        Some(dir) => dir.clone(),
+        None => manifest.parent().unwrap().join("target"),
+    };
+    fs::create_dir_all(&target_dir).map_err(|e| format!("{}: {e}", target_dir.display()))?;
+    let target_dir = canonical(&target_dir)?;
+    let sdk_file = bundle.lib.join(rutis_dylib_meta::library_file_name(
+        "rutis_sdk",
+        sdk_target,
+    )?);
+
+    let mut command = Command::new("rustup");
+    command
+        .args(["run", &bundle_channel, "cargo", "build", "--release", "--locked", "--manifest-path"])
+        .arg(&manifest);
+    if !args.features.is_empty() {
+        command.args(["--features", &args.features]);
+    }
+    command
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env(
+            "RUSTFLAGS",
+            format!(
+                "--extern rutis_sdk={} -L dependency={}",
+                sdk_file.display(),
+                bundle.deps.display()
+            ),
+        )
+        .env("RUTIS_SDK_ARTIFACT_SHA256", sdk_hash)
+        .current_dir(&workspace);
+    let output = command.output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // A private dependency overlapping the SDK closure fails inside
+        // rustc; say what to do instead of the raw error. E0463 alone is
+        // not evidence of an overlap (the bundle is hash-verified and
+        // RUSTFLAGS is owned by now), so it stays unannotated.
+        if stderr.contains("colliding StableCrateId") {
+            return Err(format!(
+                "{}\nnote: the plugin graph overlaps the SDK's dependency closure; shared crates (rutis, tokio, tokio-util, serde_json) come from the rutis_sdk re-exports — remove the direct dependency, or the private dependency that pulls one in",
+                stderr.trim()
+            ));
+        }
+        return Err(format!("cargo build failed:\n{}", stderr.trim()));
+    }
+    let library = target_dir
+        .join("release")
+        .join(rutis_dylib_meta::library_file_name(&lib_name, sdk_target)?);
+
+    let sdk_bytes = fs::read(&sdk_file).map_err(|e| format!("{}: {e}", sdk_file.display()))?;
+    if sha256_bytes(&sdk_bytes) != sdk_hash {
+        return Err("SDK file differs from sdk.toml".into());
+    }
+    let std_library = rutis_dylib_meta::std_reference(&sdk_bytes, sdk_target)?;
+    finish_pack(args, &library, &manifest, sdk, sdk_target, &std_library)
 }
 
 struct Build<'a> {
@@ -410,6 +761,39 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Absolute without requiring the path to exist (the output directory is
+/// created later). Relative --extern/-L paths resolve against rustc's
+/// working directory — the package root — not against the caller's.
+fn absolute(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_owned())
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|e| format!("current dir: {e}"))
+    }
+}
+
+/// The channel a bundle pins, read from its rust-toolchain.toml. cargo
+/// xtask's own toolchain comes from the rutis repository's workspace, so
+/// the pin must be requested explicitly (rustup run <channel>) instead of
+/// relying on a plugin workspace's rust-toolchain.toml being picked up.
+fn toolchain_channel(dir: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(dir.join("rust-toolchain.toml"))
+        .map_err(|e| format!("{}/rust-toolchain.toml: {e}", dir.display()))?;
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("channel") {
+            if let Some(eq) = rest.find('=') {
+                let value = rest[eq + 1..].trim().trim_matches('"').to_owned();
+                if !value.is_empty() {
+                    return Ok(value);
+                }
+            }
+        }
+    }
+    Err(format!("{}/rust-toolchain.toml has no channel", dir.display()))
+}
+
 fn home_dir() -> Result<PathBuf, String> {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -444,4 +828,456 @@ fn command_output(command: &mut Command) -> Result<String, String> {
         ));
     }
     String::from_utf8(output.stdout).map_err(|e| e.to_string())
+}
+
+/// `cargo xtask pack-sdk-bundle --bundle-dir <runtime bundle> --output <dir>
+/// [--deps-dir <dir>]`: produce an sdk-bundle from a built runtime bundle
+/// (design-sdk-build-package §三). The closure is collected by crate name
+/// from sdk.toml's packages list (every same-name variant; rustc picks by
+/// disambiguator), then shrunk by removing one variant at a time while a
+/// probe plugin still builds.
+fn pack_sdk_bundle(args: &[String]) -> Result<(), String> {
+    let mut bundle_dir: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut deps_dir: Option<PathBuf> = None;
+    let mut raw = args.iter();
+    while let Some(flag) = raw.next() {
+        let (name, inline) = match flag.split_once('=') {
+            Some((name, value)) => (name.to_owned(), Some(value.to_owned())),
+            None => (flag.clone(), None),
+        };
+        let mut value = || {
+            inline
+                .clone()
+                .or_else(|| raw.next().cloned())
+                .ok_or(format!("{name} needs a value"))
+        };
+        match name.as_str() {
+            "--bundle-dir" => bundle_dir = Some(value()?.into()),
+            "--output" => output = Some(value()?.into()),
+            "--deps-dir" => deps_dir = Some(value()?.into()),
+            _ => return Err(format!("unknown argument: {name}")),
+        }
+    }
+    let bundle_dir = bundle_dir
+        .ok_or("usage: cargo xtask pack-sdk-bundle --bundle-dir <runtime bundle> --output <dir>")?;
+    let output = output.ok_or("--output is required")?;
+    let bundle_dir = canonical(&bundle_dir)?;
+    let output = absolute(&output)?;
+    if output.exists() {
+        return Err(format!("{} already exists", output.display()));
+    }
+
+    let repo = canonical(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))?;
+    // build-dylib-bundle.sh honors CARGO_TARGET_DIR; the closure and the
+    // import library come from the same tree it built into.
+    let target_dir = match env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => repo.join("target"),
+    };
+    let deps_dir = match deps_dir {
+        Some(dir) => canonical(&dir)?,
+        None => canonical(&target_dir.join("release/deps"))?,
+    };
+    let release = read_toml(&bundle_dir.join("sdk.toml"))?;
+    let sdk = table(&release, "sdk")?;
+    let sdk_target = string(sdk, "target")?;
+    let sdk_name = rutis_dylib_meta::library_file_name("rutis_sdk", sdk_target)?;
+    let sdk_file = bundle_dir.join(&sdk_name);
+    let sdk_hash = sha256_file(&sdk_file)?;
+    if sdk_hash != string(sdk, "artifact_sha256")? {
+        return Err(format!(
+            "{} differs from the artifact_sha256 in its sdk.toml; the runtime bundle is inconsistent",
+            sdk_file.display()
+        ));
+    }
+
+    fs::create_dir_all(output.join("lib"))
+        .map_err(|e| format!("{}: {e}", output.join("lib").display()))?;
+    fs::create_dir_all(output.join("deps"))
+        .map_err(|e| format!("{}: {e}", output.join("deps").display()))?;
+    fs::copy(&sdk_file, output.join("lib").join(&sdk_name))
+        .map_err(|e| format!("copy SDK: {e}"))?;
+    // Windows links against the import library; the runtime bundle leaves it
+    // out, the sdk-bundle needs it next to the DLL.
+    if sdk_target.contains("windows") {
+        let import_lib = target_dir.join("release/rutis_sdk.dll.lib");
+        fs::copy(&import_lib, output.join("lib").join("rutis_sdk.dll.lib"))
+            .map_err(|e| format!("copy import library: {e}"))?;
+    }
+
+    // Closure candidates: every artifact of every package in the SDK subtree.
+    let packages: Vec<String> = sdk
+        .get("packages")
+        .and_then(toml::Value::as_array)
+        .ok_or("sdk.toml lists no packages")?
+        .iter()
+        .filter_map(|item| item.as_str())
+        .filter_map(|item| item.split(' ').next())
+        .map(|name| name.replace('-', "_"))
+        .collect();
+    if packages.is_empty() {
+        return Err("sdk.toml lists no packages".into());
+    }
+    let mut variants: Vec<String> = Vec::new();
+    for name in &packages {
+        let mut found = 0;
+        for entry in fs::read_dir(&deps_dir).map_err(|e| format!("{}: {e}", deps_dir.display()))? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            // rlib artifacts are lib<crate>-<hash>.rlib everywhere. A
+            // proc-macro artifact is lib<crate>-<hash>.so on Linux and
+            // .dylib on macOS, but <crate>-<hash>.dll on Windows, where DLL
+            // names carry no lib prefix. The hash part is required: the SDK
+            // dylib itself has no suffix.
+            let stem = format!("lib{name}-");
+            let win_stem = format!("{name}-");
+            let matched_stem = if sdk_target.contains("windows") && file.starts_with(&win_stem) {
+                &win_stem
+            } else if file.starts_with(&stem) {
+                &stem
+            } else {
+                ""
+            };
+            let after = file.strip_prefix(matched_stem).unwrap_or("");
+            let has_hash = after.split_once('.').is_some_and(|(hash, _)| {
+                !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit())
+            });
+            let is_artifact = !matched_stem.is_empty()
+                && has_hash
+                && matches!(
+                    file.rsplit('.').next(),
+                    Some("rlib") | Some("so") | Some("dylib") | Some("dll")
+                );
+            if is_artifact {
+                fs::copy(entry.path(), output.join("deps").join(entry.file_name()))
+                    .map_err(|e| format!("copy closure: {e}"))?;
+                variants.push(file.into_owned());
+                found += 1;
+            }
+        }
+        if found == 0 {
+            eprintln!("note: no artifacts for {name} in {}", deps_dir.display());
+        }
+    }
+    variants.sort();
+
+    // sdk.toml comes from the runtime bundle. The lock and the toolchain
+    // pin cannot be bundle files (the macOS launcher checks codesign-verify
+    // everything there); sdk.toml's [build] section carries their hashes,
+    // and the files are taken from the runtime bundle if present or from
+    // the repository checkout — either way the hash must match the one
+    // recorded when the SDK was built.
+    let build = release
+        .get("build")
+        .cloned()
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    fs::copy(bundle_dir.join("sdk.toml"), output.join("sdk.toml"))
+        .map_err(|e| format!("copy sdk.toml: {e}"))?;
+    for (name, key) in [
+        ("Cargo.lock", "lock_sha256"),
+        ("rust-toolchain.toml", "toolchain_sha256"),
+    ] {
+        let expected = build
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .ok_or(format!("sdk.toml has no {key}; rebuild the runtime bundle"))?;
+        let candidates = [bundle_dir.join(name), repo.join(name)];
+        let found = candidates
+            .iter()
+            .find(|path| path.exists() && sha256_file(path).is_ok_and(|h| h == expected))
+            .ok_or(format!(
+                "no {name} matching sdk.toml's {key}; the checkout changed since the SDK was built"
+            ))?;
+        fs::copy(found, output.join(name)).map_err(|e| format!("copy {name}: {e}"))?;
+    }
+
+    // Shrink: one variant at a time, while the probe still builds against
+    // the bundle. The probe touches every surface the SDK re-exports.
+    let report = shrink_closure(&output, &sdk_name, sdk_target, &sdk_hash)?;
+    let kept = fs::read_dir(output.join("deps"))
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .count();
+    eprintln!(
+        "closure: collected {}, shrunk to {} artifacts ({} removed)",
+        variants.len(),
+        kept,
+        report.removed
+    );
+
+    write_cargo_config(&output, &sdk_name)?;
+    write_guide(&output, &sdk_name)?;
+
+    // bundle.toml lists every file except itself and the editable
+    // cargo-config.toml template.
+    let q = |value: &str| toml::Value::String(value.to_owned()).to_string();
+    let mut content = String::from("format_version = 1\n\n[sdk]\n");
+    for key in ["version", "id", "artifact_sha256"] {
+        content.push_str(&format!("{key} = {}\n", q(string(sdk, key)?)));
+    }
+    content.push_str("\n[files]\n");
+    let mut files: Vec<(String, String)> = Vec::new();
+    for dir in ["deps", "lib"] {
+        for entry in fs::read_dir(output.join(dir)).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let rel = format!("{}/{}", dir, entry.file_name().to_string_lossy());
+            files.push((rel, sha256_file(&entry.path())?));
+        }
+    }
+    for name in ["sdk.toml", "Cargo.lock", "rust-toolchain.toml", "GUIDE.md"] {
+        files.push((name.to_owned(), sha256_file(&output.join(name))?));
+    }
+    files.sort();
+    for (rel, hash) in &files {
+        content.push_str(&format!("{} = {}\n", q(rel), q(hash)));
+    }
+    fs::write(output.join("bundle.toml"), content).map_err(|e| e.to_string())?;
+    println!("{}", output.display());
+    Ok(())
+}
+
+struct ShrinkReport {
+    removed: usize,
+}
+
+/// Remove one closure variant at a time while a probe plugin still builds;
+/// a variant whose removal breaks the build is the one rustc selected.
+/// Cross builds skip shrinking: the probe would not link on this host.
+fn shrink_closure(
+    bundle: &Path,
+    sdk_name: &str,
+    sdk_target: &str,
+    sdk_hash: &str,
+) -> Result<ShrinkReport, String> {
+    // A per-invocation temp directory: the probe is scratch, is removed on
+    // the way out, and concurrent invocations never collide.
+    let probe_root = env::temp_dir().join(format!(
+        "rutis-sdk-bundle-probe-{}",
+        sha256_bytes(bundle.to_string_lossy().as_bytes())
+    ));
+    if probe_root.exists() {
+        fs::remove_dir_all(&probe_root).map_err(|e| e.to_string())?;
+    }
+    let result = shrink_closure_inner(&probe_root, bundle, sdk_name, sdk_target, sdk_hash);
+    let _ = fs::remove_dir_all(&probe_root);
+    result
+}
+
+fn shrink_closure_inner(
+    probe_root: &Path,
+    bundle: &Path,
+    sdk_name: &str,
+    sdk_target: &str,
+    sdk_hash: &str,
+) -> Result<ShrinkReport, String> {
+    let probe = probe_root.join("plugin");
+    fs::create_dir_all(probe.join("src"))
+        .map_err(|e| format!("{}: {e}", probe.join("src").display()))?;
+    fs::write(
+        probe.join("Cargo.toml"),
+        "[package]\nname = \"sdk-bundle-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = false\n\n[lib]\ncrate-type = [\"dylib\"]\ntest = false\ndoctest = false\n\n# Scratch crate outside any workspace.\n[workspace]\n",
+    )
+    .map_err(|e| e.to_string())?;
+    // The probe builds with the bundle's toolchain pin, not with whatever
+    // the repository currently uses.
+    let toolchain = fs::read_to_string(bundle.join("rust-toolchain.toml"))
+        .map_err(|e| format!("bundle rust-toolchain.toml: {e}"))?;
+    fs::write(probe.join("rust-toolchain.toml"), toolchain).map_err(|e| e.to_string())?;
+    fs::write(probe.join("src/lib.rs"), PROBE_SOURCE).map_err(|e| e.to_string())?;
+
+    let deps = bundle.join("deps");
+    let target_dir = probe_root.join("target");
+    let build = |verbose: bool| -> Result<bool, String> {
+        // Cargo does not track -L contents; force the plugin crate to
+        // recompile each round by bumping its source mtime.
+        let lib = probe.join("src/lib.rs");
+        if let Ok(file) = fs::File::options().write(true).open(&lib) {
+            file.set_modified(std::time::SystemTime::now()).ok();
+        }
+        let mut command = Command::new("cargo");
+        command
+            .args(["build", "--release", "--manifest-path"])
+            .arg(probe.join("Cargo.toml"));
+        command
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .env(
+                "RUSTFLAGS",
+                format!(
+                    "--extern rutis_sdk={} -L dependency={}",
+                    bundle.join("lib").join(sdk_name).display(),
+                    deps.display()
+                ),
+            )
+            .env("RUTIS_SDK_ARTIFACT_SHA256", sdk_hash);
+        let out = command.output().map_err(|e| e.to_string())?;
+        if !out.status.success() && verbose {
+            eprintln!("{}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(out.status.success())
+    };
+    if !build(true)? {
+        return Err(
+            "the probe plugin does not build against the bundle; the closure is incomplete".into(),
+        );
+    }
+    let host = command_output(Command::new("rustc").arg("-vV"))?
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .ok_or("rustc -vV printed no host")?
+        .to_owned();
+    if host != sdk_target {
+        return Ok(ShrinkReport { removed: 0 });
+    }
+
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in fs::read_dir(&deps).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let file = entry.file_name().into_string().unwrap_or_default();
+        let prefix = file.split('-').next().unwrap_or_default().to_owned();
+        groups.entry(prefix).or_default().push(file);
+    }
+    let mut removed = 0;
+    for (_prefix, files) in groups {
+        if files.len() == 1 {
+            continue;
+        }
+        for file in files {
+            let path = deps.join(&file);
+            let bak = deps.join(format!("{file}.bak"));
+            fs::rename(&path, &bak).map_err(|e| e.to_string())?;
+            if build(false)? {
+                fs::remove_file(&bak).map_err(|e| e.to_string())?;
+                removed += 1;
+            } else {
+                fs::rename(&bak, &path).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(ShrinkReport { removed })
+}
+
+/// Touches every shared crate the SDK re-exports, so that shrinking keeps
+/// the full metadata chain: rutis types, tokio runtime, serde_json values.
+/// tokio-util has no re-export; it stays in the closure through the rutis
+/// types the probe instantiates.
+const PROBE_SOURCE: &str = r#"
+use rutis_sdk::rutis::{
+    BoxFuture, CordisError, Ctx, Effect, FiberState, Plugin, PluginFactory, Snapshot,
+};
+use rutis_sdk::{ConfigValue, serde_json, tokio};
+
+struct ProbeFactory;
+struct Probe;
+
+impl PluginFactory<ConfigValue> for ProbeFactory {
+    fn name(&self) -> &str {
+        "sdk-bundle-probe"
+    }
+    fn build(&self, _: &ConfigValue) -> Result<Box<dyn Plugin>, CordisError> {
+        Ok(Box::new(Probe))
+    }
+}
+
+impl Plugin for Probe {
+    fn name(&self) -> &str {
+        "sdk-bundle-probe"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let _config = serde_json::json!({ "probe": true });
+            tokio::spawn(async {})
+                .await
+                .map_err(|e| CordisError::PluginFailed(e.into()))?;
+            ctx.provide("probe".to_string())?;
+            ctx.provide(Snapshot {
+                generation: 1,
+                state: FiberState::Active,
+                error: None,
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+rutis_sdk::export_plugin! { id: "sdk-bundle-probe", factory: ProbeFactory }
+"#;
+
+fn write_cargo_config(bundle: &Path, sdk_name: &str) -> Result<(), String> {
+    let sdk = read_toml(&bundle.join("sdk.toml"))?;
+    let sdk_table = table(&sdk, "sdk")?;
+    let sdk_hash = string(sdk_table, "artifact_sha256")?;
+    // TOML strings treat \ as an escape; Windows paths must use /, which
+    // both TOML and the Windows loader accept.
+    let forward_slashes = |path: &Path| {
+        path.to_string_lossy()
+            .replace('\\', "/")
+    };
+    let content = format!(
+        "# Copy this file to the plugin workspace as .cargo/config.toml and\n\
+         # adjust the two paths below to where you unpacked the bundle.\n\
+         # The RUSTFLAGS environment variable fully replaces these flags:\n\
+         # if it is set, the injection silently stops working. Unset it.\n\
+         [build]\nrustflags = [\n  \"--extern\", \"rutis_sdk={0}\",\n  \"-L\", \"dependency={1}\",\n]\n\n\
+         # export_plugin! embeds the SDK artifact hash at compile time; the\n\
+         # packer sets the real value, the template uses the recorded one so\n\
+         # cargo check/build works without the packer.\n\
+         [env]\nRUTIS_SDK_ARTIFACT_SHA256 = \"{2}\"\n\n\
+         # macOS: keep the plugin's deployment target equal to the SDK's.\n\
+         # [env]\n# MACOSX_DEPLOYMENT_TARGET = \"13.0\"\n",
+        forward_slashes(&bundle.join("lib").join(sdk_name)),
+        forward_slashes(&bundle.join("deps")),
+        sdk_hash
+    );
+    fs::write(bundle.join("cargo-config.toml"), content).map_err(|e| e.to_string())
+}
+
+fn write_guide(bundle: &Path, sdk_name: &str) -> Result<(), String> {
+    let content = format!(
+        "# Building a rutis dylib plugin with this SDK bundle\n\
+         \n\
+         Requirements: the Rust toolchain pinned by `rust-toolchain.toml`\n\
+         (copy it into your plugin workspace), and a plugin crate with\n\
+         `crate-type = [\"dylib\"]` and **no** `rutis-sdk`, `rutis`, `tokio`,\n\
+         `tokio-util` or `serde_json` dependency. Shared crates come from the\n\
+         SDK re-exports: `rutis_sdk::rutis`, `rutis_sdk::tokio`,\n\
+         `rutis_sdk::serde_json`.\n\
+         \n\
+         For editor and `cargo check` support, copy `cargo-config.toml` to\n\
+         your workspace as `.cargo/config.toml` and fix the paths. The\n\
+         `--extern`-injected crate is not in cargo's crate graph, so\n\
+         rust-analyzer may not resolve `rutis_sdk::` paths; its flycheck\n\
+         still runs `cargo check`.\n\
+         \n\
+         Package the plugin (from the rutis repository):\n\
+         \n\
+         ```sh\n\
+         cargo xtask pack-plugin --bundle <this directory> \\\n\
+           --manifest-path <plugin>/Cargo.toml --output <plugin-dist>\n\
+         ```\n\
+         \n\
+         The packer verifies the whole bundle against `bundle.toml`, checks\n\
+         the rustc version, injects the SDK, and rejects direct dependencies\n\
+         on shared crates before building.\n\
+         \n\
+         Rules (violations fail at pack time or at load time):\n\
+         \n\
+         - no custom global allocator, `panic = \"unwind\"`;\n\
+         - no `RUNPATH`/`RPATH`; native library dependencies must match\n\
+           `plugin.toml`'s `native_deps`;\n\
+         - types crossing the plugin boundary must come from the SDK;\n\
+         - an indirectly linked crate with the same name as one in the SDK\n\
+           does not share runtime state with the host (e.g. its own `tokio`\n\
+           never sees the host runtime) — use the re-exports;\n\
+         - a private dependency that pulls a shared crate into your graph\n\
+           collides with the SDK closure and fails to compile: remove it or\n\
+           align it with the SDK re-exports.\n\
+         \n\
+         When the SDK is upgraded, rebuild every plugin with the new bundle;\n\
+         old plugins are rejected by the host (L1/L2 identity mismatch).\n\
+         The runtime bundle this sdk-bundle belongs to ships `{sdk_name}`\n\
+         with the identity recorded in `sdk.toml`.\n"
+    );
+    fs::write(bundle.join("GUIDE.md"), content).map_err(|e| e.to_string())
 }
