@@ -214,11 +214,19 @@ async fn follow(
     id: PeerId,
 ) {
     let mut offers = peer.offers();
-    let mut provided: Option<Disposer> = None;
+    // What is provided, and for which offer of the host.
+    let mut provided: Option<(Disposer, u64)> = None;
     loop {
-        let hosting = offers.borrow_and_update().families.contains("plugins");
-        match (hosting, provided.is_some()) {
-            (true, false) => {
+        let hosting = offers.borrow_and_update().epoch("plugins");
+        let current = provided.as_ref().map(|(_, epoch)| *epoch);
+        if hosting != current {
+            // The host went, or was opened anew (perhaps unseen in between,
+            // with what it loaded gone): its rows stop; the peer and its
+            // other features stay.
+            if let Some((disposer, _)) = provided.take() {
+                let _ = disposer.dispose().await;
+            }
+            if let Some(epoch) = hosting {
                 let stale = resolver.take_stale(&id);
                 for entry in loader.entries() {
                     let named = entry.options["name"].as_str().map(str::to_owned);
@@ -231,18 +239,10 @@ async fn follow(
                     PeerRows::key(&id),
                     Arc::new(PeerRows { peer: peer.clone() }),
                 ) {
-                    Ok(disposer) => provided = Some(disposer),
+                    Ok(disposer) => provided = Some((disposer, epoch)),
                     Err(_) => return,
                 }
             }
-            (false, true) => {
-                // The host went: its rows stop; the peer and its other
-                // features stay.
-                if let Some(disposer) = provided.take() {
-                    let _ = disposer.dispose().await;
-                }
-            }
-            _ => {}
         }
         if offers.changed().await.is_err() {
             return;

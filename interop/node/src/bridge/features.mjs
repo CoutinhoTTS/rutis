@@ -37,11 +37,14 @@ export const Export = {
             const record = Object.fromEntries(Object.keys(shape).map(method =>
               [method, (...args) => one.get(name)[method](...args)]))
             const announced = ++version
-            let sent = false
-            const off = link.onOffers(families => {
-              if (!families.has('services')) { sent = false; return }
-              if (sent) return
-              sent = true
+            // Announced once to every offer of `services` (an importer
+            // started again is a new one).
+            let sentTo
+            const off = link.onOffers((_families, epoch) => {
+              const offered = epoch('services')
+              if (offered === sentTo) return
+              sentTo = offered
+              if (offered === undefined) return
               link.callAsync('', 'services.announce', [{ name, service: record, shape, version: announced }])
                 .catch(error => process.stderr.write(`rutis-bridge: cannot announce ${name} to ${peer}: ${error.message}\n`))
             })

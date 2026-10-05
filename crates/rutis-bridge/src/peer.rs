@@ -8,8 +8,12 @@
 //! answers with an error, and the session goes on. The families registered
 //! here are announced to the far end as `link.offers`; what the far end
 //! offers is observable.
+//!
+//! Each family offered carries the version at which it was registered
+//! (`since`): a family withdrawn and registered again between two looks is
+//! a new offer, which a follower must not mistake for the old one.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, Weak};
 
 use rutis::TypeKey;
@@ -38,6 +42,20 @@ where
 pub struct Offers {
     pub families: BTreeSet<String>,
     pub version: u64,
+    /// When each family was registered (a version). An end that does not
+    /// say has every family at 0.
+    pub since: BTreeMap<String, u64>,
+}
+
+impl Offers {
+    /// Which offer of `family` this is, if it is offered: it changes
+    /// whenever the family is registered anew, even if a follower never saw
+    /// it withdrawn.
+    pub fn epoch(&self, family: &str) -> Option<u64> {
+        self.families
+            .contains(family)
+            .then(|| self.since.get(family).copied().unwrap_or(0))
+    }
 }
 
 /// The family a call belongs to.
@@ -91,7 +109,13 @@ impl Operations {
             local.families = self.handlers.lock().unwrap().keys().cloned().collect();
             local.clone()
         };
-        let args = json!([{ "families": offers.families, "version": offers.version }]);
+        let since: BTreeMap<&String, u64> = offers
+            .families
+            .iter()
+            .map(|family| (family, offers.since.get(family).copied().unwrap_or(0)))
+            .collect();
+        let args =
+            json!([{ "families": offers.families, "version": offers.version, "since": since }]);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _ = session.invoke_async("", "link.offers", args.into()).await;
@@ -111,12 +135,20 @@ impl Dispatch for Operations {
                 .json()?;
             let families: BTreeSet<String> = rutis_interop::decode(announced["families"].clone())?;
             let version: u64 = rutis_interop::decode(announced["version"].clone())?;
+            let since: BTreeMap<String, u64> = match announced.get("since") {
+                Some(since) => rutis_interop::decode(since.clone())?,
+                None => BTreeMap::new(),
+            };
             // An older announcement never overrides a newer one.
             self.remote.send_if_modified(|offers| {
                 if version <= offers.version {
                     return false;
                 }
-                *offers = Offers { families, version };
+                *offers = Offers {
+                    families,
+                    version,
+                    since,
+                };
                 true
             });
             return Ok(Value::Undefined);
@@ -213,6 +245,15 @@ impl Peer {
                 return Err(Error::Value(format!("{family} is already registered")));
             }
             handlers.insert(family.to_owned(), handler);
+        }
+        {
+            // A new offer of the family, whatever was offered before. (The
+            // locks are taken one at a time: `announce` takes them in the
+            // other order.)
+            let mut local = self.operations.local.lock().unwrap();
+            local.version += 1;
+            let version = local.version;
+            local.since.insert(family.to_owned(), version);
         }
         self.operations.announce();
         Ok(Offered {

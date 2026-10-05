@@ -143,6 +143,13 @@ async fn accept(
             Err(Refusal::Unauthenticated) => {
                 return Err(refuse(StatusCode::FORBIDDEN, "not accepted here"));
             }
+            // Good credentials, nobody listening for them yet: retry.
+            Err(Refusal::NotListening) => {
+                return Err(refuse(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "not listening for this peer yet",
+                ));
+            }
             Err(Refusal::Ambiguous) => {
                 return Err(refuse(StatusCode::FORBIDDEN, "ambiguous credentials"));
             }

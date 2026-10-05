@@ -14,10 +14,13 @@ export const peerService = id => `rutisPeer.${id}`
 
 const RETRY = { initial: 500, max: 30_000, jitter: 0.2, stable: 60_000, rejected: 30_000 }
 
-// The families registered on a session, and the far end's offers.
+// The families registered on a session, and the far end's offers. Each
+// family offered carries the version at which it was registered (`since`):
+// one registered anew is a new offer even if its withdrawal went unseen.
 class Operations {
   handlers = new Map()
-  remote = { families: new Set(), version: 0 }
+  since = new Map()
+  remote = { families: new Set(), version: 0, since: new Map() }
   listeners = new Set()
   version = 0
   session
@@ -26,8 +29,12 @@ class Operations {
     if (target === '' && method === 'link.offers') {
       const [offers] = args
       if (offers?.version > this.remote.version) {
-        this.remote = { families: new Set(offers.families), version: offers.version }
-        for (const listener of this.listeners) listener(this.remote.families)
+        this.remote = {
+          families: new Set(offers.families),
+          version: offers.version,
+          since: new Map(Object.entries(offers.since ?? {})),
+        }
+        for (const listener of this.listeners) listener(this.remote.families, epochOf(this.remote))
       }
       return
     }
@@ -39,9 +46,15 @@ class Operations {
 
   announce() {
     if (!this.session) return
-    this.session.invokeAsync('', 'link.offers', [{ families: [...this.handlers.keys()], version: ++this.version }]).catch(() => {})
+    const families = [...this.handlers.keys()]
+    const since = Object.fromEntries(families.map(family => [family, this.since.get(family) ?? 0]))
+    this.session.invokeAsync('', 'link.offers', [{ families, version: ++this.version, since }]).catch(() => {})
   }
 }
+
+// Which offer of a family this is, if it is offered (0 from an end that
+// does not say).
+const epochOf = remote => family => remote.families.has(family) ? (remote.since.get(family) ?? 0) : undefined
 
 // What `rutisPeer.<id>` is: the far end, its session and its generation.
 function peerOf(id, session, generation, operations) {
@@ -57,17 +70,21 @@ function peerOf(id, session, generation, operations) {
       if (!family || family === 'link' || /[.:]/.test(family)) throw new Error(`${family} cannot be registered`)
       if (operations.handlers.has(family)) throw new Error(`${family} is already registered`)
       operations.handlers.set(family, handler)
+      operations.since.set(family, ++operations.version)
       operations.announce()
       return () => {
         if (operations.handlers.get(family) !== handler) return
         operations.handlers.delete(family)
+        operations.since.delete(family)
         operations.announce()
       }
     },
-    // Follow the far end's offers; returns the unsubscription.
+    // Follow the far end's offers: `listener(families, epoch)`, where
+    // `epoch(family)` says which offer of it this is. Returns the
+    // unsubscription.
     onOffers(listener) {
       operations.listeners.add(listener)
-      listener(operations.remote.families)
+      listener(operations.remote.families, epochOf(operations.remote))
       return () => operations.listeners.delete(listener)
     },
   }

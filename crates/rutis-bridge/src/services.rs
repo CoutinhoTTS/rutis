@@ -159,11 +159,13 @@ impl Plugin for ExportOne {
 }
 
 /// Announce whenever the far end offers `services`: at once if it does,
-/// again after it offers them anew.
+/// again for every new offer of them (an importer that started again).
 async fn announce(peer: Arc<Peer>, name: String, service: Value, shape: Json, version: u64) {
     let mut offers = peer.offers();
+    let mut announced_to = None;
     loop {
-        if offers.borrow_and_update().families.contains("services") {
+        let offered = offers.borrow_and_update().epoch("services");
+        if offered.is_some() && offered != announced_to {
             let announced = peer
                 .connection()
                 .invoke_async(
@@ -183,16 +185,9 @@ async fn announce(peer: Arc<Peer>, name: String, service: Value, shape: Json, ve
                     peer.id()
                 );
             }
-            // Announced to this offer; wait until the far end offers again.
-            loop {
-                if offers.changed().await.is_err() {
-                    return;
-                }
-                if !offers.borrow().families.contains("services") {
-                    break;
-                }
-            }
-        } else if offers.changed().await.is_err() {
+        }
+        announced_to = offered;
+        if offers.changed().await.is_err() {
             return;
         }
     }

@@ -173,6 +173,38 @@ async fn peers_serve_registered_families_and_announce_them() {
         .is_err());
 }
 
+/// A family withdrawn and registered again before the far end looks is a
+/// new offer there: its epoch changed though the families did not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_family_registered_anew_is_a_new_offer() {
+    let (_transport, main, mac) = linked().await;
+    let at_main = eventually(|| peer(&main.root, "mac"), "main's peer").await;
+    let at_mac = eventually(|| peer(&mac.root, "main"), "mac's peer").await;
+    let handler = || Arc::new(|_: &Connection, _: &str, _: &str, _: Value| Ok(Value::Undefined));
+
+    let offered = at_main.register("plugins", handler()).unwrap();
+    let offers = at_mac.offers();
+    let first = eventually(|| offers.borrow().epoch("plugins"), "plugins offered").await;
+    // Withdrawn and registered again at once: one look may see neither change.
+    drop(offered);
+    let _again = at_main.register("plugins", handler()).unwrap();
+    let second = eventually(
+        || {
+            offers
+                .borrow()
+                .epoch("plugins")
+                .filter(|epoch| *epoch != first)
+        },
+        "the new offer",
+    )
+    .await;
+    assert!(second > first);
+    assert_eq!(
+        offers.borrow().families,
+        ["plugins".to_owned()].into_iter().collect()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dialing_link_reconnects_and_peers_get_a_new_generation() {
     let (_transport, main, mac) = linked().await;
@@ -362,14 +394,15 @@ async fn stopping_a_link_withdraws_its_peer_and_revokes_its_registration() {
     assert!(peer(&main.root, "mac").is_none());
     at_mac.connection().closed().await;
     drop(at_mac);
-    // With main's registration revoked, mac is refused until main relinks.
+    // With main's registration revoked, mac is refused until main relinks:
+    // its credentials are good, so it retries as for a listener not up yet.
     state(
         &mac.states,
         |s| {
             matches!(
                 s,
                 LinkState::Waiting {
-                    failure: Failure::AuthRejected,
+                    failure: Failure::Retryable,
                     ..
                 }
             )
@@ -389,7 +422,7 @@ async fn stopping_a_link_withdraws_its_peer_and_revokes_its_registration() {
                     .protocol(protocol())
             )
             .await,
-        Err(rutis_channel::ConnectError::AuthRejected { .. })
+        Err(rutis_channel::ConnectError::Retryable { .. })
     ));
 }
 

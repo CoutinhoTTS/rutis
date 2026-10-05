@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin, PluginFactory};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin, PluginFactory, TypeKey};
 use rutis_bridge::{
     peer_key, Credential, Described, HostPlugin, IdentityPlugin, LinkConfig, LinkPlugin, Peer,
     Retry, StaticCatalog, StaticIdentity,
@@ -37,26 +37,39 @@ async fn eventually<T>(mut check: impl FnMut() -> Option<T>, what: &str) -> T {
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
 }
 
-/// Installed on mac: provides `Greeting` with its config's text; counts
-/// how often it started.
+/// Installed on mac: provides `Greeting` with its config's text (keyed by
+/// its config's `as`, if any, so two rows can run side by side); counts how
+/// often it started.
 struct Greeter(Arc<AtomicUsize>);
 impl PluginFactory<Value> for Greeter {
     fn build(&self, config: &Value) -> Result<Box<dyn Plugin>, CordisError> {
         Ok(Box::new(Greeting(
             config["text"].as_str().unwrap_or("hello").to_owned(),
+            config["as"].as_str().map(str::to_owned),
             self.0.clone(),
         )))
     }
 }
-struct Greeting(String, Arc<AtomicUsize>);
+struct Greeting(String, Option<String>, Arc<AtomicUsize>);
 impl Plugin for Greeting {
     fn name(&self) -> &str {
         "greeter"
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            self.1.fetch_add(1, Ordering::SeqCst);
-            ctx.provide(GreetingService(self.0.clone()))?;
+            self.2.fetch_add(1, Ordering::SeqCst);
+            let service = GreetingService(self.0.clone());
+            match &self.1 {
+                Some(key) => {
+                    ctx.provide_as(
+                        TypeKey::keyed_dynamic::<GreetingService>(key.clone()),
+                        Arc::new(service),
+                    )?;
+                }
+                None => {
+                    ctx.provide(service)?;
+                }
+            }
             Ok(Effect::Done)
         })
     }
@@ -74,6 +87,11 @@ struct Nodes {
 
 fn greeting(mac: &Ctx) -> Option<String> {
     mac.get::<GreetingService>()
+        .map(|service| service.0.clone())
+}
+
+fn greeting_as(mac: &Ctx, key: &str) -> Option<String> {
+    mac.get_as::<GreetingService>(TypeKey::keyed_dynamic::<GreetingService>(key.to_owned()))
         .map(|service| service.0.clone())
 }
 
@@ -362,8 +380,8 @@ async fn loader_rows_compose_links_and_change_features_in_place() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hosted_rows_share_the_session_of_their_link() {
     let nodes = nodes(json!([
-        { "id": "g1", "name": "peer:mac/greeter", "config": { "text": "one" } },
-        { "id": "g2", "name": "peer:mac/greeter", "config": { "text": "two" } }
+        { "id": "g1", "name": "peer:mac/greeter", "config": { "text": "one", "as": "g1" } },
+        { "id": "g2", "name": "peer:mac/greeter", "config": { "text": "two", "as": "g2" } }
     ]))
     .await;
     eventually(
@@ -376,7 +394,7 @@ async fn hosted_rows_share_the_session_of_their_link() {
 
     // Unload one: the session and the other row stay.
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
-        { "id": "g2", "name": "peer:mac/greeter", "config": { "text": "two" } }
+        { "id": "g2", "name": "peer:mac/greeter", "config": { "text": "two", "as": "g2" } }
     ] }]))
     .unwrap();
     nodes
@@ -385,10 +403,15 @@ async fn hosted_rows_share_the_session_of_their_link() {
         .await
         .unwrap();
     eventually(
-        || (greeting(&nodes.mac)? == "two").then_some(()),
-        "the other row running",
+        || greeting_as(&nodes.mac, "g1").is_none().then_some(()),
+        "the row unloaded",
     )
     .await;
+    assert_eq!(
+        greeting_as(&nodes.mac, "g2").as_deref(),
+        Some("two"),
+        "the other row still running"
+    );
     let still = nodes.main.get_as::<Peer>(peer_key(&id("mac"))).unwrap();
     assert!(
         Arc::ptr_eq(&session, &still),

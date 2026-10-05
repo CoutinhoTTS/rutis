@@ -90,6 +90,10 @@ struct Table {
 pub enum Refusal {
     /// Nothing verified what it presented for this listener.
     Unauthenticated,
+    /// What it presented is good, but no link listens for it here (yet):
+    /// nothing is registered on the listener, or this listener's identity
+    /// verifies it as a peer whose link has not registered. Worth retrying.
+    NotListening,
     /// More than one registration would take it.
     Ambiguous,
 }
@@ -166,7 +170,17 @@ impl Registrations {
             .filter(|((name, _), _)| name == listener)
             .filter(|((_, peer), entry)| entry.identity.verify(presented).as_ref() == Some(peer));
         let Some(((_, peer), entry)) = matches.next() else {
-            return Err(Refusal::Unauthenticated);
+            let mut here = table
+                .entries
+                .iter()
+                .filter(|((name, _), _)| name == listener)
+                .peekable();
+            let nothing_here = here.peek().is_none();
+            let verified = here.any(|(_, entry)| entry.identity.verify(presented).is_some());
+            return Err(match nothing_here || verified {
+                true => Refusal::NotListening,
+                false => Refusal::Unauthenticated,
+            });
         };
         if matches.next().is_some() {
             return Err(Refusal::Ambiguous);
@@ -278,8 +292,31 @@ mod tests {
             registry.route("public", Presented::Bearer("nobody")),
             Err(Refusal::Unauthenticated)
         );
+        // Nothing registered there: nobody listens yet.
         assert_eq!(
             registry.route("other", Presented::Bearer("mac-token")),
+            Err(Refusal::NotListening)
+        );
+    }
+
+    /// A far end this listener's identity knows, before its link registered
+    /// (a dialer quicker than the listening link): retry, not rejection.
+    #[test]
+    fn a_known_far_end_whose_link_has_not_registered_is_not_listened_for_yet() {
+        let registry = Registrations::new();
+        let (mut mac, _) = registration("mac", "mac-token");
+        mac.identity = Arc::new(
+            StaticIdentity::new(id("main"))
+                .accept_token("mac-token", id("mac"))
+                .accept_token("pi-token", id("pi")),
+        );
+        let _mac = registry.register(&id("main"), mac).unwrap();
+        assert_eq!(
+            registry.route("public", Presented::Bearer("pi-token")),
+            Err(Refusal::NotListening)
+        );
+        assert_eq!(
+            registry.route("public", Presented::Bearer("forged")),
             Err(Refusal::Unauthenticated)
         );
     }

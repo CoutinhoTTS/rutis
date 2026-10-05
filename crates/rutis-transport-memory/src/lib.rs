@@ -287,10 +287,15 @@ impl MemoryTransport {
         let ticket = self
             .registrations
             .route(address, Presented::Bearer(&token))
-            .map_err(|refusal| ConnectError::AuthRejected {
-                reason: match refusal {
-                    Refusal::Unauthenticated => format!("memory:{address}: not accepted here"),
-                    Refusal::Ambiguous => format!("memory:{address}: ambiguous credentials"),
+            .map_err(|refusal| match refusal {
+                Refusal::NotListening => ConnectError::Retryable {
+                    reason: format!("memory:{address}: not listening for this peer yet"),
+                },
+                Refusal::Unauthenticated => ConnectError::AuthRejected {
+                    reason: format!("memory:{address}: not accepted here"),
+                },
+                Refusal::Ambiguous => ConnectError::AuthRejected {
+                    reason: format!("memory:{address}: ambiguous credentials"),
                 },
             })?;
         if !dial.protocol.is_empty() && dial.protocol != ticket.protocol {
