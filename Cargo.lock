@@ -3201,6 +3201,7 @@ dependencies = [
  "rutis-bridge",
  "rutis-channel",
  "rutis-interop",
+ "rutis-transport-local",
  "rutis-transport-memory",
  "rutis-transport-websocket",
  "schemars",
@@ -3230,6 +3231,8 @@ dependencies = [
  "rutis",
  "rutis-bridge",
  "rutis-channel",
+ "rutis-interop",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use rutis::{Ctx, FiberState, FiberView};
 use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, HostDispatch, RuntimePlugin};
+use rutis_interop::{host_key, HostDispatch};
 use rutis_loader::{
     Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin,
     Patch, RuntimeRows, RuntimeRowsPlugin, ServiceCatalog,
 };
+use rutis_transport_local::LocalRuntime;
 use serde_json::{json, Value};
 
 const PROVIDER: &str = r#"
@@ -319,7 +320,7 @@ async fn mount(root: &Ctx, package: PathBuf, shared: &[&str]) -> (Loader, FiberV
     for name in shared {
         catalog.register_shared(*name);
     }
-    let runtime = RuntimePlugin::node(package, node_package().join("package.json"))
+    let runtime = LocalRuntime::node(package, node_package().join("package.json"))
         .host("probe", json!({ "record": "sync" }));
     let resolver = Arc::new(InteropResolver::node(runtime.handle()).with_catalog(&catalog));
     let runtime = root.plugin(runtime);
@@ -582,7 +583,7 @@ async fn rows_resolved_offline_wait_for_what_they_inject() {
         .unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("probe").register_shared("greeter");
-    let runtime = RuntimePlugin::node(node_package(), node_package().join("package.json"))
+    let runtime = LocalRuntime::node(node_package(), node_package().join("package.json"))
         .host("probe", json!({ "record": "sync" }));
     let resolver = Arc::new(InteropResolver::node(runtime.handle()).with_catalog(&catalog));
     let options = LoaderOptions {
@@ -629,7 +630,7 @@ async fn a_runtime_that_cannot_start_does_not_block_resolution() {
     let (provider, _, _) = write_plugins(dir.path());
     let root = Ctx::root().unwrap();
     // No Node runtime here: the mount fails.
-    let runtime = RuntimePlugin::node(dir.path(), node_package().join("package.json"));
+    let runtime = LocalRuntime::node(dir.path(), node_package().join("package.json"));
     let resolver = InteropResolver::node(runtime.handle());
     let runtime = root.plugin(runtime);
     let _ = (&runtime).await;
@@ -706,7 +707,7 @@ async fn a_starting_runtime_can_be_disposed_or_restarted() {
     let dir = tempfile::tempdir().unwrap();
     let package = hanging_runtime(dir.path());
     let root = Ctx::root().unwrap();
-    let runtime = RuntimePlugin::node(&package, node_package().join("package.json"));
+    let runtime = LocalRuntime::node(&package, node_package().join("package.json"));
     let handle = runtime.handle();
     let runtime = root.plugin(runtime);
 

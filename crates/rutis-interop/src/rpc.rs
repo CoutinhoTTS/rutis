@@ -814,6 +814,11 @@ impl Connection {
         Ok(peer)
     }
 
+    /// What ended the session, once it ended.
+    pub fn close_reason(&self) -> Option<Error> {
+        self.0.calls.lock().unwrap().closed.clone()
+    }
+
     /// What the far end said of itself (endpoint format), once it greeted.
     pub fn greeting(&self) -> Option<&Greeting> {
         self.0.greeting.get()

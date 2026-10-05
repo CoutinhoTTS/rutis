@@ -1,10 +1,17 @@
 //! The local transport: channels to processes on the same machine.
 //!
 //! [`LocalPlugin`] provides `Transport#local`. It dials Unix sockets
-//! (`unix:<path>`, or a bare path), framing messages by newline. Starting
-//! runtime processes on an inherited fd joins it in a later stage. Unloading
-//! the plugin closes every channel it opened.
+//! (`unix:<path>`, or a bare path), framing messages by newline, and starts
+//! runtime processes: `spawn:<name>` starts the process registered as
+//! `name` ([`LocalTransport::spawner`]) on an inherited socket and connects
+//! it; the channel owns the process. Unloading the plugin closes every
+//! channel it opened, and so ends the processes it started.
+//!
+//! [`LocalRuntime`] is a local language runtime on top: the process, a link
+//! to it, and the runtime plugin running its rows.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin};
@@ -33,7 +40,12 @@ pub fn framed(
     )
 }
 #[cfg(unix)]
+mod runtime;
+#[cfg(unix)]
 mod unix;
+
+#[cfg(unix)]
+pub use runtime::LocalRuntime;
 
 /// Provides `Transport#local`.
 #[derive(Default)]
@@ -70,16 +82,37 @@ impl Plugin for LocalPlugin {
 #[derive(Default)]
 pub struct LocalTransport {
     open: Mutex<Vec<Weak<dyn rutis_channel::Closer>>>,
+    spawners: Mutex<HashMap<String, Spawner>>,
+}
+
+/// A runtime process `spawn:<name>` starts.
+#[derive(Clone, Debug)]
+pub struct Spawner {
+    /// How to start it; `None` runs the Node runtime of `node_package`.
+    pub launcher: Option<rutis_interop::Launcher>,
+    pub node_package: PathBuf,
+    /// Its first plugin, or its anchor: its last argument.
+    pub first: PathBuf,
+    /// The endpoint the process is: whoever starts a process names it.
+    pub peer: rutis_channel::PeerId,
 }
 
 impl LocalTransport {
+    /// Let `spawn:<name>` start `spawner`.
+    pub fn spawner(&self, name: &str, spawner: Spawner) {
+        self.spawners
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), spawner);
+    }
+
     fn track(&self, channel: &Channel) {
         let mut open = self.open.lock().unwrap();
         open.retain(|closer| closer.strong_count() > 0);
         open.push(Arc::downgrade(&channel.closer));
     }
 
-    fn close_all(&self) {
+    pub(crate) fn close_all(&self) {
         for closer in std::mem::take(&mut *self.open.lock().unwrap()) {
             if let Some(closer) = closer.upgrade() {
                 closer.close("transport unloaded");
@@ -96,9 +129,49 @@ impl Transport for LocalTransport {
     fn dial<'a>(&'a self, dial: &'a Dial) -> BoxFuture<'a, Result<Channel, ConnectError>> {
         Box::pin(async move {
             let address = dial.address.as_str();
-            let channel = connect(address).await?;
+            let channel = match address.strip_prefix("spawn:") {
+                Some(name) => self.spawn(name).await?,
+                None => connect(address).await?,
+            };
             self.track(&channel);
             Ok(channel)
+        })
+    }
+}
+
+impl LocalTransport {
+    #[cfg(unix)]
+    async fn spawn(&self, name: &str) -> Result<Channel, ConnectError> {
+        let spawner = self
+            .spawners
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ConnectError::Incompatible {
+                reason: format!("nothing to spawn as {name}"),
+            })?;
+        let mut channel = rutis_interop::spawn::start(
+            spawner.launcher.as_ref(),
+            &spawner.node_package,
+            &spawner.first,
+        )
+        .await
+        .map_err(|error| match error {
+            // The process could not be started at all: its configuration.
+            rutis_interop::Error::Value(reason) => ConnectError::Incompatible { reason },
+            error => ConnectError::Retryable {
+                reason: error.to_string(),
+            },
+        })?;
+        channel.info.peer = Some(spawner.peer);
+        Ok(channel)
+    }
+
+    #[cfg(not(unix))]
+    async fn spawn(&self, _name: &str) -> Result<Channel, ConnectError> {
+        Err(ConnectError::Incompatible {
+            reason: "runtime processes start on Unix only".into(),
         })
     }
 }

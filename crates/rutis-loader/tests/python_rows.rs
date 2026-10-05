@@ -7,10 +7,11 @@ use std::time::{Duration, SystemTime};
 
 use rutis::Ctx;
 use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, HostDispatch, RuntimePlugin};
+use rutis_interop::{host_key, HostDispatch};
 use rutis_loader::{
     Chain, InteropResolver, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin,
 };
+use rutis_transport_local::LocalRuntime;
 use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
@@ -57,7 +58,7 @@ async fn reloading_a_row_runs_the_edited_module() {
     root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
         .unwrap();
     let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/python");
-    let python = RuntimePlugin::python(sdk, dir.path());
+    let python = LocalRuntime::python(sdk, dir.path());
     let rows = Arc::new(InteropResolver::modules(python.handle()));
     root.plugin(python).await.unwrap();
     let plugin_loader = LoaderPlugin::new(

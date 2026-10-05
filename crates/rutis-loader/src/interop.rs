@@ -1,5 +1,8 @@
 //! Plugins of other languages as loader rows, each language in its own
-//! runtime process ([`RuntimePlugin`]).
+//! runtime process: one on this machine (`rutis_transport_local::LocalRuntime`,
+//! the process started by the local transport and its session over a link),
+//! or one elsewhere ([`RuntimePlugin::remote`], its session over a link to
+//! it). Either way the rows are the same.
 //!
 //! The runtime is a rutis plugin the application mounts first, then the
 //! loader, then a [`RuntimeRowsPlugin`] per runtime; every row depends on the
@@ -153,7 +156,7 @@ impl InteropResolver {
     }
 
     /// Rows of a runtime that loads plugins by module name, such as a
-    /// Python runtime ([`RuntimePlugin::python`]): a row named
+    /// Python runtime (`rutis_transport_local::LocalRuntime::python`): a row named
     /// `<runtime name>:<module>` (`py:weather.plugin`) loads `<module>`.
     pub fn modules(runtime: RuntimeHandle) -> Self {
         let prefix = format!("{}:", runtime.name());
@@ -583,11 +586,7 @@ mod stale_tests {
         )
         .unwrap();
         let loose = Path::new("/nowhere/loose.mjs");
-        let runtime = rutis_interop::RuntimePlugin::launcher(
-            "t",
-            rutis_interop::Launcher::new("true"),
-            dir.path(),
-        );
+        let runtime = rutis_interop::RuntimePlugin::session("t", dir.path());
         let resolver = InteropResolver::node(runtime.handle());
         {
             let mut resolved = resolver.resolved.lock().unwrap();
@@ -610,11 +609,7 @@ mod stale_tests {
     #[test]
     fn module_rows_have_no_version_and_are_never_cached() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = rutis_interop::RuntimePlugin::launcher(
-            "py",
-            rutis_interop::Launcher::new("true"),
-            dir.path(),
-        );
+        let runtime = rutis_interop::RuntimePlugin::session("py", dir.path());
         let naming = Naming::Modules {
             prefix: "py:".into(),
         };
@@ -632,11 +627,7 @@ mod stale_tests {
     fn invalidated_rows_are_stale_until_resolved_again() {
         let dir = tempfile::tempdir().unwrap();
         let entry = dir.path().join("p.mjs");
-        let runtime = rutis_interop::RuntimePlugin::launcher(
-            "t",
-            rutis_interop::Launcher::new("true"),
-            dir.path(),
-        );
+        let runtime = rutis_interop::RuntimePlugin::session("t", dir.path());
         let resolver = InteropResolver::modules(runtime.handle());
         {
             let mut resolved = resolver.resolved.lock().unwrap();

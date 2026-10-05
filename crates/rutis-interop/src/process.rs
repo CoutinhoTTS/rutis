@@ -135,6 +135,30 @@ impl Launcher {
         self.inherit_fd = true;
         self
     }
+
+    /// The Python runtime: `python3 -m rutis_runtime`, with the SDK
+    /// directory `sdk` (`interop/python`) and then `project` ahead of the
+    /// inherited `PYTHONPATH`, in `project`, on an inherited socket.
+    #[cfg(feature = "python")]
+    pub fn python(sdk: &std::path::Path, project: &std::path::Path) -> Self {
+        let mut path = std::ffi::OsString::from(sdk);
+        path.push(":");
+        path.push(project);
+        if let Some(inherited) = std::env::var_os("PYTHONPATH").filter(|p| !p.is_empty()) {
+            path.push(":");
+            path.push(inherited);
+        }
+        Launcher::new("python3")
+            .arg("-m")
+            .arg("rutis_runtime")
+            .env("PYTHONPATH", path)
+            .env("PYTHONUNBUFFERED", "1")
+            // A plugin imported again after an edit must not come from a
+            // bytecode file written in the same second as the old source.
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .cwd(project)
+            .inherit_fd()
+    }
 }
 impl Imports {
     fn update(&self, name: String, handle: Option<String>, version: u64) {
@@ -399,41 +423,7 @@ impl Process {
                 ))
             }
         };
-        let (command, connect) = match launcher {
-            Some(launcher) => {
-                let mut command = tokio::process::Command::new(&launcher.program);
-                command
-                    .args(&launcher.args)
-                    .envs(launcher.env.iter().map(|(name, value)| (name, value)));
-                // Without a directory of its own, it runs where the
-                // application does.
-                if let Some(cwd) = &launcher.cwd {
-                    command.current_dir(cwd);
-                }
-                let connect = match launcher.inherit_fd {
-                    true => crate::spawn::Connect::Inherit,
-                    false => crate::spawn::Connect::DialBack,
-                };
-                (command, connect)
-            }
-            #[cfg(not(feature = "node"))]
-            None => {
-                let _ = node_package;
-                return Err(Error::Value(
-                    "no launcher given, and the Node runtime needs the `node` feature".into(),
-                ));
-            }
-            #[cfg(feature = "node")]
-            None => {
-                let mut command = tokio::process::Command::new("node");
-                command
-                    .arg("--import")
-                    .arg("tsx")
-                    .arg(node_package.join("src/runner.mjs"))
-                    .current_dir(node_package);
-                (command, crate::spawn::node_connect(node_package))
-            }
-        };
+        let (command, connect) = crate::spawn::command(launcher, node_package)?;
         let spawned = crate::spawn::spawn(command, plugin, connect).await?;
         Self::start(
             spawned.channel,

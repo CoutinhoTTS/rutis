@@ -81,6 +81,13 @@ pub struct LinkConfig {
     /// Capabilities this end declares besides the session's own and
     /// `node`, which every rutis link declares.
     pub declare: Vec<String>,
+    /// Speak the compat protocol (2), as local runtime processes do: the
+    /// far end is who its spawner named, greets with no endpoint id and
+    /// declares nothing, so nothing is required of it.
+    pub compat: bool,
+    /// Connect again after a session ends. A local runtime process is not
+    /// restarted: its link stops when it ends.
+    pub reconnect: bool,
 }
 
 impl LinkConfig {
@@ -93,6 +100,8 @@ impl LinkConfig {
             retry: Retry::default(),
             require: Vec::new(),
             declare: Vec::new(),
+            compat: false,
+            reconnect: true,
         }
     }
 
@@ -117,6 +126,13 @@ impl LinkConfig {
     /// Declare `capability` to the far end.
     pub fn declare(mut self, capability: &str) -> Self {
         self.declare.push(capability.into());
+        self
+    }
+
+    /// A local runtime process: the compat protocol, and no reconnecting.
+    pub fn local_runtime(mut self) -> Self {
+        self.compat = true;
+        self.reconnect = false;
         self
     }
 }
@@ -286,7 +302,10 @@ impl Link {
         endpoint
             .capabilities
             .extend(self.config.declare.iter().cloned());
-        let format = Format::Endpoint(endpoint);
+        let format = match self.config.compat {
+            true => Format::Compat,
+            false => Format::Endpoint(endpoint),
+        };
         let session = Connection::open_with(channel, operations.clone(), format)?;
         let ready = tokio::time::timeout(self.config.retry.handshake, session.ready()).await;
         match ready {
@@ -302,12 +321,16 @@ impl Link {
             }
         }
         // The contract is checked before use, not guessed from failing calls.
-        if let Some(missing) = self
-            .config
-            .require
-            .iter()
-            .find(|capability| !session.supports(capability))
-        {
+        // A compat far end declares nothing, and is what its spawner said.
+        let missing = match self.config.compat {
+            true => None,
+            false => self
+                .config
+                .require
+                .iter()
+                .find(|capability| !session.supports(capability)),
+        };
+        if let Some(missing) = missing {
             let error = Error::Handshake(Handshake::Incompatible(format!(
                 "{} does not declare {missing}",
                 self.config.peer
@@ -315,7 +338,7 @@ impl Link {
             session.close(error.clone());
             return Err(error);
         }
-        operations.attach(session.clone());
+        operations.attach(session.clone(), !self.config.compat);
         self.generation += 1;
         let peer = Peer::new(
             self.config.peer.clone(),
@@ -373,11 +396,21 @@ impl Link {
                         if live.since.elapsed() >= retry.stable {
                             backoff.reset();
                         }
+                        // Why it ended: for a local runtime, how its
+                        // process ended.
+                        let reason = live.session.close_reason().map_or_else(
+                            || "the session ended".to_owned(),
+                            |error| error.to_string(),
+                        );
                         live.end("session ended").await;
-                        (Failure::Retryable, "the session ended".into())
+                        (Failure::Retryable, reason)
                     }
                 },
             };
+            if !self.config.reconnect {
+                self.state.send_replace(LinkState::Stopped { error });
+                return;
+            }
             match failure {
                 Failure::Incompatible => {
                     self.state.send_replace(LinkState::Stopped { error });

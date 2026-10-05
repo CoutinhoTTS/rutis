@@ -57,11 +57,15 @@ pub(crate) struct Operations {
     /// What this end offers, and how often that changed.
     local: Mutex<Offers>,
     session: Mutex<Option<Connection>>,
+    announcing: Mutex<bool>,
 }
 
 impl Operations {
-    pub(crate) fn attach(&self, session: Connection) {
+    /// Serve `session`; `announce` tells the far end what is offered (a
+    /// compat far end, a local runtime, takes no `link.offers`).
+    pub(crate) fn attach(&self, session: Connection, announce: bool) {
         *self.session.lock().unwrap() = Some(session);
+        *self.announcing.lock().unwrap() = announce;
         self.announce();
     }
 
@@ -75,6 +79,9 @@ impl Operations {
     /// announcement is superseded by the next, and a closed session ends
     /// the question.
     fn announce(&self) {
+        if !*self.announcing.lock().unwrap() {
+            return;
+        }
         let Some(session) = self.session.lock().unwrap().clone() else {
             return;
         };

@@ -1,10 +1,12 @@
-//! The local connector: starts a runtime process and connects it, either
-//! on an inherited socket (fd 3) or, for runtimes that cannot take one, on
-//! a Unix socket in a private directory that the process dials back. It
-//! watches how the process ends.
+//! Starting runtime processes: a runtime process is started and connected,
+//! either on an inherited socket (fd 3) or, for runtimes that cannot take
+//! one, on a Unix socket in a private directory that the process dials
+//! back; how it ends is watched and reported as the channel's end.
 //!
-//! This serves the `Process` compatibility facade; it moves into
-//! `rutis-transport-local` once runtimes get sessions through local + link.
+//! The `Process` facade starts its processes with it, and so does the local
+//! transport (`rutis-transport-local`), through [`start`], for runtimes that
+//! get their sessions through a link. One implementation serves both: the
+//! local transport depends on this crate, not the reverse.
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -18,11 +20,11 @@ use tokio::sync::{oneshot, watch};
 use crate::Error;
 
 /// The fd a runtime process finds its channel on (`fd:3`).
-pub(crate) const CHANNEL_FD: i32 = 3;
+pub const CHANNEL_FD: i32 = 3;
 
 /// How the process gets its channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Connect {
+pub enum Connect {
     /// One end of a socket pair, as fd 3: `fd:3 <first>`.
     Inherit,
     /// A socket path the process dials: `<path> <first>`.
@@ -144,6 +146,92 @@ fn traced(channel: Channel) -> Channel {
             Arc::new(|line: &str| eprintln!("rutis-interop trace: {line}")),
         ),
         None => channel,
+    }
+}
+
+/// The command a runtime process starts with: `launcher`, or the Node
+/// runtime of the npm package `node_package` (feature `node`), and how it
+/// takes its channel.
+pub fn command(
+    launcher: Option<&crate::Launcher>,
+    node_package: &Path,
+) -> Result<(tokio::process::Command, Connect), Error> {
+    match launcher {
+        Some(launcher) => {
+            let mut command = tokio::process::Command::new(&launcher.program);
+            command
+                .args(&launcher.args)
+                .envs(launcher.env.iter().map(|(name, value)| (name, value)));
+            // Without a directory of its own, it runs where the application
+            // does.
+            if let Some(cwd) = &launcher.cwd {
+                command.current_dir(cwd);
+            }
+            let connect = match launcher.inherit_fd {
+                true => Connect::Inherit,
+                false => Connect::DialBack,
+            };
+            Ok((command, connect))
+        }
+        #[cfg(not(feature = "node"))]
+        None => {
+            let _ = node_package;
+            Err(Error::Value(
+                "no launcher given, and the Node runtime needs the `node` feature".into(),
+            ))
+        }
+        #[cfg(feature = "node")]
+        None => {
+            let mut command = tokio::process::Command::new("node");
+            command
+                .arg("--import")
+                .arg("tsx")
+                .arg(node_package.join("src/runner.mjs"))
+                .current_dir(node_package);
+            Ok((command, node_connect(node_package)))
+        }
+    }
+}
+
+/// Start a runtime process (see [`command`]) with `first` (its first plugin,
+/// or its anchor) and return its channel, which owns the process: closing
+/// it, or dropping all of it, ends the process, and its end says how the
+/// process ended (`Cordis process exited with …`).
+pub async fn start(
+    launcher: Option<&crate::Launcher>,
+    node_package: &Path,
+    first: &Path,
+) -> Result<Channel, Error> {
+    let (command, connect) = command(launcher, node_package)?;
+    let spawned = spawn(command, first, connect).await?;
+    let Channel {
+        sender,
+        receiver,
+        closer,
+        info,
+    } = spawned.channel;
+    Ok(Channel {
+        sender,
+        receiver,
+        closer: Arc::new(Owning {
+            closer,
+            _child: spawned.child,
+            _directory: spawned.directory,
+        }),
+        info,
+    })
+}
+
+/// A channel's closer that owns its process: dropped, it ends the process.
+struct Owning {
+    closer: Arc<dyn rutis_channel::Closer>,
+    _child: Child,
+    _directory: Option<tempfile::TempDir>,
+}
+
+impl rutis_channel::Closer for Owning {
+    fn close(&self, reason: &str) {
+        self.closer.close(reason);
     }
 }
 
