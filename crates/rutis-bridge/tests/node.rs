@@ -733,3 +733,45 @@ async fn an_exporter_announces_again_to_a_new_offer_it_never_saw_withdrawn() {
     )
     .await;
 }
+
+/// An export restarted with another list goes on counting where the last
+/// one ended: the service it withdrew and announces again is back there.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_export_changed_to_another_list_keeps_what_it_still_exports() {
+    let (main, mac, _link) = linked().await;
+    let _clock = main
+        .provide_as::<dyn HostDispatch>(host_key("clock"), clock(0))
+        .unwrap();
+    let _calendar = main
+        .provide_as::<dyn HostDispatch>(host_key("calendar"), clock(100))
+        .unwrap();
+    mac.plugin(ImportPlugin::new(id("main"), ["clock", "calendar"]));
+    let first = main.plugin(ExportPlugin::new(id("mac"), ["clock"]));
+    eventually(
+        || mac.get_as::<dyn HostDispatch>(host_key("clock")),
+        "clock",
+    )
+    .await;
+
+    first.dispose().await.unwrap();
+    eventually(
+        || {
+            mac.get_as::<dyn HostDispatch>(host_key("clock"))
+                .is_none()
+                .then_some(())
+        },
+        "clock withdrawn",
+    )
+    .await;
+    main.plugin(ExportPlugin::new(id("mac"), ["clock", "calendar"]));
+    eventually(
+        || mac.get_as::<dyn HostDispatch>(host_key("calendar")),
+        "calendar",
+    )
+    .await;
+    eventually(
+        || mac.get_as::<dyn HostDispatch>(host_key("clock")),
+        "clock again",
+    )
+    .await;
+}

@@ -12,7 +12,21 @@ ctx.provide('calendar', { today() { return 'monday' }, async later() { return 't
 // `listen:<address>` listens for main instead of dialing it.
 const where = address.startsWith('listen:') ? { listen: address.slice('listen:'.length) } : { dial: address }
 ctx.plugin(Link, { peer: 'main', id: 'mac', ...where, token: 'mac-token', require: ['node'], retry: { initial: 50, max: 500 } })
-ctx.plugin(Export, { peer: 'main', services: { calendar: { today: 'sync', later: 'async' } } })
+const calendar = { calendar: { today: 'sync', later: 'async' } }
+const exported = ctx.plugin(Export, { peer: 'main', services: calendar })
+// `export <name>…` on stdin restarts the export with `calendar` and those
+// names too (provided or not).
+const fiberOf = wrapped => Object.hasOwn(wrapped, 'then') ? Object.getPrototypeOf(wrapped) : wrapped
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', async text => {
+  for (const line of text.split('\n').filter(Boolean)) {
+    const [command, ...names] = line.trim().split(/\s+/)
+    if (command !== 'export') continue
+    const services = { ...calendar, ...Object.fromEntries(names.map(name => [name, { get: 'sync' }])) }
+    await fiberOf(exported).update({ peer: 'main', services })
+    say(`export: ${Object.keys(services).join(',')}`)
+  }
+})
 ctx.plugin(Import, { peer: 'main', services: ['clock'] })
 ctx.plugin(Host, { peer: 'main', anchor })
 ctx.plugin(Events, { peer: 'main', out: ['tock'], in: ['tick'] })

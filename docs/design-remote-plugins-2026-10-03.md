@@ -183,7 +183,7 @@
 
 | 操作 | 语义 / 处理方 |
 | --- | --- |
-| `services.announce { name, service, shape, version }` | 公告服务对象引用 / import |
+| `services.announce { name, service, shape, version }` | 公告服务对象引用；版本取自会话级的单一递增序列（`Peer::next_version`），导出插件改列表重启后继续递增，不会被当作旧消息 / import |
 | `services.withdraw { name, version }` | 撤销服务；导入方保留撤销的版本，晚到的更旧公告不得恢复服务 / import |
 | `plugins.describe(插件)` | 返回 `{ schema, version, integrity }` / host |
 | `plugins.load(key, 插件, config, isolate, inject)` | 代装：按行的 `isolate`（[服务名, 标签]，标签按对端区分）隔离、按 `inject` 门控；服务名经宿主的映射转为键（loader 组合用其服务目录，默认 `host_key`），无法映射即拒绝 / host |

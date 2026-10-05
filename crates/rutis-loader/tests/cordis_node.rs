@@ -146,6 +146,7 @@ async fn a_rutis_node_and_a_cordis_node_share_services_rows_and_events() {
         .arg(&address)
         .arg(&anchor)
         .current_dir(repo().join("interop/node"))
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -281,6 +282,25 @@ async fn a_rutis_node_and_a_cordis_node_share_services_rows_and_events() {
         "the clock again",
     )
     .await;
+
+    // Cordis's export restarted with another list: what it still exports is
+    // back here (its versions go on from the last export's).
+    use tokio::io::AsyncWriteExt;
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"export agenda\n").await.unwrap();
+    stdin.flush().await.unwrap();
+    eventually(saw("export: calendar,agenda"), "the export restarted").await;
+    eventually(
+        || main.get_as::<dyn HostDispatch>(host_key("calendar")),
+        "calendar imported again",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        main.get_as::<dyn HostDispatch>(host_key("calendar"))
+            .is_some(),
+        "calendar stays"
+    );
     child.start_kill().unwrap();
 }
 

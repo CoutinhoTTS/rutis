@@ -76,6 +76,10 @@ pub(crate) struct Operations {
     local: Mutex<Offers>,
     session: Mutex<Option<Connection>>,
     announcing: Mutex<bool>,
+    /// Versions of what features say about the session (services announced
+    /// and withdrawn): one sequence for the session, so a feature that
+    /// restarts keeps counting up and is never taken for an older message.
+    versions: std::sync::atomic::AtomicU64,
 }
 
 impl Operations {
@@ -260,6 +264,15 @@ impl Peer {
             operations: Arc::downgrade(&self.operations),
             family: family.to_owned(),
         })
+    }
+
+    /// The next version in this session's sequence: higher than any taken
+    /// before on it, whichever feature took it.
+    pub fn next_version(&self) -> u64 {
+        self.operations
+            .versions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
     }
 
     /// What the far end offers, as it announces it.

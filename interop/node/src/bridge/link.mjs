@@ -20,6 +20,7 @@ const RETRY = { initial: 500, max: 30_000, jitter: 0.2, stable: 60_000, rejected
 class Operations {
   handlers = new Map()
   since = new Map()
+  versions = 0
   remote = { families: new Set(), version: 0, since: new Map() }
   listeners = new Set()
   version = 0
@@ -79,6 +80,10 @@ function peerOf(id, session, generation, operations) {
         operations.announce()
       }
     },
+    // The next version of this session's sequence, for what features say
+    // about it (services announced and withdrawn): a feature that restarts
+    // keeps counting up and is never taken for an older message.
+    nextVersion: () => ++operations.versions,
     // Follow the far end's offers: `listener(families, epoch)`, where
     // `epoch(family)` says which offer of it this is. Returns the
     // unsubscription.

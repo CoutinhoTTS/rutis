@@ -27,7 +27,6 @@ export const Export = {
   reusable: true,
   apply(ctx, { peer, services }) {
     ctx.plugin(gated(`export:${peer}`, peer, (scope, link) => {
-      let version = 0
       for (const [name, shape] of Object.entries(services ?? {})) {
         scope.plugin({
           name: `export:${peer}:${name}`,
@@ -36,7 +35,7 @@ export const Export = {
             // Calls read the service when made: a live view of it.
             const record = Object.fromEntries(Object.keys(shape).map(method =>
               [method, (...args) => one.get(name)[method](...args)]))
-            const announced = ++version
+            const announced = link.nextVersion()
             // Announced once to every offer of `services` (an importer
             // started again is a new one).
             let sentTo
@@ -51,7 +50,7 @@ export const Export = {
             one.effect(() => async () => {
               off()
               // Withdrawn there before this ends; a peer gone has nothing to withdraw.
-              await link.callAsync('', 'services.withdraw', [{ name, version: ++version }]).catch(() => {})
+              await link.callAsync('', 'services.withdraw', [{ name, version: link.nextVersion() }]).catch(() => {})
             })
           },
         })

@@ -13,7 +13,6 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, Plugin, TypeKey};
@@ -63,14 +62,12 @@ impl Plugin for ExportPlugin {
             let peer = ctx
                 .get_as::<Peer>(self.injects[0].clone())
                 .ok_or_else(|| failed(&self.label, "the peer is gone"))?;
-            let versions = Arc::new(AtomicU64::new(0));
             for name in &self.names {
                 ctx.plugin(ExportOne {
                     label: format!("{}/{name}", self.label),
                     service: name.clone(),
                     injects: [host_key(name)],
                     peer: peer.clone(),
-                    versions: versions.clone(),
                 });
             }
             Ok(Effect::Done)
@@ -84,9 +81,10 @@ struct ExportOne {
     /// The exported service's name.
     service: String,
     injects: [TypeKey; 1],
+    /// Its announcements and withdrawals take their versions from the
+    /// session ([`Peer::next_version`]): an export restarted with another
+    /// list goes on from where the last one ended.
     peer: Arc<Peer>,
-    /// Shared by an export's names: every announcement has a new version.
-    versions: Arc<AtomicU64>,
 }
 
 impl Plugin for ExportOne {
@@ -120,7 +118,7 @@ impl Plugin for ExportOne {
                     (method.clone(), call)
                 })
                 .collect();
-            let version = self.versions.fetch_add(1, Ordering::SeqCst) + 1;
+            let version = self.peer.next_version();
             let announcer = tokio::spawn(announce(
                 self.peer.clone(),
                 self.service.clone(),
@@ -130,12 +128,11 @@ impl Plugin for ExportOne {
             ));
             let peer = self.peer.clone();
             let name = self.service.clone();
-            let versions = self.versions.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
                         announcer.abort();
-                        let version = versions.fetch_add(1, Ordering::SeqCst) + 1;
+                        let version = peer.next_version();
                         // Withdrawn there before this fiber ends. A peer that
                         // went away has nothing to withdraw.
                         let withdrawn = peer
