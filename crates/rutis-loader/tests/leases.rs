@@ -90,6 +90,10 @@ impl Remote {
 }
 
 async fn remote(language: Language) -> Remote {
+    remote_with_start_delay(language, 0).await
+}
+
+async fn remote_with_start_delay(language: Language, start_delay_ms: u64) -> Remote {
     let project = tempfile::tempdir().unwrap();
     let log = project.path().join("lease.log");
     let mut command = match language {
@@ -125,7 +129,7 @@ async fn remote(language: Language) -> Remote {
             std::fs::write(
                 package.join("index.mjs"),
                 format!(
-                    "import {{ appendFileSync }} from 'node:fs'\nexport function apply(ctx, config) {{\n  appendFileSync({log:?}, `start ${{config.who}}\\n`)\n  ctx.effect(() => () => appendFileSync({log:?}, `stop ${{config.who}}\\n`))\n}}\n",
+                    "import {{ appendFileSync }} from 'node:fs'\nawait new Promise(resolve => setTimeout(resolve, {start_delay_ms}))\nexport function apply(ctx, config) {{\n  appendFileSync({log:?}, `start ${{config.who}}\\n`)\n  ctx.effect(() => () => {{\n    if (config.stopDelayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, config.stopDelayMs)\n    appendFileSync({log:?}, `stop ${{config.who}}\\n`)\n  }})\n}}\n",
                     log = log.display().to_string()
                 ),
             )
@@ -182,6 +186,15 @@ struct Controller {
 }
 
 async fn controller(remote: &Remote, who: &str) -> Controller {
+    controller_with_options(remote, who, true, 0).await
+}
+
+async fn controller_with_options(
+    remote: &Remote,
+    who: &str,
+    reconnect: bool,
+    stop_delay_ms: u64,
+) -> Controller {
     let root = Ctx::root().unwrap();
     (&root.plugin(WebSocketPlugin::new(Config::new()).unwrap()))
         .await
@@ -191,15 +204,15 @@ async fn controller(remote: &Remote, who: &str) -> Controller {
         StaticIdentity::new(id("main"))
             .present(id("remote"), Credential::Bearer("main-token".into())),
     ));
-    let link = LinkPlugin::new(
-        LinkConfig::dial(id("remote"), "websocket", "main", &remote.address)
-            .require("runtime")
-            .retry(Retry {
-                initial: Duration::from_millis(50),
-                max: Duration::from_millis(300),
-                ..Retry::default()
-            }),
-    );
+    let mut config = LinkConfig::dial(id("remote"), "websocket", "main", &remote.address)
+        .require("runtime")
+        .retry(Retry {
+            initial: Duration::from_millis(50),
+            max: Duration::from_millis(300),
+            ..Retry::default()
+        });
+    config.reconnect = reconnect;
+    let link = LinkPlugin::new(config);
     let states = link.state();
     let link = root.plugin(link);
     root.plugin(RuntimeAccessPlugin::new(id("remote"), remote.runtime()));
@@ -217,7 +230,7 @@ async fn controller(remote: &Remote, who: &str) -> Controller {
     (&root.plugin(plugin)).await.unwrap();
     root.plugin(RuntimeRowsPlugin::new(rows));
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
-        { "id": "l", "name": remote.row(), "config": { "who": who } }
+        { "id": "l", "name": remote.row(), "config": { "who": who, "stopDelayMs": stop_delay_ms } }
     ] }]))
     .unwrap();
     loader
@@ -241,8 +254,15 @@ async fn successive_controllers_get_clean_leases(language: Language) {
 }
 
 async fn a_newer_controller_takes_over_after_the_old_lease_is_gone(language: Language) {
-    let remote = remote(language).await;
-    let first = controller(&remote, "a").await;
+    takeover(language, 0).await;
+}
+
+async fn takeover(language: Language, stop_delay_ms: u64) {
+    let remote = remote_with_start_delay(language, stop_delay_ms).await;
+    // A replaced dial link normally reconnects. Disable that before takeover,
+    // not after start b: otherwise a can replace b while its child is still
+    // loading, and the two controllers keep evicting one another.
+    let first = controller_with_options(&remote, "a", false, stop_delay_ms).await;
     remote.wait_for("start a").await;
     let second = controller(&remote, "b").await;
     remote.wait_for("start b").await;
@@ -256,7 +276,12 @@ async fn a_newer_controller_takes_over_after_the_old_lease_is_gone(language: Lan
         stop_a < start_b,
         "the old lease goes before the new one starts: {lines:?}"
     );
-    // The replaced controller stops trying, or it would take over back.
+    eventually(
+        || matches!(*first.states.borrow(), LinkState::Stopped { .. }).then_some(()),
+        "the replaced controller stopped without reconnecting",
+    )
+    .await;
+    assert_eq!(lines, ["start a", "stop a", "start b"]);
     first.link.dispose().await.unwrap();
     drop(second);
 }
@@ -310,6 +335,14 @@ async fn node_successive_controllers_get_clean_leases() {
 #[tokio::test(flavor = "multi_thread")]
 async fn node_takeover_after_the_old_lease_is_gone() {
     a_newer_controller_takes_over_after_the_old_lease_is_gone(Language::Node).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_takeover_with_slow_start_and_cleanup() {
+    // Stretch both cleanup and module loading beyond the maximum retry delay
+    // (including jitter). With reconnect left enabled on a, b is repeatedly
+    // evicted before applying its row; this used to time out waiting for b.
+    takeover(Language::Node, 600).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

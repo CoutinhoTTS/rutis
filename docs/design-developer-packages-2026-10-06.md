@@ -80,7 +80,7 @@ Rust 四个，Node 三个，Python 两个。
 
 SDK 必须单独成包：插件作者不应该因为写一个插件而装上 Cordis、tsx、ws。`definePlugin` 用 `Symbol.for` 做标记（现在就是如此），SDK 和运行时之间不需要共享模块实例。
 
-`@arcships/rutis-interop` 在 npm 上标记弃用，说明指向新包。
+直接移除旧 `@arcships/rutis-interop` 包目录、别名与发布入口；不提供迁移层或旧包弃用发布步骤。
 
 ### 4.4 Python
 
@@ -262,7 +262,7 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 - **列车从 0.3.0 开始**：`rutis-loader` 0.2 已发布，合并后的破坏性调整使用 0.3；新名字与 loader 一起采用 0.3.0。
 - **tag**：列车用 `vX.Y.Z`（最常见的写法）；现在占用 `v*` 的 `rutis-cli` 二进制发布改为 `cli-vX.Y.Z`；内核保持 `rutis-vX.Y.Z`。
 - **一个工作流**：`release.yml` 按依赖顺序发布 crate（crates.io 已有的版本跳过），然后发布 npm 包（各平台的宿主二进制包先发）和 PyPI 包，最后上传 GitHub Release 的二进制。它取代 #147 里的 `publish-bridge.yml` 以及现有的 `publish-interop.yml`、`publish-loader.yml`。
-- **旧包**：`rutis-interop` 不再发布功能版本。列车工作流在 npm 上标记旧包弃用；crates.io 的最后一个迁移提示版本是独立的人工维护任务，不由 `release.yml` 发布，也不恢复到列车 workspace。维护者需从旧包源码建立维护分支，查询已发布版本并选择未占用版本号，保留合法的 Cargo target、提供指向 `rutis-bridge` 的 README，完成 `cargo package` / `cargo publish --dry-run` 后再授权发布；不要覆盖或 yank 旧版。本 PR 不宣称该人工任务已经完成。
+- **旧包直接移除**：`rutis-interop` 没有需要支持的下游，不保留兼容层、迁移文档或旧包发布入口，不发布 README-only 终版，也不执行 npm deprecate。列车只发布新结构的包；不删除或 yank 注册表上的历史版本。
 
 ### 9.2 插件作者的包
 
@@ -299,7 +299,7 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 | P0 合并与改名 | Rust：合并为 `rutis-bridge`（features 见 4.2），删除旧 crate 与弃用接口；Node：拆出 `@arcships/rutis`，运行时改名为 `@arcships/rutis-runtime`；Python：包名与导入名改为 `rutis`；环境变量改名 | 所有现有测试在新结构下通过；每个 feature 组合都能单独编译 |
 | P1 SDK | 插件 API 标记与检查；测试工具（两种语言）；类型；Python 入口点与版本；Node 叶子插件按行重载；验证 Node 24 | SDK 有自己的测试；`load(...)` 能测仓库里的示例插件 |
 | P2 宿主 | `rutis-host` 的 run / dev / check / new；`rutis.json`；两套模板；运行时包缺失时的诊断 | 用模板新建的插件不写 Rust 就能 `dev`、测试、`check` |
-| P3 分发与发布 | 发布列车工作流；npm 平台包；maturin wheel；旧包弃用 | 在测试用的 registry 上（Verdaccio、TestPyPI、crates.io dry run）走通一次完整发布 |
+| P3 分发与发布 | 发布列车工作流；npm 平台包；maturin wheel；删除旧包发布入口 | 在测试用的 registry 上（Verdaccio、TestPyPI、crates.io dry run）走通一次完整发布 |
 | P4 文档 | 第 11 节的指南与各包 README | 按教程从零走一遍，不看源码也能完成 |
 | 之后 | `rutis-host dev --join`；Windows 二进制 | — |
 

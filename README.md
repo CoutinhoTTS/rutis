@@ -214,7 +214,7 @@ npm --prefix crates/rutis-dsh/dsh ci && cargo run -p rutis-dsh -- up   # dsh web
 
 **Agent** — [agent 框架](docs/design-min-agent-2026-08-18.md) · [验证与 TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 
-**升级** — [rutis-interop 0.2 / rutis-loader 0.1、0.2 → 0.3（发布列车）](docs/migration-0.3.md) · [0.6.0 → 0.6.1：插件控制面](docs/migration-0.6.0-to-0.6.1.md) · [0.5 → 0.6 迁移说明](docs/migration-0.5-to-0.6.md) · [0.3 → 0.5 迁移说明](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 迁移说明](docs/migration-0.1-to-0.2.md)
+**升级** — [0.6.0 → 0.6.1：插件控制面](docs/migration-0.6.0-to-0.6.1.md) · [0.5 → 0.6 迁移说明](docs/migration-0.5-to-0.6.md) · [0.3 → 0.5 迁移说明](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 迁移说明](docs/migration-0.1-to-0.2.md)
 
 ## License
 
