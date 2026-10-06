@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Guides · 指南
+    url: https://github.com/arcships/rutis/tree/main/docs/guide
+    about: Task-oriented guides for plugins, hosts and nodes. · 按任务组织的插件、宿主与节点指南。
+  - name: Security report · 安全报告
+    url: https://github.com/arcships/rutis/security/advisories/new
+    about: Report vulnerabilities privately. · 私下报告漏洞。

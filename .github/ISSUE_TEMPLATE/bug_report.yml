@@ -1,0 +1,42 @@
+name: Bug report · 报告 bug
+description: Something does not work as documented. · 行为与文档不符。
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Security issues go through the [security policy](https://github.com/arcships/rutis/blob/main/SECURITY.md) instead.
+        谢谢你的报告。安全问题请按[安全策略](https://github.com/arcships/rutis/blob/main/SECURITY.md)私下报告。
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened · 发生了什么
+      description: What you did, what you expected, and what happened instead. · 你做了什么、期望什么、实际发生了什么。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction · 复现
+      description: The smallest code, `rutis.json` or commands that show the problem. A failing test is ideal. · 能复现问题的最小代码、`rutis.json` 或命令；一个失败的测试最好。
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: packages
+    attributes:
+      label: Packages and versions · 包与版本
+      placeholder: rutis 0.6.1, rutis-bridge 0.7.0, @arcships/rutis-runtime 0.7.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform · 平台
+      placeholder: Linux x86_64, Rust 1.90, Node 24, Python 3.12
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs · 日志
+      description: Error output or backtraces, if any. · 错误输出或调用栈（如有）。
+      render: text

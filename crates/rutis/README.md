@@ -1,40 +1,62 @@
 # rutis
 
-An idiomatic Rust implementation of the Cordis core paradigm (split out from [min-cordis](https://github.com/eric8810/min-cordis) as a standalone library).
+**A plugin runtime for programs that keep running.**
 
-## Five Pillars
+Plugins say what they need and what they provide; rutis decides when they start, when they stop, and when they start again. It is an idiomatic Rust implementation of the [Cordis](https://github.com/shigma/cordis) model.
 
-1. **Plugin = unit of assembly**: one `apply` provides services / listeners / cleanup
-2. **Fiber = lifecycle container**: six-state machine + dependency gating + permanent subtree shutdown + exactly-once cleanup
-3. **Service = type-keyed registry + instance subtree visibility + isolate scoping**
-4. **Event bus = four dispatch semantics** (emit / parallel / serial / waterfall), with independent and ordered dispatch for instance events
-5. **Dependency-driven reloading**: when a provider is unloaded, its consumers are evicted and automatically reloaded
-
-## Usage
+- **Dependencies drive the lifecycle**: a plugin starts once its dependencies are there, stops when they go away, and reloads when a provider is replaced.
+- **Cleanup you can rely on**: everything a plugin registers is released exactly once, in reverse order; a failed load rolls back.
+- **Change without downtime**: hot-update configuration and swap providers; only what depends on the change restarts.
+- **Small**: pure Rust, no `unsafe`, no serde; tokio, tokio-util and thiserror are the only dependencies.
 
 ```toml
 [dependencies]
-rutis = "0.6.0"
+rutis = "0.6"
 ```
 
-The kernel has zero serde, zero unsafe, and depends only on tokio / tokio-util / thiserror. See the [repository docs](https://github.com/arcships/rutis/tree/main/docs) for design and cross-checking documentation.
+```rust
+use std::sync::Arc;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 
-First-time users should read the [application design guide](https://github.com/arcships/rutis/blob/main/docs/development-guide.md), then implement following the [development handbook](https://github.com/arcships/rutis/blob/main/docs/development-handbook.md). Companion examples can be run in the repository: `cargo run -p rutis --example development_workflow`.
+struct Greeting(String);
+struct Listener;
 
-## 0.6.1
+impl TypedPlugin for Listener {
+    type Deps = (Arc<Greeting>,);   // starts once a Greeting is provided
 
-Interfaces added for the plugin control plane (new crate [rutis-loader](https://crates.io/crates/rutis-loader)); no breaking changes: `impl Plugin for Box<dyn Plugin>`, `Ctx::view`, `Ctx::dispose_self`, `FiberView::instance`, `FiberView::set_config`, and the `ServiceChanged` event emitted when a service is registered or removed. See the [0.6.0 → 0.6.1 upgrade notes](../../docs/migration-0.6.0-to-0.6.1.md).
+    fn name(&self) -> &str { "listener" }
 
-## 0.6
+    fn apply<'a>(&'a self, _: &'a Ctx, (greeting,): Self::Deps) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            println!("{}", greeting.0);
+            Ok(Effect::Done)
+        })
+    }
+}
+```
 
-Error, diagnostic, and observation types that will keep growing are now marked `#[non_exhaustive]`, so adding fields or variants is no longer a breaking change; `EventOptions` is now constructed via `EventOptions::default().prepend(true)`. Diagnostics gained per-key emit backlogs (`event_backlogs`). See the [0.5 → 0.6 migration notes](../../docs/migration-0.5-to-0.6.md).
+The complete program, with a provider being replaced at runtime, is in [examples/quickstart.rs](https://github.com/arcships/rutis/blob/main/crates/rutis/examples/quickstart.rs).
 
-## 0.5 Event Interface
+## The model
 
-`EventKey<E>` unifies default, named, and instance channels; `EventPattern<E>` supports prefix subscriptions with source keys. `SyncEvent` gained `bail_sync` / `waterfall_sync`, letting synchronous endpoints borrow the current call stack.
+1. **Plugin, the unit of assembly**: one `apply` provides services, registers listeners and records cleanup.
+2. **Fiber, the lifecycle container**: a six-state machine with dependency gating, subtree shutdown and exactly-once cleanup.
+3. **Services, a type-keyed registry**: with isolate scopes and instance subtree visibility.
+4. **Events, four dispatch modes**: emit, parallel, serial and waterfall.
+5. **Dependency-driven reload**: when a provider unloads, its consumers are evicted and load again on their own.
 
-See the [0.3 → 0.5 migration notes](../../docs/migration-0.3-to-0.5.md).
+## Learn more
+
+- [Application design guide](https://github.com/arcships/rutis/blob/main/docs/development-guide.en.md) and [development handbook](https://github.com/arcships/rutis/blob/main/docs/development-handbook.en.md)
+- [Core features](https://github.com/arcships/rutis/blob/main/docs/core-features.en.md): hot update, dynamic events, interception, diagnostics
+- Plugins in TypeScript and Python, and links between machines: the [rutis repository](https://github.com/arcships/rutis)
+
+## Recent changes
+
+- **0.6.1** — interfaces for the plugin control plane ([rutis-loader](https://crates.io/crates/rutis-loader)), typed plugins; no breaking changes. [Upgrade notes](https://github.com/arcships/rutis/blob/main/docs/migration-0.6.0-to-0.6.1.en.md)
+- **0.6** — growing error, diagnostic and observation types are `#[non_exhaustive]`; per-key emit backlogs in diagnostics. [Migration guide](https://github.com/arcships/rutis/blob/main/docs/migration-0.5-to-0.6.en.md)
+- **0.5** — `EventKey<E>` for default, named and instance channels; `EventPattern<E>` prefix subscriptions; `bail_sync` / `waterfall_sync`. [Migration guide](https://github.com/arcships/rutis/blob/main/docs/migration-0.3-to-0.5.en.md)
 
 ## License
 
-MIT (inherited from [Cordis](https://github.com/shigma/cordis) © Shigma).
+MIT. The design comes from [Cordis](https://github.com/shigma/cordis) by Shigma.
