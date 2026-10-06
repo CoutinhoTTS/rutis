@@ -310,7 +310,9 @@ impl MemoryTransport {
         self.track([&dialed, &accepted]);
         match self.registrations.hand_over(&ticket, accepted) {
             Ok(()) => Ok(dialed),
-            Err(_) => Err(ConnectError::AuthRejected {
+            // Revoked since it was routed: nobody listens for it now, as
+            // when it was never registered.
+            Err(_) => Err(ConnectError::Retryable {
                 reason: format!("memory:{address}: registration revoked"),
             }),
         }
