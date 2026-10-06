@@ -9,7 +9,7 @@ Rust 内核 · TypeScript 与 Python 插件 · 跨进程，跨机器
 
 [![crates.io](https://img.shields.io/crates/v/rutis.svg?label=crates.io)](https://crates.io/crates/rutis)
 [![npm](https://img.shields.io/npm/v/@arcships/rutis.svg?label=npm)](https://www.npmjs.com/package/@arcships/rutis)
-[![PyPI](https://img.shields.io/pypi/v/rutis.svg?label=PyPI)](https://pypi.org/project/rutis/)
+[![PyPI](https://img.shields.io/pypi/v/rutis?label=PyPI)](https://pypi.org/project/rutis/)
 [![docs.rs](https://img.shields.io/docsrs/rutis?label=docs.rs)](https://docs.rs/rutis)
 [![CI](https://github.com/arcships/rutis/actions/workflows/ci.yml/badge.svg)](https://github.com/arcships/rutis/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
