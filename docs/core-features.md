@@ -2,7 +2,7 @@
 
 [English](core-features.en.md) · [开发手册](development-handbook.md) · [API 文档](https://docs.rs/rutis)
 
-`rutis` 内核在插件、fiber、服务和事件之外提供的能力，以及它们的使用边界。入门请先看 [README](../README.md) 的快速开始和[应用设计指南](development-guide.md)。
+`rutis` 内核在插件、fiber、服务和事件之外提供的能力，以及它们的使用边界。入门请先看 [README](../README.zh-CN.md) 的快速开始和[应用设计指南](development-guide.md)。
 
 ## 配置热更新
 

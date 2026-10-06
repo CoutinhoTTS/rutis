@@ -2,7 +2,7 @@
 
 [中文](core-features.md) · [Development handbook](development-handbook.en.md) · [API docs](https://docs.rs/rutis)
 
-What the `rutis` core offers beyond plugins, fibers, services and events, and where its boundaries are. To get started, read the quick start in the [README](../README.en.md) and the [application design guide](development-guide.en.md) first.
+What the `rutis` core offers beyond plugins, fibers, services and events, and where its boundaries are. To get started, read the quick start in the [README](../README.md) and the [application design guide](development-guide.en.md) first.
 
 ## Config hot update
 
