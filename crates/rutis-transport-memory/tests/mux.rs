@@ -14,8 +14,8 @@ use std::time::Duration;
 use rutis::{BoxFuture, Ctx};
 use rutis_bridge::{
     peer_key, transport_key, Credential, Dial, IdentityPlugin, LinkConfig, LinkPlugin, Peer,
-    Presented, Registered, Registration, RegistrationError, Registrations, Retry, StaticIdentity,
-    Transport,
+    Presented, Refusal, Registered, Registration, RegistrationError, Registrations, Retry,
+    StaticIdentity, Transport,
 };
 use rutis_channel::{
     Channel, ChannelError, ChannelInfo, Closer, ConnectError, PeerId, Receiver, Sender,
@@ -383,6 +383,14 @@ impl Mux {
                                     reason: "protocol".into(),
                                 });
                             }
+                            // As the real transports: good credentials
+                            // nobody listens for yet are worth retrying.
+                            Err(Refusal::NotListening) => {
+                                let _ = reading.send(Frame::Refused {
+                                    channel,
+                                    reason: "not listening".into(),
+                                });
+                            }
                             Err(_) => {
                                 let _ = reading.send(Frame::Refused {
                                     channel,
@@ -446,6 +454,10 @@ impl Transport for Mux {
                 Ok(Err(reason)) if reason == "protocol" => {
                     physical.channels.lock().unwrap().remove(&id);
                     Err(ConnectError::Incompatible { reason })
+                }
+                Ok(Err(reason)) if reason == "not listening" => {
+                    physical.channels.lock().unwrap().remove(&id);
+                    Err(ConnectError::Retryable { reason })
                 }
                 Ok(Err(reason)) => {
                     physical.channels.lock().unwrap().remove(&id);
