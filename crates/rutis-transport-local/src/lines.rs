@@ -5,6 +5,7 @@
 //! tokens.
 
 use std::io::{BufRead, BufReader, IoSlice, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rutis_channel::{Channel, ChannelError, ChannelInfo, Closer, Receiver, Sender};
@@ -18,18 +19,25 @@ pub fn channel(
     closer: Arc<dyn Closer>,
     info: ChannelInfo,
 ) -> Channel {
+    let ended = Arc::new(AtomicBool::new(false));
     Channel {
-        sender: Box::new(LineSender(write)),
-        receiver: Box::new(LineReceiver(BufReader::new(read))),
+        sender: Box::new(LineSender(write, ended.clone())),
+        receiver: Box::new(LineReceiver(BufReader::new(read), ended)),
         closer,
         info,
     }
 }
 
-struct LineSender<W>(W);
+/// The channel has no half-close: once its receiver saw the end, sending
+/// fails too. A stream does not say so by itself everywhere: on macOS a
+/// socket whose far end shut it down still takes writes, and drops them.
+struct LineSender<W>(W, Arc<AtomicBool>);
 
 impl<W: Write + Send> Sender for LineSender<W> {
     fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(closed("the channel ended"));
+        }
         if message.contains(&b'\n') {
             return Err(closed("message contains a raw newline"));
         }
@@ -49,17 +57,20 @@ impl<W: Write + Send> Sender for LineSender<W> {
     }
 }
 
-struct LineReceiver<R>(BufReader<R>);
+struct LineReceiver<R>(BufReader<R>, Arc<AtomicBool>);
 
 impl<R: Read + Send> Receiver for LineReceiver<R> {
     fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
         let mut line = Vec::new();
-        self.0.read_until(b'\n', &mut line).map_err(closed)?;
-        match line.pop() {
-            None => Ok(None),
-            Some(b'\n') => Ok(Some(line)),
-            Some(_) => Err(closed("stream ended inside a message")),
-        }
+        let read = self.0.read_until(b'\n', &mut line).map_err(closed);
+        let received = match read.map(|_| line.pop()) {
+            Ok(Some(b'\n')) => return Ok(Some(line)),
+            Ok(None) => Ok(None),
+            Ok(Some(_)) => Err(closed("stream ended inside a message")),
+            Err(error) => Err(error),
+        };
+        self.1.store(true, Ordering::SeqCst);
+        received
     }
 }
 
@@ -108,10 +119,21 @@ mod tests {
 
     #[test]
     fn appends_the_newline_and_refuses_raw_ones() {
-        let mut sender = LineSender(Vec::new());
+        let mut sender = LineSender(Vec::new(), Arc::default());
         sender.send(b"{}").unwrap();
         assert_eq!(sender.0, b"{}\n");
         assert!(sender.send(b"a\nb").is_err());
         assert_eq!(sender.0, b"{}\n");
+    }
+
+    /// A stream that takes every write after its far end went (as a macOS
+    /// socket does): the channel still refuses to send once it saw the end.
+    #[test]
+    fn sending_fails_once_the_end_was_received() {
+        let mut channel = receive(b"{}\n");
+        assert_eq!(channel.receiver.recv().unwrap().unwrap(), b"{}");
+        channel.sender.send(b"{}").unwrap();
+        assert_eq!(channel.receiver.recv().unwrap(), None);
+        assert!(channel.sender.send(b"{}").is_err());
     }
 }

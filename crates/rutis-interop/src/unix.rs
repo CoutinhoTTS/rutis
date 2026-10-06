@@ -8,6 +8,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rutis_channel::{Channel, ChannelError, ChannelInfo, Closer, Receiver, Sender};
@@ -22,10 +23,17 @@ impl Closer for Shut {
     }
 }
 
-/// One message per line, as the runtimes have always spoken.
-struct Lines(UnixStream);
+/// One message per line, as the runtimes have always spoken. Once the
+/// receiver saw the end, sending fails: a macOS socket whose far end shut it
+/// down still takes writes, and drops them.
+struct Lines(UnixStream, Arc<AtomicBool>);
 impl Sender for Lines {
     fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(ChannelError::Closed {
+                reason: "the channel ended".into(),
+            });
+        }
         let mut line = Vec::with_capacity(message.len() + 1);
         line.extend_from_slice(message);
         line.push(b'\n');
@@ -36,22 +44,24 @@ impl Sender for Lines {
             })
     }
 }
-struct LinesIn(BufReader<UnixStream>);
+struct LinesIn(BufReader<UnixStream>, Arc<AtomicBool>);
 impl Receiver for LinesIn {
     fn recv(&mut self) -> Result<Option<Vec<u8>>, ChannelError> {
         let mut line = Vec::new();
-        match self.0.read_until(b'\n', &mut line) {
+        let received = match self.0.read_until(b'\n', &mut line) {
             Ok(0) => Ok(None),
             Ok(_) => {
                 if line.last() == Some(&b'\n') {
                     line.pop();
                 }
-                Ok(Some(line))
+                return Ok(Some(line));
             }
             Err(error) => Err(ChannelError::Closed {
                 reason: error.to_string(),
             }),
-        }
+        };
+        self.1.store(true, Ordering::SeqCst);
+        received
     }
 }
 
@@ -61,9 +71,10 @@ pub(crate) fn channel(stream: UnixStream, label: &str) -> Result<Channel, Error>
     stream.set_nonblocking(false).map_err(transport)?;
     let reader = stream.try_clone().map_err(transport)?;
     let closer = Arc::new(Shut(stream.try_clone().map_err(transport)?));
+    let ended = Arc::new(AtomicBool::new(false));
     Ok(Channel {
-        sender: Box::new(Lines(stream)),
-        receiver: Box::new(LinesIn(BufReader::new(reader))),
+        sender: Box::new(Lines(stream, ended.clone())),
+        receiver: Box::new(LinesIn(BufReader::new(reader), ended)),
         closer,
         info: ChannelInfo {
             transport: "unix",
