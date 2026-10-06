@@ -38,7 +38,7 @@ ENDPOINT_PROTOCOL = 3
 # What this implementation supports in the endpoint format. It sends objects
 # but cannot receive them, so it does not declare `objects`.
 CAPABILITIES = ["signals", "reentrant-sync"]
-IMPLEMENTATION = {"name": "rutis", "version": "0.3.0"}
+IMPLEMENTATION = {"name": "rutis", "version": "0.7.0"}
 MAX_SAFE = 9_007_199_254_740_991
 _ENDPOINT_ID = re.compile(r"^[a-z0-9-]+$")
 _COMPAT_ORIGIN = re.compile(r"^(node|rust):[1-9][0-9]*$")

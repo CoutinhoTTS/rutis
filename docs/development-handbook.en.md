@@ -8,7 +8,7 @@ Add dependencies to a Rust project:
 
 ```toml
 [dependencies]
-rutis = "0.6.0"
+rutis = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 ```
 

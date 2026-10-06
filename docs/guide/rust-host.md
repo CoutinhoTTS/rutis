@@ -7,8 +7,8 @@
 ```toml
 [dependencies]
 rutis = "0.6"
-rutis-loader = { version = "0.3", features = ["node", "python", "peer"] }
-rutis-bridge = { version = "0.3", features = ["python", "websocket"] }   # node 默认开
+rutis-loader = { version = "0.7", features = ["node", "python", "peer"] }
+rutis-bridge = { version = "0.7", features = ["python", "websocket"] }   # node 默认开
 ```
 
 | crate / feature | 内容 |

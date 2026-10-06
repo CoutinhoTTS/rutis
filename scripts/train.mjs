@@ -1,6 +1,6 @@
 // The release train: the packages released together at one version.
 //   node scripts/train.mjs            print the version; fail on a mismatch
-//   node scripts/train.mjs v0.3.0     also fail unless the version is 0.3.0
+//   node scripts/train.mjs v0.7.0     also fail unless the version is 0.7.0
 import { readFileSync } from 'node:fs'
 
 const root = new URL('../', import.meta.url)

@@ -20,7 +20,9 @@ Choose a guide based on what you want to do:
 | Host (runs plugins) | `rutis`, `rutis-loader`, `rutis-bridge` | `@arcships/rutis-runtime` | `rutis` |
 | Host without Rust | `rutis-host` | `@arcships/rutis-host` | `rutis-host` |
 
-Except for the `rutis` core, these packages are released together with matching version numbers (a release train).
+Except for the `rutis` core, these packages are released together with matching version numbers (a release train). The core and dylib tools such as `rutis-sdk` are versioned on their own; the 0.7.x train builds on core 0.6.1.
+
+Projects that used `rutis-interop`: see the [migration guide](../migration-interop-to-0.7.en.md).
 
 ## Requirements
 

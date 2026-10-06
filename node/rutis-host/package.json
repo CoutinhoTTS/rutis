@@ -1,6 +1,6 @@
 {
   "name": "@arcships/rutis-host",
-  "version": "0.3.0",
+  "version": "0.7.0",
   "description": "rutis-host, a rutis host that needs no Rust: run and develop rutis plugins written in TypeScript, JavaScript and Python",
   "license": "MIT",
   "repository": {
@@ -25,12 +25,12 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@arcships/rutis-runtime": "0.3.0"
+    "@arcships/rutis-runtime": "0.7.0"
   },
   "optionalDependencies": {
-    "@arcships/rutis-host-darwin-arm64": "0.3.0",
-    "@arcships/rutis-host-darwin-x64": "0.3.0",
-    "@arcships/rutis-host-linux-arm64": "0.3.0",
-    "@arcships/rutis-host-linux-x64": "0.3.0"
+    "@arcships/rutis-host-darwin-arm64": "0.7.0",
+    "@arcships/rutis-host-darwin-x64": "0.7.0",
+    "@arcships/rutis-host-linux-arm64": "0.7.0",
+    "@arcships/rutis-host-linux-x64": "0.7.0"
   }
 }

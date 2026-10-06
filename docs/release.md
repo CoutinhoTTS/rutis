@@ -16,7 +16,7 @@
 1. 改版本号：`crates/rutis-bridge`、`crates/rutis-loader`、`crates/rutis-host` 的 Cargo.toml（以及它们之间的依赖版本），`node/rutis`、`node/rutis-runtime`、`node/rutis-host` 的 package.json（`@arcships/rutis-host` 依赖的运行时和平台包版本），`python/rutis/pyproject.toml`，`crates/rutis-host/pyproject.toml` 里 `rutis` 的范围。`node scripts/train.mjs` 检查它们一致，CI 也会跑。
 2. 合并到 main，CI 的 `release-dry-run` 通过（各包都能打包）。
 3. 发布前在两台机器上跑一次冒烟（下文）。
-4. 打 tag `vX.Y.Z` 并推送。release.yml：核对版本 → 构建四个平台的二进制和 wheel → 发布 crate、npm 包、PyPI 包 → 创建 GitHub Release。各步只发布注册表里还没有的版本，中途失败时修好后重新运行即可。
+4. 打 tag `vX.Y.Z` 并推送。release.yml：核对版本 → 构建四个平台的二进制和 wheel → 发布 crate、npm 包、PyPI 包 → 创建 GitHub Release（说明取自 `docs/releases/X.Y.Z.en.md`，打 tag 前要写好）。各步只发布注册表里还没有的版本，中途失败时修好后重新运行即可。
 
 需要的配置：GitHub environment `release`（`CARGO_TOKEN`、`NPM_TOKEN`）和 `pypi`（PyPI 上为 `rutis`、`rutis-host` 配置 trusted publisher，指向 release.yml）。
 
@@ -39,3 +39,7 @@ cargo run -p rutis-bridge --features websocket --example smoke -- \
 再用发布的包从零走一遍 [写一个 TypeScript 插件](guide/typescript-plugin.md) 和 [写一个 Python 插件](guide/python-plugin.md)。
 
 每晚的 stress 工作流还跑两个浸泡测试（link 反复断开重连、进程反复拉起结束），检查文件描述符、线程数不增长、进程都被回收。
+
+## 0.7.0
+
+0.7.0 是列车的首次发布，基于内核 0.6.1，只推 `v0.7.0`，不打 `rutis-v*`。除 `rutis-loader`（此前有 0.1.0）外各包在注册表上都是新名字：PyPI 需先为 `rutis`、`rutis-host` 配置 pending publisher。发布成功后撤下 crates.io 和 npm 上的旧 `rutis-interop`。

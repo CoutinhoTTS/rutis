@@ -16,7 +16,7 @@ Connect a [rutis](https://github.com/arcships/rutis) application to other proces
 | `testing` | channel contract tests and conformance suites | |
 
 ```toml
-rutis-bridge = { version = "0.2", features = ["python", "websocket"] }
+rutis-bridge = { version = "0.7", features = ["python", "websocket"] }
 ```
 
 A service plugins use by name is a `dyn rutis_bridge::session::HostDispatch` under `host_key(name)`.

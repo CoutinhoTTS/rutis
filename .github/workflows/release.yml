@@ -194,6 +194,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/rutis-host-*.tar.gz dist/rutis-host-*.tar.gz.sha256 \
             --title "rutis $GITHUB_REF_NAME" \
-            --notes "Plugins in TypeScript, JavaScript and Python; links between nodes; rutis-host. Guides: docs/guide."
+            --notes-file "docs/releases/${GITHUB_REF_NAME#v}.en.md"
         env:
           GH_TOKEN: ${{ github.token }}
