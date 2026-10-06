@@ -2,7 +2,7 @@
 
 [English](migration-interop-to-0.7.en.md) · [发布说明](releases/0.7.0.md)
 
-0.7.0 是发布列车（`rutis-bridge`、`rutis-loader`、`rutis-host` 及 npm/PyPI 包）的首次发布。本指南适用于用过 crates.io / npm 上的 `rutis-interop`（0.1、0.2）、`rutis-loader` 0.1.0，或仓库里曾以 0.3.0 为版本号的未发布整合版的项目。旧的 `rutis-interop` 包已撤下。
+0.7.0 是发布列车（`rutis-bridge`、`rutis-loader`、`rutis-host` 及 npm/PyPI 包）的首次发布。本指南适用于用过 crates.io / npm 上的 `rutis-interop`（0.1、0.2）、`rutis-loader` 0.1.0，或仓库里曾以 0.3.0 为版本号的未发布整合版的项目。旧的 `rutis-interop` 包已被 `rutis-bridge`、`@arcships/rutis-runtime` 和 `@arcships/rutis` 取代，不再更新。
 
 内核 `rutis` 不变，仍是 0.6.1：只用内核的项目无需改动，第三方 Rust 插件无需重编译，dylib SDK 身份也不变。
 

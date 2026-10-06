@@ -2,7 +2,7 @@
 
 [中文](migration-interop-to-0.7.md) · [Release notes](releases/0.7.0.en.md)
 
-0.7.0 is the first release of the release train (`rutis-bridge`, `rutis-loader`, `rutis-host` and the npm/PyPI packages). This guide covers projects that used `rutis-interop` (0.1, 0.2) on crates.io / npm, `rutis-loader` 0.1.0, or the unpublished integrated development version numbered 0.3.0 in the repository. The old `rutis-interop` packages have been withdrawn.
+0.7.0 is the first release of the release train (`rutis-bridge`, `rutis-loader`, `rutis-host` and the npm/PyPI packages). This guide covers projects that used `rutis-interop` (0.1, 0.2) on crates.io / npm, `rutis-loader` 0.1.0, or the unpublished integrated development version numbered 0.3.0 in the repository. The old `rutis-interop` packages are replaced by `rutis-bridge`, `@arcships/rutis-runtime` and `@arcships/rutis`, and are no longer updated.
 
 The `rutis` core is unchanged at 0.6.1: projects that use only the core need no changes, third-party Rust plugins need no rebuild, and the dylib SDK identity stays the same.
 
