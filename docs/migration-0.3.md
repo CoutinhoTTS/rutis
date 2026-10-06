@@ -1,8 +1,8 @@
-# 升级到 0.2（发布列车）
+# 升级到 0.3（发布列车）
 
-从已发布的 `rutis-interop` 0.2 / `@arcships/rutis-interop` 0.2、`rutis-loader` 0.1 升级到 0.2。内核 `rutis` 不变。
+从已发布的 `rutis-interop` 0.2 / `@arcships/rutis-interop` 0.2、`rutis-loader` 0.1 / 0.2 升级到 0.3。内核 `rutis` 不变。
 
-这一版重新划分了包：插件作者、宿主、不写 Rust 的人各装各的包；除内核外的包一起发布、版本号相同（0.2.0）。新增的内容见 [指南](guide/README.md)；设计见 [面向开发者的包与流程](design-developer-packages-2026-10-06.md)。
+这一版重新划分了包：插件作者、宿主、不写 Rust 的人各装各的包；除内核外的包一起发布、版本号相同（0.3.0）。新增的内容见 [指南](guide/README.md)；设计见 [面向开发者的包与流程](design-developer-packages-2026-10-06.md)。
 
 ## 包
 
@@ -12,7 +12,7 @@
 | `@arcships/rutis-interop`（npm，运行时） | `@arcships/rutis-runtime` |
 | `@arcships/rutis-interop/plugin`（`definePlugin`） | `@arcships/rutis`（插件作者唯一需要的包，无依赖） |
 | 仓库里的 Python 包 `rutis_runtime` | PyPI 上的 `rutis`（`import rutis`，`python -m rutis`） |
-| `rutis-loader` 0.1 | `rutis-loader` 0.2 |
+| `rutis-loader` 0.1 / 0.2 | `rutis-loader` 0.3 |
 | — | `rutis-host`：不写 Rust 的宿主（crates.io、npm `@arcships/rutis-host`、PyPI） |
 
 `@arcships/rutis-interop` 在 npm 上标记为弃用。
@@ -21,10 +21,10 @@
 
 ```toml
 [dependencies]
-rutis-bridge = { version = "0.2", features = ["cordis"] }
+rutis-bridge = { version = "0.3", features = ["cordis"] }
 
 [build-dependencies]
-rutis-bridge = { version = "0.2", features = ["cordis"] }
+rutis-bridge = { version = "0.3", features = ["cordis"] }
 
 [package.metadata.rutis-cordis]        # 以前是 [package.metadata.rutis-interop]
 npm = "cordis"

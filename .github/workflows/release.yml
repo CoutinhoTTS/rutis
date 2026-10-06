@@ -198,6 +198,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/rutis-host-*.tar.gz dist/rutis-host-*.tar.gz.sha256 \
             --title "rutis $GITHUB_REF_NAME" \
-            --notes "Plugins in TypeScript, JavaScript and Python; links between nodes; rutis-host. Guides: docs/guide. Upgrading: docs/migration-0.2.md."
+            --notes "Plugins in TypeScript, JavaScript and Python; links between nodes; rutis-host. Guides: docs/guide. Upgrading: docs/migration-0.3.md."
         env:
           GH_TOKEN: ${{ github.token }}

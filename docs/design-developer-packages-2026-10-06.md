@@ -259,14 +259,14 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 
 - **发布列车**：除内核 `rutis` 和 dylib 相关的 crate 之外，第 4 节的所有包使用同一个版本号，一次一起发布。用户只需记住"用同一个版本"。
 - **兼容不靠版本号对齐**：会话协议在握手时检查，插件 API 由 `api` 标记检查。列车只是让版本号易于理解。
-- **新名字从 0.1.0 开始**：`rutis-bridge` 本来就还没发布过；`rutis-loader` 继续它自己的序号，并入列车后取列车的版本号。
+- **列车从 0.3.0 开始**：`rutis-loader` 0.2 已发布，合并后的破坏性调整使用 0.3；新名字与 loader 一起采用 0.3.0。
 - **tag**：列车用 `vX.Y.Z`（最常见的写法）；现在占用 `v*` 的 `rutis-cli` 二进制发布改为 `cli-vX.Y.Z`；内核保持 `rutis-vX.Y.Z`。
 - **一个工作流**：`release.yml` 按依赖顺序发布 crate（crates.io 已有的版本跳过），然后发布 npm 包（各平台的宿主二进制包先发）和 PyPI 包，最后上传 GitHub Release 的二进制。它取代 #147 里的 `publish-bridge.yml` 以及现有的 `publish-interop.yml`、`publish-loader.yml`。
-- **旧包**：`rutis-interop` 不再发新版本。npm 上标记弃用；crates.io 上发布最后一个只含 README 的版本，指向 `rutis-bridge`。
+- **旧包**：`rutis-interop` 不再发布功能版本。列车工作流在 npm 上标记旧包弃用；crates.io 的最后一个迁移提示版本是独立的人工维护任务，不由 `release.yml` 发布，也不恢复到列车 workspace。维护者需从旧包源码建立维护分支，查询已发布版本并选择未占用版本号，保留合法的 Cargo target、提供指向 `rutis-bridge` 的 README，完成 `cargo package` / `cargo publish --dry-run` 后再授权发布；不要覆盖或 yank 旧版。本 PR 不宣称该人工任务已经完成。
 
 ### 9.2 插件作者的包
 
-- 遵循各自生态的 semver，依赖 SDK 的主版本（例如 `@arcships/rutis@^0.1`），由插件 API 标记兜底兼容。
+- 遵循各自生态的 semver，依赖 SDK 的主版本（例如 `@arcships/rutis@^0.3`），由插件 API 标记兜底兼容。
 - 模板自带 CI：测试、`rutis-host check`、打 tag 时用 trusted publishing 发布到 npm 或 PyPI。
 
 ## 10. 环境要求
@@ -321,7 +321,7 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 
 按本设计一次实施完成。与上文的出入：
 
-- **版本从 0.2.0 开始**，不是 0.1.0：`rutis-loader` 0.1.0 已在 crates.io 上，列车取 0.2.0，所有新名字随之从 0.2.0 开始。
+- **版本统一为 0.3.0**：`rutis-loader` 0.2 已发布；所有列车包及新名字采用 0.3.0，使用示例与迁移文档同步。
 - **共享服务名**：`rutis-host` 用 `ServiceCatalog::share_by_name()` 让所有名字按名字共享，不需要 `"shared"` 字段，配置里去掉了它。
 - **开发模式不开开发通道**（`rutis-dev`）：重载由 `rutis-host dev` 自己监听文件完成；需要时再加。
 - **Python 项目在开发模式下按入口点的模块加载**（`py:<模块>`），这样项目不必先安装到 venv；发布后宿主仍按入口点名加载。
