@@ -2,210 +2,204 @@
 
 # rutis
 
-**A plugin framework for Rust**
+**A plugin runtime for programs that keep running**
 
-Typed-key service container · fiber lifecycles · four-way event bus · dependency-driven lifecycle reloads
+Plugins say what they need and what they provide; rutis decides when they start, when they stop, and when they start again.<br>
+A Rust core · plugins in TypeScript and Python · across processes and machines
 
-[![crates.io](https://img.shields.io/crates/v/rutis.svg)](https://crates.io/crates/rutis)
-[![docs.rs](https://docs.rs/rutis/badge.svg)](https://docs.rs/rutis)
+[![crates.io](https://img.shields.io/crates/v/rutis.svg?label=crates.io)](https://crates.io/crates/rutis)
+[![npm](https://img.shields.io/npm/v/@arcships/rutis.svg?label=npm)](https://www.npmjs.com/package/@arcships/rutis)
+[![PyPI](https://img.shields.io/pypi/v/rutis.svg?label=PyPI)](https://pypi.org/project/rutis/)
+[![docs.rs](https://img.shields.io/docsrs/rutis?label=docs.rs)](https://docs.rs/rutis)
 [![CI](https://github.com/arcships/rutis/actions/workflows/ci.yml/badge.svg)](https://github.com/arcships/rutis/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/crates/l/rutis.svg)](LICENSE)
-![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-An idiomatic Rust implementation of the Cordis core paradigm · [Chinese](README.md)
+[Quick start](#quick-start) · [Guides](docs/guide/README.en.md) · [API docs](https://docs.rs/rutis) · [中文](README.md)
 
 </div>
 
-## ✨ Why
+<br>
 
-When your application needs a plugin architecture — editors, bots, agent hosts, composable servers — rolling your own means hand-writing a pile of error-prone infrastructure. rutis turns all of it into declarations:
+Editors, chat bots, agents, composable servers: once a program accepts plugins, it runs into the same questions. In what order do plugins start? What happens while a dependency is missing? When a service is replaced, who has to restart? Did unloading leave anything behind? Does changing one setting mean restarting the whole process?
 
-| Hand-rolled pain | What rutis gives you |
-|---|---|
-| String-keyed services scattered everywhere | **Typed keys**: `TypeKey` identifies the service type without spelling its name; service availability and agreement between `injects()` and actual reads are checked at runtime |
-| Implicit plugin start/stop ordering conventions | **One apply, everything wired**: provides services / listeners / cleanup, exactly once |
-| Resource leaks and missed cleanups on unload | **Fiber containers**: strict LIFO cleanup, rolling back even mid-apply failures |
-| Manually rebuilding a chain of things when a dependency changes | **Dependency-driven reload**: swap a provider, consumers evict and reload themselves |
-| Restarting the whole process to change config | **Config hot update**: `update(config)` unloads and reloads cleanly, downstream follows |
+rutis turns those questions into declarations. A plugin states which services it depends on and the runtime does the rest: it starts the plugin once its dependencies are there, stops it when they go away, and reloads it when a provider is replaced. Everything a plugin registers while starting is cleaned up exactly once, in reverse order, when it stops.
 
-## 🚀 Getting started
+The model comes from [Cordis](https://github.com/shigma/cordis) in the TypeScript ecosystem. rutis is its idiomatic Rust implementation, and carries the same model to other languages and other machines.
+
+## Features
+
+- **Dependencies drive the lifecycle** — declare what you depend on; when to start, stop and reload is up to the runtime. Typed plugins keep the declared dependencies and the ones actually used in agreement at compile time.
+- **Cleanup you can rely on** — each plugin runs in its own fiber. Services, listeners and child plugins are registered under it and released exactly once, LIFO, on unload; a failed load rolls back what it had registered.
+- **Change without downtime** — hot-update configuration, swap providers, add and remove plugins; only what depends on the change restarts.
+- **Plugins in other languages** — TypeScript, JavaScript and Python plugins follow the same model. Services are called across languages, and a plugin need not know what its peers are written in or where they run.
+- **Many nodes** — hosts link over WebSocket and TLS to share services, run plugins on another machine, forward events, and reconnect after a drop.
+- **Data-driven** — `rutis-loader` describes the plugins to run as layered configuration and keeps reconciling it; `rutis-host` runs plugins without a line of Rust.
+
+## Quick start
+
+### In Rust
 
 ```bash
-cargo add rutis@0.6
+cargo add rutis
+cargo add tokio --features full
 ```
 
-A provider, a consumer that declares a dependency, and a provider swap — full code at [crates/rutis/examples/quickstart.rs](crates/rutis/examples/quickstart.rs) (`cargo run -p rutis --example quickstart`):
-
 ```rust
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
+use std::sync::Arc;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, Typed, TypedPlugin};
 
-/// A service: the type is the key; one registration slot per type.
+/// A service is a type.
 struct Greeting(String);
 
-/// Provider: provides the service in apply; the framework removes it on unload.
-struct Greeter { version: u32 }
+/// Provides Greeting. What apply registers is released when the plugin stops.
+struct Greeter(&'static str);
 
 impl Plugin for Greeter {
     fn name(&self) -> &str { "greeter" }
+
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        let greeting = Greeting(format!("hello from greeter v{}", self.version));
         Box::pin(async move {
-            ctx.provide(greeting)?;
+            ctx.provide(Greeting(format!("hello from {}", self.0)))?;
             Ok(Effect::Done)
         })
     }
 }
 
-/// Consumer: declares a dependency on Greeting — once declared, the
-/// framework owns when it loads.
-struct Listener { deps: Vec<TypeKey> }
+/// Depends on Greeting: starts when it appears, restarts when it is replaced.
+struct Listener;
 
-impl Plugin for Listener {
+impl TypedPlugin for Listener {
+    type Deps = (Arc<Greeting>,);
+
     fn name(&self) -> &str { "listener" }
-    fn injects(&self) -> &[TypeKey] { &self.deps }  // stays Pending until ready
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+
+    fn apply<'a>(&'a self, _: &'a Ctx, (greeting,): Self::Deps) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let greeting = ctx.require::<Greeting>()?.0.clone();
-            println!("[listener] loaded: {greeting}");
+            println!("{}", greeting.0);
             Ok(Effect::Done)
         })
-    }
-}
-
-async fn wait_active(view: &FiberView) {
-    let mut state = view.watch();
-    loop {
-        if state.borrow().state == FiberState::Active { return; }
-        state.changed().await.expect("fiber driver alive");
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Ctx::root()?;
-    let listener = ctx.plugin(Listener {
-        deps: vec![TypeKey::of::<Greeting>()],
-    });
-    // Provider arrives → gate opens, consumer loads automatically.
-    let v1 = ctx.plugin(Greeter { version: 1 });
-    wait_active(&listener).await;                 // [listener] loaded: hello from greeter v1
+    let listener = ctx.plugin(Typed::new(Listener));  // waits for a Greeting
 
-    // Swap the provider: old one unloads, the consumer is evicted, the new
-    // one provides → automatic reload. The consumer is never touched.
-    v1.dispose().await?;
-    let _v2 = ctx.plugin(Greeter { version: 2 });
-    wait_active(&listener).await;                 // [listener] loaded: hello from greeter v2
+    let english = ctx.plugin(Greeter("English"));
+    (&english).await?;
+    (&listener).await?;                               // hello from English
+
+    english.dispose().await?;                         // the listener stops…
+    let esperanto = ctx.plugin(Greeter("Esperanto"));
+    (&esperanto).await?;
+    (&listener).await?;                               // …and starts again: hello from Esperanto
+
     ctx.shutdown().await?;
     Ok(())
 }
 ```
 
-## 🧩 Core concepts: the five pillars
+Nothing touched `Listener`: when the provider changed, it stopped and started again on its own. Run it from the repository with `cargo run -p rutis --example quickstart`.
 
-| Pillar | What it is |
-|---|---|
-| **Plugin = unit of assembly** | one `apply` provides services / listeners / cleanup |
-| **Fiber = lifecycle container** | six-state machine + dependency gating + cascading unload + exactly-once cleanup |
-| **Service = typed registry** | isolate scopes; multiple instances of one interface via qualified keys |
-| **Event bus = four dispatch semantics** | emit (ordered per key) / parallel (concurrent fan-out) / serial (first-value short-circuit) / waterfall (middleware chain) |
-| **Dependency-driven reload** | provider unload → consumers evicted and reloaded automatically |
+### Without Rust
 
-The mental model in one line: **declare dependencies → gated loading → provider changes → consumers reload themselves**.
+```bash
+npx @arcships/rutis-host new weather --lang node
+cd weather && npm install
+npx rutis-host dev          # run the plugin, reload when files change
+```
 
-Fiber lifecycle (failed loads roll back atomically; Failed is sticky until deps return or a hot update):
+For Python, create the project with `uvx rutis-host new weather --lang python`, then `uv sync` and `uv run rutis-host dev`.
+
+```ts
+import { definePlugin } from '@arcships/rutis'
+
+interface Llm {
+  ask(question: string): Promise<string>
+}
+
+export default definePlugin<{ city?: string }>({
+  inject: ['llm'],                             // services it needs: starts once all are there
+  provides: { weather: { today: 'async' } },   // services it offers, and how each method is called
+  apply(ctx, config) {
+    const llm = ctx.use<Llm>('llm')
+    const city = config.city ?? 'Oslo'
+    ctx.provide('weather', {
+      today: () => llm.ask(`weather in ${city}`),
+    })
+  },
+})
+```
+
+`llm` can come from another plugin in the same process, from a Python plugin, or from another machine; this plugin stays the same. The full workflow is in [TypeScript plugins](docs/guide/typescript-plugin.en.md) and [Python plugins](docs/guide/python-plugin.en.md).
+
+## How it works
+
+A plugin is a unit of assembly: one `apply` provides services, registers listeners and records cleanup. Each plugin runs in a fiber, and the fiber's state is driven by its dependencies:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending : spawn (deps missing)
-    Pending --> Loading : deps ready
-    Loading --> Active : apply ok
-    Loading --> Failed : validate / apply failed (half-registered resources rolled back)
-    Active --> Unloading : deps gone / dispose / update
-    Failed --> Unloading : restart / update / deps restored
-    Unloading --> Pending : cleanup done (exactly once, LIFO)
-    Unloading --> Disposed : terminal dispose
+    direction LR
+    [*] --> Pending
+    Pending --> Loading : dependencies ready
+    Loading --> Active : apply succeeds
+    Loading --> Failed : apply fails, rolled back
+    Active --> Unloading : dependency gone / config update / dispose
+    Failed --> Unloading : dependency back / config update / restart
+    Unloading --> Pending : cleanup done
+    Unloading --> Disposed : terminated
     Disposed --> [*]
 ```
 
-The full reload sequence (step 3 of the example above):
+Services are registered by type. The event bus dispatches in four ways: emit, parallel, serial and waterfall. When a provider unloads, the plugins that depend on it are evicted and load again once a new provider appears.
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant R as Registry (typed keys)
-    participant P as Provider fiber
-    participant C as Consumer fiber
-    App->>P: dispose()
-    P->>R: evict service
-    R-->>C: evict: pre-cancel + dependency re-check
-    C->>C: Active → Pending
-    App->>P: plugin(Greeter v2)
-    P->>R: provide Greeting
-    R-->>C: deps-ready notification
-    C->>C: Pending → Loading → Active (apply again)
-```
+In one line: **declare dependencies → gated loading → provider changes → consumers reload on their own**.
 
-## ⚡ Feature tour
+## Packages
 
-**Config hot update** — change config at runtime, reusing the state machine's exactly-once cleanup; affected consumers follow automatically:
+| For | Rust (crates.io) | Node (npm) | Python (PyPI) |
+| --- | --- | --- | --- |
+| The core | [`rutis`](https://crates.io/crates/rutis) | | |
+| Writing plugins | [`rutis-sdk`](crates/rutis-sdk) (dylib plugins) | [`@arcships/rutis`](https://www.npmjs.com/package/@arcships/rutis) | [`rutis`](https://pypi.org/project/rutis/) |
+| Running plugins in your app | [`rutis-loader`](https://crates.io/crates/rutis-loader), [`rutis-bridge`](https://crates.io/crates/rutis-bridge) | [`@arcships/rutis-runtime`](https://www.npmjs.com/package/@arcships/rutis-runtime) | [`rutis`](https://pypi.org/project/rutis/) |
+| A host without Rust | [`rutis-host`](https://crates.io/crates/rutis-host) | [`@arcships/rutis-host`](https://www.npmjs.com/package/@arcships/rutis-host) | [`rutis-host`](https://pypi.org/project/rutis-host/) |
 
-```rust
-struct MyFactory;
-impl PluginFactory<MyConfig> for MyFactory {
-    fn build(&self, cfg: &MyConfig) -> Result<Box<dyn Plugin>, CordisError> { /* ... */ }
-}
+The core is versioned on its own and is at 0.6. The other packages form a release train, released together at one version: currently 0.7, built on core 0.6.
 
-let view = ctx.plugin_with(MyFactory, cfg_v1);
-view.update(cfg_v2).await?;   // dry-run failure leaves everything untouched; success unloads + reloads
-```
+## Documentation
 
-**Dynamic event names** — events whose names are only known at runtime (host events, script-registered channels): typed events + dynamic qualifiers inherit all four dispatch semantics and lifecycle cleanup for free:
+- **[Guides](docs/guide/README.en.md)** — organized by task: TypeScript and Python plugins, running rutis-host, linking nodes, embedding in Rust, working with Cordis.
+- **[Application design guide](docs/development-guide.en.md)** — splitting an app into plugins, drawing the dependency graph, designing reloads and multiple instances.
+- **[Development handbook](docs/development-handbook.en.md)** — API usage, resource cleanup, events, troubleshooting and verification.
+- **[Core features](docs/core-features.en.md)** — config hot update, dynamic events, interception, diagnostics, and the boundaries of each.
+- **[API docs](https://docs.rs/rutis)** — the complete reference on docs.rs.
+- **Design and decisions** — [core design](docs/design-rust-port.en.md), the [spec-by-spec parity check against Cordis](docs/cordis-spec-parity-2026-08-18.en.md), and every design record in [docs](docs).
+- **Upgrading** — [from rutis-interop to 0.7](docs/migration-interop-to-0.7.en.md) · [0.6.0 → 0.6.1](docs/migration-0.6.0-to-0.6.1.en.md) · [0.5 → 0.6](docs/migration-0.5-to-0.6.en.md) · [0.3 → 0.5](docs/migration-0.3-to-0.5.en.md) · [0.1 → 0.2](docs/migration-0.1-to-0.2.en.md)
 
-```rust
-let key = rutis::EventKey::<RoomEvent>::dynamic(name);
-ctx.events().on(&ctx, &key, listener)?;
-ctx.events().emit(&ctx, &key, Arc::new(event))?;
-```
+## Built with rutis
 
-**Patterns and synchronous decisions** — `EventPattern::prefix("room/")` subscribes to dynamic channels and delivers the actual matching key. Events implementing `SyncEvent` can use `bail_sync` / `waterfall_sync`; the terminal can borrow the caller's local variables or MutexGuard. See the [0.3 → 0.5 migration guide (Chinese)](docs/migration-0.3-to-0.5.md).
+| Project | |
+| --- | --- |
+| [rutis-host](crates/rutis-host) | A host without Rust: runs TypeScript, JavaScript and Python plugins from a `rutis.json`, reloads them during development, links machines. |
+| [rutis-agent](crates/rutis-agent) · [rutis-cli](crates/rutis-cli) | A minimal coding agent in which the model service, tools, streaming driver and TUI are all plugins. Try it offline with `cargo run -p rutis-cli -- --scripted`. |
+| [rutis-dsh](crates/rutis-dsh) | Runs the full dsh web interface inside a rutis host, with model calls served by aimux in the same process. |
+| [aimux-llm](crates/aimux-llm) | Wraps [aimux](https://crates.io/crates/aimux-core) as an LLM service plugin. |
 
-**API boundaries** — `require/require_as` are strict reads corresponding to Cordis's ordinary plugin service access. They check `injects()` along the fiber ancestry and distinguish undeclared, unavailable, out-of-scope, and inactive reads, retaining the call site. If a read is both out of scope and inactive, the instance boundary takes precedence; registration and instance dispatch define their own error order. `get/get_as` correspond to Cordis's explicit `ctx.get()` locator: they return `Option` without enforcing declarations. A service is normally hidden while its provider is inactive or the reader is unloading, except that the provider's subtree can read its own service during cleanup. Instance keys also have subtree visibility checks. The `Ctx` passed to `on` owns a listener; the callback's `Ctx` belongs to the emitter. Capture the registration `Ctx` when the callback must register resources for its own plugin. See the compiling [listener ownership example](crates/rutis/examples/listener_ctx_ownership.rs).
+## Platforms and status
 
-Synchronous and asynchronous `apply` panics become plugin errors; a `check()` panic leaves a dependency unready; a `waterfall` callback panic propagates to its caller. `settle` is a FIFO barrier for one fiber, and Pending can be a stable result. Root `dispose()` remains restartable, while `shutdown()` closes it permanently; dropping a waiting future does not stop cleanup already in progress. `update(config)` reassembles a plugin without replacing process code. An early `Disposer::dispose()` failure returns to its caller without notifying the error sink; `Ctx::take_cleanup_errors()` consumes and releases these retained errors. Unconsumed errors join a terminal unload result or reach the error sink on reload.
+rutis is at 0.x and its API is still evolving. Breaking changes are listed in the release notes and come with a migration guide.
 
-**Relation to cordis** — rutis is an idiomatic Rust implementation of the [Cordis](https://github.com/shigma/cordis) paradigm, not a translation: all 96 original specs reviewed line by line, the 58 language-agnostic invariants locked by automated parity tests; every other difference is explicitly declared (decision table + non-port list + audit record). Known deliberate strengthenings: cross-effect cleanup is strictly serial LIFO (cordis runs concurrently), per-key emit ordering is rebuilt explicitly.
+- **The core** is pure Rust with tokio, tokio-util and thiserror as its only dependencies; it needs Rust 1.85 or later.
+- **Language runtimes and rutis-host** run on Linux and macOS; on Windows, use WSL. They need Node 24+ or Python 3.12+.
+- **dylib plugins** load on Linux, macOS and Windows x64 (MSVC).
 
-## 🛠 Built with rutis
+## Contributing
 
-| Project | Description |
-|---|---|
-| [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | A minimal coding agent sample: aimux `LanguageModel` service + tool plugin + streaming driver plugin + ratatui TUI; `cargo install rutis-cli` |
-| [rutis-dsh](crates/rutis-dsh) | Runs dsh in a rutis host: `rutis-dsh up` starts dsh's full web UI through [rutis-bridge](crates/rutis-bridge), with model calls served by aimux in the same process; the dsh agent loop can also be driven from Rust without a UI |
-| [aimux-llm](crates/aimux-llm) | A standalone LLM service plugin: apply → registers the `llm` service, 329 providers |
+Issues and pull requests are welcome: bugs, places where the docs are unclear, features you would like. Please read the [contributing guide](CONTRIBUTING.en.md) first, and report security issues privately as described in the [security policy](SECURITY.md).
 
-Sample commands inside this repo:
+## Acknowledgements and license
 
-```bash
-cargo run -p rutis-cli -- --scripted          # offline agent demo, no API key
-cargo run -p rutis-agent --example tui_scripted   # scripted-backend TUI
-cargo test                                    # full test suite
-npm --prefix crates/rutis-dsh/dsh ci && cargo run -p rutis-dsh -- up   # dsh web UI (needs Node and a model key)
-```
+The design of rutis comes from [Cordis](https://github.com/shigma/cordis) by [Shigma](https://github.com/shigma). Without Cordis's thinking about plugins, contexts and dependencies, this project would not exist.
 
-> agent / cli consume [aimux](https://crates.io/crates/aimux-core) (unified LLM access layer) from crates.io — no sibling checkout needed; to hack a local aimux, add an uncommitted `[patch]` at the workspace root.
-
-## 📚 Documentation
-
-**Developing with Rutis** — [Application design guide (Chinese)](docs/development-guide.md) · [Development handbook (Chinese)](docs/development-handbook.md) · [Runnable lifecycle example](crates/rutis/examples/development_workflow.rs)
-
-**Kernel & paradigm** — [kernel design (D1–D31 decision table)](docs/design-rust-port.md) · [96-spec parity ruling](docs/cordis-spec-parity-2026-08-18.md) · [hot update + dynamic events (design / three review rounds / post-mortem / audit)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md)
-
-**Mounting Cordis / dsh** — [rutis-bridge guide (Chinese)](crates/rutis-bridge/README.md) · [requirements](docs/requirements-protocol-plugins.md) · [design](docs/design-protocol-plugin-mount.md) · [roadmap](docs/roadmap-native-plugin-mount.md) · [rutis-dsh](crates/rutis-dsh/README.md) · history: [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
-
-**Agent** — [agent framework](docs/design-min-agent-2026-08-18.md) · [verification & TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
-
-**Upgrading** — [rutis-interop → the 0.7 release train](docs/migration-interop-to-0.7.en.md) · [0.6.0 → 0.6.1: plugin control plane (Chinese)](docs/migration-0.6.0-to-0.6.1.md) · [0.5 → 0.6 migration guide (Chinese)](docs/migration-0.5-to-0.6.md) · [0.3 → 0.5 migration guide (Chinese)](docs/migration-0.3-to-0.5.md) · [0.1.0 → 0.2.0 migration guide (Chinese)](docs/migration-0.1-to-0.2.md)
-
-## License
-
-MIT (inherited from [Cordis](https://github.com/shigma/cordis) © Shigma).
+Released under the [MIT](LICENSE) license.
