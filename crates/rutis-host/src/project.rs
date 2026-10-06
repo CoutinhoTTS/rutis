@@ -177,7 +177,7 @@ fn id_of(name: &str) -> String {
         .collect()
 }
 
-fn file_url(path: &PathBuf) -> String {
+fn file_url(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 
