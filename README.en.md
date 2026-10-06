@@ -12,7 +12,7 @@ Typed-key service container · fiber lifecycles · four-way event bus · depende
 [![License: MIT](https://img.shields.io/crates/l/rutis.svg)](LICENSE)
 ![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange)
 
-An idiomatic Rust implementation of the Cordis core paradigm · [中文](README.md)
+An idiomatic Rust implementation of the Cordis core paradigm · [Chinese](README.md)
 
 </div>
 
