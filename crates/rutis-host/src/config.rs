@@ -49,6 +49,19 @@ fn default_id() -> String {
 pub struct Runtimes {
     pub node: Option<NodeRuntime>,
     pub py: Option<PythonRuntime>,
+    /// Runtimes on other machines, reached through a `rutis-bridge/peer` row
+    /// with `"runtime": "<name>"`.
+    #[serde(default)]
+    pub remote: Vec<RemoteRuntime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteRuntime {
+    pub name: String,
+    /// `python`: rows `<name>:<module>`; `node`: npm names, resolved there
+    /// when no runtime before it has them.
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +154,7 @@ impl HostConfig {
         if self.runtimes.py.is_none() {
             self.runtimes.py = other.runtimes.py;
         }
+        self.runtimes.remote.extend(other.runtimes.remote);
         self.listen.extend(other.listen);
         self.rows.extend(other.rows);
     }

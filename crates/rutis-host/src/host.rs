@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rutis::Ctx;
-use rutis_bridge::runtime::{LocalRuntime, RuntimeHandle, RuntimeState};
+use rutis_bridge::runtime::{LocalRuntime, RuntimeHandle, RuntimePlugin, RuntimeState};
 use rutis_bridge::transport::local::LocalPlugin;
 use rutis_bridge::transport::websocket::{
     Config, ListenerConfig, ServerTls, Trust, WebSocketPlugin,
@@ -70,6 +70,26 @@ impl Host {
             chain = chain.with_shared(rows.clone());
             runtimes.push(("node".to_owned(), handle));
             resolvers.push(rows);
+        }
+
+        for remote in &config.runtimes.remote {
+            let runtime = RuntimePlugin::remote(&remote.name);
+            let handle = runtime.handle();
+            let rows = match remote.language.as_str() {
+                "python" | "py" => RuntimeResolver::modules(handle.clone()),
+                "node" => RuntimeResolver::node(handle.clone()),
+                other => {
+                    return Err(format!(
+                        "remote runtime {}: the language is python or node, not {other}",
+                        remote.name
+                    ))
+                }
+            };
+            let rows = Arc::new(rows.with_catalog(&catalog));
+            root.plugin(runtime);
+            chain = chain.with_shared(rows.clone());
+            resolvers.push(rows);
+            // Not waited for at start: it runs when its link does.
         }
 
         let plugin = LoaderPlugin::new(
@@ -311,7 +331,7 @@ mod tests {
                     project: dir.path().to_owned(),
                     runtime: Some(repo().join("node/rutis-runtime")),
                 }),
-                py: None,
+                ..Runtimes::default()
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": format!("file://{}", entry.display()) })],
@@ -343,11 +363,11 @@ mod tests {
         let config = HostConfig {
             id: "test".into(),
             runtimes: Runtimes {
-                node: None,
                 py: Some(PythonRuntime {
                     project: dir.path().to_owned(),
                     python: std::env::var_os("RUTIS_PYTHON").map(PathBuf::from),
                 }),
+                ..Runtimes::default()
             },
             listen: Vec::new(),
             rows: vec![json!({ "id": "greeter", "name": "py:greeter" })],
@@ -359,5 +379,65 @@ mod tests {
         std::fs::write(dir.path().join("greeter.py"), python_plugin("Welcome")).unwrap();
         host.loader.reload("greeter").await.unwrap();
         assert_eq!(greeting(&host).await, "Welcome, Ada");
+    }
+
+    /// A runtime on another machine (here, a process listening on loopback):
+    /// a peer row links to it, and its rows are `<runtime>:<module>`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_remote_runtime_runs_rows_named_after_it() {
+        use tokio::io::AsyncBufReadExt;
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("greeter.py"),
+            "provides = {'greeter': {'hello': 'sync'}}\n\
+             class Greeter:\n    def hello(self, name):\n        return 'Remote, ' + name\n\
+             def apply(ctx, config):\n    ctx.provide('greeter', Greeter())\n",
+        )
+        .unwrap();
+        let python = std::env::var("RUTIS_PYTHON").unwrap_or_else(|_| "python3".into());
+        let mut child = tokio::process::Command::new(python)
+            .args([
+                "-m",
+                "rutis",
+                "listen:ws://127.0.0.1:0/rutis",
+                "--id",
+                "gpu",
+                "--peer",
+                "remote-test",
+            ])
+            .arg(project.path())
+            .env("PYTHONPATH", repo().join("python/rutis"))
+            .env("RUTIS_TOKEN", "remote-token")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+        let address = loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the runtime's address");
+            if let Some(address) = line.strip_prefix("rutis: listening on ") {
+                break address.to_owned();
+            }
+        };
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+
+        std::env::set_var("RUTIS_TOKEN_GPU", "remote-token");
+        let config: HostConfig = serde_json::from_value(json!({
+            "id": "remote-test",
+            "runtimes": { "remote": [{ "name": "gpu", "language": "python" }] },
+            "rows": [
+                { "id": "gpu", "name": "rutis-bridge/peer", "config": { "peer": "gpu", "dial": address, "runtime": "gpu" } },
+                { "id": "greeter", "name": "gpu:greeter" }
+            ]
+        }))
+        .unwrap();
+        let host = Host::start(&config).await.unwrap();
+        host.load(config.rows()).await.unwrap();
+        assert_eq!(greeting(&host).await, "Remote, Ada");
+        child.start_kill().unwrap();
     }
 }

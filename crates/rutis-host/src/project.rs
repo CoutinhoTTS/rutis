@@ -90,7 +90,7 @@ fn node_row(dir: &Path) -> Result<(Value, Runtimes), String> {
             project: dir.to_owned(),
             runtime: None,
         }),
-        py: None,
+        ..Runtimes::default()
     };
     Ok((row, runtimes))
 }
@@ -111,11 +111,11 @@ fn python_row(dir: &Path) -> Result<(Value, Runtimes), String> {
         false => dir.to_owned(),
     };
     let runtimes = Runtimes {
-        node: None,
         py: Some(PythonRuntime {
             project,
             python: Some(dir.join(".venv/bin/python")).filter(|venv| venv.exists()),
         }),
+        ..Runtimes::default()
     };
     Ok((row, runtimes))
 }
