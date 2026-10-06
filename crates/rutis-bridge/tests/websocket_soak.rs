@@ -2,7 +2,7 @@
 //! over and over, a service imported and called through each session. What
 //! the process holds (file descriptors, threads) must not grow with the
 //! number of sessions. Ignored by default; run it with
-//! `RUTIS_SOAK_SECS=600 cargo test -p rutis-transport-websocket --test soak -- --ignored`
+//! `RUTIS_SOAK_SECS=600 cargo test -p rutis-bridge --features websocket --test websocket_soak -- --ignored`
 //! (60 s when unset). Linux only: it reads `/proc`.
 #![cfg(all(target_os = "linux", feature = "websocket"))]
 

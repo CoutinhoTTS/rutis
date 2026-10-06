@@ -2,7 +2,7 @@
 //! `spawn:`. Every process must be reaped, and what this process holds (file
 //! descriptors, threads) must not grow with their number. Ignored by
 //! default; run it with
-//! `RUTIS_SOAK_SECS=600 cargo test -p rutis-transport-local --test soak -- --ignored`
+//! `RUTIS_SOAK_SECS=600 cargo test -p rutis-bridge --test local_soak -- --ignored`
 //! (60 s when unset). Linux only: it reads `/proc`.
 #![cfg(target_os = "linux")]
 

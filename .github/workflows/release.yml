@@ -1,8 +1,15 @@
-# Binary release:tag v* 触发 → 4 targets 构建 → tar.gz + sha256 → GitHub Release。
-# 产物名:rutis-cli-<version>-<target>.tar.gz(含二进制 + README + LICENSE)。
-# musl 目标在 rust-musl-cross 容器内构建,自带工具链,不依赖 runner 的 apt
-#(ubuntu-24.04 runner 的 apt-get 已连续挂死两次,不再赌它)。
-
+# The release train, tag vX.Y.Z: everything released together at one version
+# (scripts/train.mjs checks it).
+#
+#   crates.io  rutis-bridge, rutis-loader, rutis-host
+#   npm        @arcships/rutis, @arcships/rutis-runtime, @arcships/rutis-host
+#              (and its platform packages @arcships/rutis-host-<os>-<cpu>)
+#   PyPI       rutis, rutis-host (a wheel per platform)
+#   GitHub     rutis-host binaries
+#
+# Each publish skips what its registry already has, so a release that fails
+# halfway is finished by running it again. The kernel releases on its own
+# (rutis-v*, publish-rutis.yml); rutis-cli too (cli-v*, release-cli.yml).
 name: release
 
 on:
@@ -10,82 +17,185 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node scripts/train.mjs "$GITHUB_REF_NAME"
+
+  binaries:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin }
-          - { os: macos-14, target: x86_64-apple-darwin }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, container: messense/rust-musl-cross:x86_64-musl }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, container: "messense/rust-musl-cross:x86_64-musl", npm: linux-x64 }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-musl, container: "messense/rust-musl-cross:aarch64-musl", npm: linux-arm64 }
+          - { os: macos-14, target: x86_64-apple-darwin, npm: darwin-x64 }
+          - { os: macos-14, target: aarch64-apple-darwin, npm: darwin-arm64 }
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: install rust toolchain
+      - uses: dtolnay/rust-toolchain@1.98.1
         if: matrix.container == ''
-        uses: dtolnay/rust-toolchain@stable
         with:
-          target: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: add musl target (container)
+          targets: ${{ matrix.target }}
+      - name: add the target (container)
         if: matrix.container != ''
         run: rustup target add ${{ matrix.target }}
-
-      - name: build
-        run: cargo build --release -p rutis-cli --target ${{ matrix.target }}
-
-      - name: package
+      - run: cargo build --locked --release -p rutis-host --target ${{ matrix.target }}
+      - name: stage
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          NAME="rutis-cli-${VERSION}-${{ matrix.target }}"
-          # staging 目录与 dist 分离:dist 只放最终 tar.gz + sha256,
-          # 防止目录被 upload-artifact 带走、release glob 误匹配
+          NAME="rutis-host-${VERSION}-${{ matrix.target }}"
           mkdir -p "stage/${NAME}" dist
-          cp "target/${{ matrix.target }}/release/rutis-cli" "stage/${NAME}/"
-          cp crates/rutis-cli/README.md LICENSE "stage/${NAME}/"
-          tar -czf "dist/${NAME}.tar.gz" -C stage "${NAME}"
-          if command -v sha256sum >/dev/null; then
-            (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
-          else
-            (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
-          fi
-
+          cp "target/${{ matrix.target }}/release/rutis-host" "stage/${NAME}/"
+          cp crates/rutis-host/README.md LICENSE "stage/${NAME}/"
+          tar -C stage -czf "dist/${NAME}.tar.gz" "${NAME}"
+          (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" 2>/dev/null || shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          mkdir -p npm-bin && cp "target/${{ matrix.target }}/release/rutis-host" "npm-bin/rutis-host"
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: dist/*
+          name: binary-${{ matrix.npm }}
+          path: |
+            dist/
+            npm-bin/
 
-  release:
-    needs: build
-    runs-on: ubuntu-24.04
+  wheels:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64 }
+          - { os: ubuntu-24.04, target: aarch64 }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: macos-14, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --locked --manifest-path crates/rutis-host/Cargo.toml --out wheels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: wheels/
 
+  crates:
+    needs: [binaries, wheels]
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: Package (each crate built from its package, against the others)
+        run: cargo package --locked -p rutis-bridge -p rutis-loader -p rutis-host
+      - name: Publish what crates.io does not have
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for crate in rutis-bridge rutis-loader rutis-host; do
+            if curl -sf -A "rutis release (github.com/arcships/rutis)" "https://crates.io/api/v1/crates/$crate/$version" >/dev/null; then
+              echo "$crate $version is already published"
+            else
+              cargo publish --locked -p "$crate"
+            fi
+          done
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+
+  npm:
+    needs: [binaries, wheels]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
+          pattern: binary-*
+      - name: Platform packages
+        run: |
+          for dir in binary-*; do
+            platform="${dir#binary-}"
+            node node/rutis-host/scripts/platform-package.mjs "${platform%-*}" "${platform##*-}" "$dir/npm-bin/rutis-host" "npm/$platform"
+          done
+      - name: Publish what npm does not have
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          publish() {
+            name=$(node -p "require('./$1/package.json').name")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name $version is already published"
+            else
+              (cd "$1" && npm publish --provenance --access public)
+            fi
+          }
+          publish node/rutis
+          (cd node/rutis-runtime && npm ci --ignore-scripts)
+          publish node/rutis-runtime
+          for platform in npm/*; do publish "$platform"; done
+          publish node/rutis-host
+          # The former package points to its successors.
+          npm deprecate @arcships/rutis-interop "replaced by @arcships/rutis-runtime (the runtime) and @arcships/rutis (for plugins)" || true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: create release
+  pypi:
+    needs: [binaries, wheels]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - run: uv build python/rutis --out-dir dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  github:
+    needs: [crates, npm, pypi]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+      - name: Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/rutis-host-*.tar.gz dist/rutis-host-*.tar.gz.sha256 \
+            --title "rutis $GITHUB_REF_NAME" \
+            --notes "Plugins in TypeScript, JavaScript and Python; links between nodes; rutis-host. Guides: docs/guide. Upgrading: docs/migration-0.2.md."
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" dist/rutis-cli-*.tar.gz dist/rutis-cli-*.tar.gz.sha256 \
-            --title "rutis-cli ${VERSION}" \
-            --notes "Binary release of rutis-cli (minimal coding agent: bash + replace_text).
-
-          Install: download the tar.gz for your platform, verify the .sha256, extract, and put \`rutis-cli\` on your PATH. (\`cargo install rutis-cli\` installs the older crates.io build without the rutui TUI.)
-
-          Requires an aimux provider key at runtime (e.g. \`DEEPSEEK_API_KEY\`); try \`rutis-cli --scripted\` for an offline demo."

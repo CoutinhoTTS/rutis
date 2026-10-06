@@ -1,0 +1,91 @@
+# rutis-cli 二进制发布:tag cli-v* 触发 → 4 targets 构建 → tar.gz + sha256 → GitHub Release。
+# 产物名:rutis-cli-<version>-<target>.tar.gz(含二进制 + README + LICENSE)。
+# musl 目标在 rust-musl-cross 容器内构建,自带工具链,不依赖 runner 的 apt
+#(ubuntu-24.04 runner 的 apt-get 已连续挂死两次,不再赌它)。
+
+name: release rutis-cli
+
+on:
+  push:
+    tags: ["cli-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, container: messense/rust-musl-cross:x86_64-musl }
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        if: matrix.container == ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: add musl target (container)
+        if: matrix.container != ''
+        run: rustup target add ${{ matrix.target }}
+
+      - name: build
+        run: cargo build --release -p rutis-cli --target ${{ matrix.target }}
+
+      - name: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#cli-v}"
+          NAME="rutis-cli-${VERSION}-${{ matrix.target }}"
+          # staging 目录与 dist 分离:dist 只放最终 tar.gz + sha256,
+          # 防止目录被 upload-artifact 带走、release glob 误匹配
+          mkdir -p "stage/${NAME}" dist
+          cp "target/${{ matrix.target }}/release/rutis-cli" "stage/${NAME}/"
+          cp crates/rutis-cli/README.md LICENSE "stage/${NAME}/"
+          tar -czf "dist/${NAME}.tar.gz" -C stage "${NAME}"
+          if command -v sha256sum >/dev/null; then
+            (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          else
+            (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#cli-v}"
+          gh release create "$GITHUB_REF_NAME" dist/rutis-cli-*.tar.gz dist/rutis-cli-*.tar.gz.sha256 \
+            --title "rutis-cli ${VERSION}" \
+            --notes "Binary release of rutis-cli (minimal coding agent: bash + replace_text).
+
+          Install: download the tar.gz for your platform, verify the .sha256, extract, and put \`rutis-cli\` on your PATH. (\`cargo install rutis-cli\` installs the older crates.io build without the rutui TUI.)
+
+          Requires an aimux provider key at runtime (e.g. \`DEEPSEEK_API_KEY\`); try \`rutis-cli --scripted\` for an offline demo."
