@@ -117,7 +117,7 @@ npm publish
 
 Alternatively, push a tag such as `v0.1.0`. The generated workflow tests, runs `check`, and publishes (the repository needs an `NPM_TOKEN` secret).
 
-Declare a version range such as `"@arcships/rutis": "^0.3.0"`. The plugin is tagged with its plugin API version (`definePlugin` adds this automatically). If the host runtime is older, it reports the problem clearly instead of failing later during execution.
+Declare a version range such as `"@arcships/rutis": "^0.7.0"`. The plugin is tagged with its plugin API version (`definePlugin` adds this automatically). If the host runtime is older, it reports the problem clearly instead of failing later during execution.
 
 ## 6. Use from a host
 

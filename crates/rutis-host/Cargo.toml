@@ -2,7 +2,7 @@
 name = "rutis-host"
 description = "A rutis host that needs no Rust: run plugins written in TypeScript, JavaScript and Python from a rutis.json, develop them with live reload, link machines"
 # The release train.
-version = "0.3.0"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -16,9 +16,9 @@ name = "rutis-host"
 path = "src/main.rs"
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.6.0" }
-rutis-bridge = { path = "../rutis-bridge", version = "0.3.0", features = ["node", "python", "websocket"] }
-rutis-loader = { path = "../rutis-loader", version = "0.3.0", features = ["node", "python", "peer"] }
+rutis = { path = "../rutis", version = "0.7.0" }
+rutis-bridge = { path = "../rutis-bridge", version = "0.7.0", features = ["node", "python", "websocket"] }
+rutis-loader = { path = "../rutis-loader", version = "0.7.0", features = ["node", "python", "peer"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio.workspace = true

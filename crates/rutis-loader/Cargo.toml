@@ -2,7 +2,7 @@
 name = "rutis-loader"
 description = "Data-driven plugin management for rutis: layered desired state, reconcile, editable layer and persistence hook"
 edition.workspace = true
-version = "0.3.0"
+version = "0.7.0"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
@@ -10,14 +10,14 @@ keywords = ["cordis", "plugin", "loader", "reconcile"]
 categories = ["asynchronous", "config"]
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.6.1" }
+rutis = { path = "../rutis", version = "0.7.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 schemars = "1"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 url = { version = "2", optional = true }
-rutis-bridge = { path = "../rutis-bridge", version = "0.3.0", optional = true, default-features = false }
+rutis-bridge = { path = "../rutis-bridge", version = "0.7.0", optional = true, default-features = false }
 
 [features]
 # Plugins of other languages as rows, each language in its own runtime

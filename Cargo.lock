@@ -3021,7 +3021,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -3054,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.3.0"
+version = "0.7.0"
 dependencies = [
  "futures-util",
  "libc",
@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-host"
-version = "0.3.0"
+version = "0.7.0"
 dependencies = [
  "rutis",
  "rutis-bridge",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.3.0"
+version = "0.7.0"
 dependencies = [
  "rutis",
  "rutis-bridge",

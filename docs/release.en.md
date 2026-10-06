@@ -39,3 +39,14 @@ Expected behavior: the dialer prints `clock: <n>` every second. After a network 
 Then use the published packages to follow [Write a TypeScript plugin](guide/typescript-plugin.en.md) and [Write a Python plugin](guide/python-plugin.en.md) from a clean environment.
 
 The nightly stress workflow also runs two soak tests (repeated link disconnect/reconnect and repeated process start/exit) and checks that file descriptor and thread counts do not grow and all processes are reaped.
+
+## 0.7.0
+
+The core and train packages are versioned 0.7.0, using the existing two release workflows:
+
+1. Merge versions, lockfiles, [release notes](releases/0.7.0.en.md) and [migration guide](migration-0.6-to-0.7.en.md) to main; confirm CI passes on that commit.
+2. Push `rutis-v0.7.0` and wait for the core publication to succeed.
+3. Push `v0.7.0` at the same commit to publish bridge, loader, host and npm/PyPI packages.
+4. Use the prepared [release notes](releases/0.7.0.en.md) for the GitHub Release, then check artifacts and installation.
+
+Pre-release CI packaging selects the core with its three consumers so the unpublished core can be used for package verification. Use online CI results for tests and packaging.

@@ -120,7 +120,7 @@ uv publish
 weather = "weather"
 ```
 
-依赖写 `rutis>=0.3,<0.4` 这样的范围。`define_plugin` 在插件上标记它所用的插件 API 版本，宿主的运行时比它旧时会明确报错。
+依赖写 `rutis>=0.7,<0.8` 这样的范围。`define_plugin` 在插件上标记它所用的插件 API 版本，宿主的运行时比它旧时会明确报错。
 
 ## 6. 被宿主使用
 

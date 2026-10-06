@@ -1,6 +1,6 @@
 {
   "name": "@arcships/rutis",
-  "version": "0.3.0",
+  "version": "0.7.0",
   "description": "Write rutis plugins in JavaScript or TypeScript: definePlugin, types and a test kit",
   "license": "MIT",
   "repository": {

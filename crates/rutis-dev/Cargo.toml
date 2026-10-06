@@ -9,8 +9,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.6.1" }
-rutis-loader = { path = "../rutis-loader", version = "0.3.0" }
+rutis = { path = "../rutis", version = "0.7.0" }
+rutis-loader = { path = "../rutis-loader", version = "0.7.0" }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { workspace = true, features = ["io-util", "net", "macros", "rt"] }
 

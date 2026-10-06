@@ -134,7 +134,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: node scripts/train.mjs
       - name: cargo package
-        run: cargo package --locked -p rutis-bridge -p rutis-loader -p rutis-host
+        run: cargo package --locked -p rutis -p rutis-bridge -p rutis-loader -p rutis-host
       - name: npm pack
         run: |
           for package in node/rutis node/rutis-runtime node/rutis-host; do

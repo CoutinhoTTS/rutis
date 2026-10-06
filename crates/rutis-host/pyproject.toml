@@ -11,7 +11,7 @@ description = "rutis-host, a rutis host that needs no Rust: run and develop ruti
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = ["rutis>=0.3,<0.4"]
+dependencies = ["rutis>=0.7,<0.8"]
 dynamic = ["version"]
 keywords = ["rutis", "plugin", "host"]
 

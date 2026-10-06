@@ -14,12 +14,16 @@ An idiomatic Rust implementation of the Cordis core paradigm (split out from [mi
 
 ```toml
 [dependencies]
-rutis = "0.6.0"
+rutis = "0.7"
 ```
 
 The kernel has zero serde, zero unsafe, and depends only on tokio / tokio-util / thiserror. See the [repository docs](https://github.com/arcships/rutis/tree/main/docs) for design and cross-checking documentation.
 
 First-time users should read the [application design guide](https://github.com/arcships/rutis/blob/main/docs/development-guide.md), then implement following the [development handbook](https://github.com/arcships/rutis/blob/main/docs/development-handbook.md). Companion examples can be run in the repository: `cargo run -p rutis --example development_workflow`.
+
+## 0.7
+
+The core and the bridge, loader, host and language packages are versioned 0.7.0 for this release. Typed dependencies, the plugin control plane, language runtimes and networked nodes are covered in the [release notes](https://github.com/arcships/rutis/blob/main/docs/releases/0.7.0.en.md) and [migration guide](https://github.com/arcships/rutis/blob/main/docs/migration-0.6-to-0.7.en.md).
 
 ## 0.6.1
 

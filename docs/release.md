@@ -39,3 +39,14 @@ cargo run -p rutis-bridge --features websocket --example smoke -- \
 再用发布的包从零走一遍 [写一个 TypeScript 插件](guide/typescript-plugin.md) 和 [写一个 Python 插件](guide/python-plugin.md)。
 
 每晚的 stress 工作流还跑两个浸泡测试（link 反复断开重连、进程反复拉起结束），检查文件描述符、线程数不增长、进程都被回收。
+
+## 0.7.0
+
+本次内核和发布列车的包版本均为 0.7.0，沿用现有的两个发布工作流：
+
+1. 版本、锁文件、[发布说明](releases/0.7.0.md)和[升级指南](migration-0.6-to-0.7.md)合并到 main，确认该提交的 CI 通过。
+2. 推送 `rutis-v0.7.0`，等待内核发布成功。
+3. 在同一提交推送 `v0.7.0`，发布 bridge、loader、host 和 npm/PyPI 包。
+4. GitHub Release 使用准备好的[英文发布说明](releases/0.7.0.en.md)，检查发布产物及安装结果。
+
+发布前的 CI 打包同时选择 `rutis` 和三个下游 crate，使未发布的 0.7.0 内核可用于包内编译。测试和打包使用线上 CI 结果。
