@@ -144,6 +144,14 @@ impl HostConfig {
                 at(path);
             }
         }
+        // A plugin file named relative to the configuration.
+        for row in &mut self.rows {
+            if let Some(name) = row["name"].as_str() {
+                if name.starts_with("./") || name.starts_with("../") {
+                    row["name"] = json!(format!("file://{}", base.join(name).display()));
+                }
+            }
+        }
     }
 
     /// Add `other`'s runtimes (where this has none), listeners and rows.
@@ -242,7 +250,13 @@ mod tests {
             "runtimes": { "node": {}, "py": { "python": ".venv/bin/python" } }
         }))
         .unwrap();
+        config.rows = vec![
+            json!({ "id": "llm", "name": "./dev/fake.ts" }),
+            json!({ "id": "w", "name": "weather" }),
+        ];
         config.rebase(Path::new("/srv/app"));
+        assert_eq!(config.rows[0]["name"], "file:///srv/app/./dev/fake.ts");
+        assert_eq!(config.rows[1]["name"], "weather");
         assert_eq!(
             config.runtimes.node.unwrap().project,
             Path::new("/srv/app/.")
