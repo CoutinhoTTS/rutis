@@ -16,7 +16,7 @@
 pub mod profile;
 
 #[cfg(all(unix, dsh_installed))]
-rutis_interop::include_mounts!();
+rutis_bridge::include_mounts!();
 
 #[cfg(all(unix, dsh_installed))]
 mod aimux;

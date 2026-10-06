@@ -1,0 +1,36 @@
+{
+  "name": "@arcships/rutis-host",
+  "version": "0.3.0",
+  "description": "rutis-host, a rutis host that needs no Rust: run and develop rutis plugins written in TypeScript, JavaScript and Python",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arcships/rutis.git",
+    "directory": "node/rutis-host"
+  },
+  "homepage": "https://github.com/arcships/rutis/tree/main/docs/guide#readme",
+  "keywords": ["rutis", "plugin", "host"],
+  "type": "module",
+  "bin": {
+    "rutis-host": "bin/rutis-host.mjs"
+  },
+  "files": ["bin"],
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@arcships/rutis-runtime": "0.3.0"
+  },
+  "optionalDependencies": {
+    "@arcships/rutis-host-darwin-arm64": "0.3.0",
+    "@arcships/rutis-host-darwin-x64": "0.3.0",
+    "@arcships/rutis-host-linux-arm64": "0.3.0",
+    "@arcships/rutis-host-linux-x64": "0.3.0"
+  }
+}

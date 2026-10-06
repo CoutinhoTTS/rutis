@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p rutis-transport-websocket -p rutis-transport-local --test soak --no-run
+      - run: cargo test -p rutis-bridge --features websocket --test websocket_soak --test local_soak --no-run
       - name: Soak the network stack
         # bash -eo pipefail: a failing soak fails the step through tee.
         shell: bash
@@ -56,6 +56,6 @@ jobs:
           RUTIS_SOAK_SECS: ${{ inputs.soak_secs || '600' }}
         run: |
           case "$RUTIS_SOAK_SECS" in ""|*[!0-9]*) echo "::error::soak_secs must be a number"; exit 1;; esac
-          cargo test -q -p rutis-transport-websocket --test soak -- --ignored --nocapture 2>&1 | tee websocket.txt
-          cargo test -q -p rutis-transport-local --test soak -- --ignored --nocapture 2>&1 | tee local.txt
+          cargo test -q -p rutis-bridge --features websocket --test websocket_soak -- --ignored --nocapture 2>&1 | tee websocket.txt
+          cargo test -q -p rutis-bridge --test local_soak -- --ignored --nocapture 2>&1 | tee local.txt
           grep -h '^soak:' websocket.txt local.txt >> "$GITHUB_STEP_SUMMARY"

@@ -1,29 +1,48 @@
-//! Connecting rutis to other processes and machines
-//! (`docs/design-remote-plugins-2026-10-03.md`).
+//! Connect rutis to other processes, languages and machines.
 //!
-//! Transport plugins (`rutis-transport-local`, `rutis-transport-memory`,
-//! `rutis-transport-websocket`, …) provide a [`Transport`] under
-//! [`transport_key`]; links depend on it and never on a concrete transport
-//! crate. An [`Identity`] holds credentials and the rules that map what a
-//! far end presents to its endpoint id; transports apply them.
+//! - [`runtime`]: plugins written in Node or Python, run by language
+//!   runtimes on this machine ([`runtime::LocalRuntime`]) or elsewhere
+//!   ([`runtime::RuntimePlugin::remote`]); rutis-loader manages them as
+//!   rows.
+//! - Links between rutis nodes ([`LinkPlugin`]) and what runs on them:
+//!   services exported and imported, plugins hosted for a peer, events
+//!   forwarded ([`PeerPlugin`] composes them).
+//! - [`transport`]: what links run over (local processes and Unix sockets,
+//!   in-process channels, WebSocket with feature `websocket`). A transport
+//!   provides a [`Transport`] under [`transport_key`]; links depend on that
+//!   and never on a concrete transport. An [`Identity`] holds credentials
+//!   and the rules that map what a far end presents to its endpoint id.
+//! - [`session`]: the protocol all of these speak, over any
+//!   [`channel::Channel`].
+//! - [`cordis`] (feature `cordis`): Cordis plugins mounted in a Rust
+//!   application with Rust bindings generated at build time.
+//!
+//! Design: `docs/design-protocol-channel-decoupling-2026-10-03.md`,
+//! `docs/design-remote-plugins-2026-10-03.md`.
 
 use std::sync::Arc;
 
 use rutis::{BoxFuture, TypeKey};
-pub use rutis_channel::{Channel, ConnectError, PeerId};
+
+pub mod channel;
+#[cfg(feature = "cordis")]
+pub mod cordis;
+pub mod runtime;
+pub mod session;
+#[cfg(feature = "testing")]
+pub mod testing;
+pub mod transport;
 
 mod compose;
-#[cfg(feature = "conformance")]
-pub mod conformance;
 mod events;
 mod host;
 mod identity;
 mod link;
 mod peer;
 mod registration;
-mod runtime;
 mod services;
 
+pub use channel::{Channel, ConnectError, PeerId};
 pub use compose::{Features, PeerHandle, PeerPlugin};
 pub use events::{node_event, EventsPlugin, NodeEvent};
 pub use host::{Described, HostPlugin, Installed, PluginCatalog, ServiceKeys, StaticCatalog};
@@ -35,7 +54,6 @@ pub use peer::{family, peer_key, Handler, Offered, Offers, Peer};
 pub use registration::{
     Deliver, Refusal, Registered, Registration, RegistrationError, Registrations, Ticket,
 };
-pub use runtime::RuntimeAccessPlugin;
 pub use services::{ExportPlugin, ImportPlugin};
 
 /// One kind of carrier, as its plugin provides it.

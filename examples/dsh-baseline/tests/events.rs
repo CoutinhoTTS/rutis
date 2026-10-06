@@ -8,7 +8,7 @@ use dsh_baseline::credentials::{
     self, CredentialKey, CredentialRef, CredentialsRecordUpdated, CredentialsReferenceUpdated,
 };
 use rutis::{BoxFuture, CordisError, Ctx, EventKey, Listener};
-use rutis_interop::serde_json::json;
+use rutis_bridge::cordis::serde_json::json;
 
 #[derive(Default, Clone)]
 struct Seen(Arc<Mutex<Vec<String>>>);

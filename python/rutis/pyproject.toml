@@ -1,0 +1,27 @@
+[project]
+name = "rutis"
+version = "0.3.0"
+description = "Write rutis plugins in Python, and the runtime that runs them"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = []
+keywords = ["rutis", "plugin", "rutis-plugin"]
+
+[project.urls]
+Homepage = "https://github.com/arcships/rutis"
+Documentation = "https://github.com/arcships/rutis/tree/main/docs/guide"
+
+[project.optional-dependencies]
+# WebSocket channels: a runtime other machines reach (listen:ws://…, listen:wss://…).
+network = ["websockets>=13"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["rutis"]
+
+[tool.setuptools.package-data]
+rutis = ["py.typed"]

@@ -1,28 +1,28 @@
 # rutis-cli
 
-最小 coding agent 的命令行形态:[rutis](https://crates.io/crates/rutis) 框架 +
-[rutis-agent](https://crates.io/crates/rutis-agent) minimal mode(`bash` +
-`replace_text` 两个工具,能改文件、能跑命令),流式 TUI 交互,后端任选 aimux
-provider(deepseek / ollama / …)。
+A command-line form of a minimal coding agent: the [rutis](https://crates.io/crates/rutis) framework +
+[rutis-agent](https://crates.io/crates/rutis-agent) minimal mode (two tools, `bash` +
+`replace_text`, able to edit files and run commands), streaming TUI interaction, with any aimux
+provider as the backend (deepseek / ollama / …).
 
-## 安装
+## Installation
 
 ```bash
-# 最新版:GitHub Releases 下载对应平台 tar.gz,或源码构建:
+# Latest: download the tar.gz for your platform from GitHub Releases, or build from source:
 git clone https://github.com/eric8810/rutis && cd rutis && cargo build -p rutis-cli
-# crates.io 的 cargo install rutis-cli 为旧版(不含 rutui TUI)
+# `cargo install rutis-cli` from crates.io is an older release (without the rutui TUI)
 ```
 
-## 使用
+## Usage
 
 ```bash
 export DEEPSEEK_API_KEY=... && rutis-cli            # deepseek-chat
-rutis-cli --provider ollama --model qwen3:8b        # 本地模型
-rutis-cli --scripted                                # 无 key 离线演示
+rutis-cli --provider ollama --model qwen3:8b        # local model
+rutis-cli --scripted                                # offline demo without a key
 ```
 
-交互:Enter 提交;Esc / Ctrl+C(运行中)取消当前 turn;Ctrl+Q 退出。
+Interaction: Enter to submit; Esc / Ctrl+C (while running) cancels the current turn; Ctrl+Q quits.
 
 ## License
 
-MIT(继承自 [Cordis](https://github.com/shigma/cordis) © Shigma)。
+MIT (inherited from [Cordis](https://github.com/shigma/cordis) © Shigma).

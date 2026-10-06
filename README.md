@@ -187,7 +187,8 @@ ctx.events().emit(&ctx, &key, Arc::new(event))?;
 | 项目 | 说明 |
 |---|---|
 | [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | 最小 coding agent 样例:aimux `LanguageModel` 服务 + 工具插件 + 流式 driver 插件 + ratatui TUI;`cargo install rutis-cli` |
-| [rutis-dsh](crates/rutis-dsh) | 在 rutis 宿主里运行 dsh：`rutis-dsh up` 经 [rutis-interop](crates/rutis-interop) 启动 dsh 的完整 web 界面，模型调用由同进程的 aimux 提供；也可从 Rust 驱动不带界面的 dsh agent |
+| [rutis-host](crates/rutis-host) | 不用写 Rust 的宿主：按 `rutis.json` 运行 TypeScript / JavaScript / Python 插件，开发时自动重载，连接多台机器。见 [指南](docs/guide/README.md) |
+| [rutis-dsh](crates/rutis-dsh) | 在 rutis 宿主里运行 dsh：`rutis-dsh up` 经 [rutis-bridge](crates/rutis-bridge) 启动 dsh 的完整 web 界面，模型调用由同进程的 aimux 提供；也可从 Rust 驱动不带界面的 dsh agent |
 | [aimux-llm](crates/aimux-llm) | 独立 LLM 服务插件:apply → 注册 `llm` 服务,329 provider |
 
 仓库内运行样例:
@@ -203,11 +204,13 @@ npm --prefix crates/rutis-dsh/dsh ci && cargo run -p rutis-dsh -- up   # dsh web
 
 ## 📚 文档
 
+**其他语言的插件、多台机器** — [指南](docs/guide/README.md)（TypeScript / Python 插件、rutis-host、连接节点、Rust 嵌入、Cordis）· [面向开发者的包与流程设计](docs/design-developer-packages-2026-10-06.md)
+
 **从这里开始开发** — [应用设计指南](docs/development-guide.md)（如何拆插件、画依赖图、设计重载与多实例）· [开发手册](docs/development-handbook.md)（API 用法、资源清理、事件、排障与验证）· [完整可运行示例](crates/rutis/examples/development_workflow.rs)
 
 **内核与范式** — [内核设计(D1-D31 决策表)](docs/design-rust-port.md) · [96 spec 对拍判定](docs/cordis-spec-parity-2026-08-18.md) · [热更新+动态事件(设计/三轮评审/复盘/审计)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md) · [shutdown 与卸载等待截止时间](docs/core-shutdown-and-disposal-deadline.md)
 
-**挂载 Cordis / dsh** — [rutis-interop 接入](crates/rutis-interop/README.md) · [需求](docs/requirements-protocol-plugins.md) · [设计](docs/design-protocol-plugin-mount.md) · [路线图](docs/roadmap-native-plugin-mount.md) · [rutis-dsh](crates/rutis-dsh/README.md) · 历史：[dsh 桥 v1 设计](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm 插件裁决](docs/decision-aimux-llm-plugin-2026-08-23.md)
+**挂载 Cordis / dsh** — [Cordis 指南](docs/guide/cordis.md) · [需求](docs/requirements-protocol-plugins.md) · [设计](docs/design-protocol-plugin-mount.md) · [路线图](docs/roadmap-native-plugin-mount.md) · [rutis-dsh](crates/rutis-dsh/README.md) · 历史：[dsh 桥 v1 设计](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm 插件裁决](docs/decision-aimux-llm-plugin-2026-08-23.md)
 
 **Agent** — [agent 框架](docs/design-min-agent-2026-08-18.md) · [验证与 TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 

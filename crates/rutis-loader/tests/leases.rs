@@ -3,24 +3,25 @@
 //! connection takes over only after the old lease is gone; a controller
 //! that reconnects gets a new lease. Each plugin start and cleanup is
 //! written to a log on the runtime's side. Python needs `websockets`
-//! (RUTIS_INTEROP_PYTHON, else python3).
-#![cfg(all(unix, feature = "interop"))]
+//! (RUTIS_PYTHON, else python3).
+#![cfg(all(unix, feature = "node", feature = "python"))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rutis::{Ctx, FiberView};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::runtime::RuntimeAccessPlugin;
+use rutis_bridge::runtime::RuntimePlugin;
+use rutis_bridge::transport::websocket::{Config, WebSocketPlugin};
 use rutis_bridge::{
     peer_key, Credential, IdentityPlugin, LinkConfig, LinkPlugin, LinkState, Peer, Retry,
-    RuntimeAccessPlugin, StaticIdentity,
+    StaticIdentity,
 };
-use rutis_channel::PeerId;
-use rutis_interop::RuntimePlugin;
 use rutis_loader::{
-    Chain, InteropResolver, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin,
+    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
 };
-use rutis_transport_websocket::{Config, WebSocketPlugin};
 use serde_json::json;
 use tokio::io::AsyncBufReadExt;
 
@@ -89,6 +90,10 @@ impl Remote {
 }
 
 async fn remote(language: Language) -> Remote {
+    remote_with_start_delay(language, 0).await
+}
+
+async fn remote_with_start_delay(language: Language, start_delay_ms: u64) -> Remote {
     let project = tempfile::tempdir().unwrap();
     let log = project.path().join("lease.log");
     let mut command = match language {
@@ -101,13 +106,13 @@ async fn remote(language: Language) -> Remote {
                 ),
             )
             .unwrap();
-            let python = std::env::var("RUTIS_INTEROP_PYTHON").unwrap_or_else(|_| "python3".into());
+            let python = std::env::var("RUTIS_PYTHON").unwrap_or_else(|_| "python3".into());
             let mut command = tokio::process::Command::new(python);
             command
-                .args(["-m", "rutis_runtime", "listen:ws://127.0.0.1:0/rutis"])
+                .args(["-m", "rutis", "listen:ws://127.0.0.1:0/rutis"])
                 .args(["--id", "remote", "--peer", "main"])
                 .arg(project.path())
-                .env("PYTHONPATH", repo().join("interop/python"))
+                .env("PYTHONPATH", repo().join("python/rutis"))
                 .current_dir(project.path());
             command
         }
@@ -124,12 +129,12 @@ async fn remote(language: Language) -> Remote {
             std::fs::write(
                 package.join("index.mjs"),
                 format!(
-                    "import {{ appendFileSync }} from 'node:fs'\nexport function apply(ctx, config) {{\n  appendFileSync({log:?}, `start ${{config.who}}\\n`)\n  ctx.effect(() => () => appendFileSync({log:?}, `stop ${{config.who}}\\n`))\n}}\n",
+                    "import {{ appendFileSync }} from 'node:fs'\nawait new Promise(resolve => setTimeout(resolve, {start_delay_ms}))\nexport function apply(ctx, config) {{\n  appendFileSync({log:?}, `start ${{config.who}}\\n`)\n  ctx.effect(() => () => {{\n    if (config.stopDelayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, config.stopDelayMs)\n    appendFileSync({log:?}, `stop ${{config.who}}\\n`)\n  }})\n}}\n",
                     log = log.display().to_string()
                 ),
             )
             .unwrap();
-            let runtime = repo().join("interop/node");
+            let runtime = repo().join("node/rutis-runtime");
             let mut command = tokio::process::Command::new("node");
             command
                 .args(["--import", "tsx"])
@@ -142,7 +147,7 @@ async fn remote(language: Language) -> Remote {
         }
     };
     let mut process = command
-        .env("RUTIS_INTEROP_TOKEN", "main-token")
+        .env("RUTIS_TOKEN", "main-token")
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -154,7 +159,7 @@ async fn remote(language: Language) -> Remote {
             .await
             .unwrap()
             .expect("the runtime's address");
-        if let Some(address) = line.strip_prefix("rutis-interop: listening on ") {
+        if let Some(address) = line.strip_prefix("rutis: listening on ") {
             break address.to_owned();
         }
     };
@@ -181,6 +186,15 @@ struct Controller {
 }
 
 async fn controller(remote: &Remote, who: &str) -> Controller {
+    controller_with_options(remote, who, true, 0).await
+}
+
+async fn controller_with_options(
+    remote: &Remote,
+    who: &str,
+    reconnect: bool,
+    stop_delay_ms: u64,
+) -> Controller {
     let root = Ctx::root().unwrap();
     (&root.plugin(WebSocketPlugin::new(Config::new()).unwrap()))
         .await
@@ -190,22 +204,22 @@ async fn controller(remote: &Remote, who: &str) -> Controller {
         StaticIdentity::new(id("main"))
             .present(id("remote"), Credential::Bearer("main-token".into())),
     ));
-    let link = LinkPlugin::new(
-        LinkConfig::dial(id("remote"), "websocket", "main", &remote.address)
-            .require("runtime")
-            .retry(Retry {
-                initial: Duration::from_millis(50),
-                max: Duration::from_millis(300),
-                ..Retry::default()
-            }),
-    );
+    let mut config = LinkConfig::dial(id("remote"), "websocket", "main", &remote.address)
+        .require("runtime")
+        .retry(Retry {
+            initial: Duration::from_millis(50),
+            max: Duration::from_millis(300),
+            ..Retry::default()
+        });
+    config.reconnect = reconnect;
+    let link = LinkPlugin::new(config);
     let states = link.state();
     let link = root.plugin(link);
     root.plugin(RuntimeAccessPlugin::new(id("remote"), remote.runtime()));
     let runtime = RuntimePlugin::remote(remote.runtime());
     let rows = Arc::new(match remote.language {
-        Language::Python => InteropResolver::modules(runtime.handle()),
-        Language::Node => InteropResolver::node(runtime.handle()),
+        Language::Python => RuntimeResolver::modules(runtime.handle()),
+        Language::Node => RuntimeResolver::node(runtime.handle()),
     });
     root.plugin(runtime);
     let plugin = LoaderPlugin::new(
@@ -216,7 +230,7 @@ async fn controller(remote: &Remote, who: &str) -> Controller {
     (&root.plugin(plugin)).await.unwrap();
     root.plugin(RuntimeRowsPlugin::new(rows));
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
-        { "id": "l", "name": remote.row(), "config": { "who": who } }
+        { "id": "l", "name": remote.row(), "config": { "who": who, "stopDelayMs": stop_delay_ms } }
     ] }]))
     .unwrap();
     loader
@@ -240,8 +254,15 @@ async fn successive_controllers_get_clean_leases(language: Language) {
 }
 
 async fn a_newer_controller_takes_over_after_the_old_lease_is_gone(language: Language) {
-    let remote = remote(language).await;
-    let first = controller(&remote, "a").await;
+    takeover(language, 0).await;
+}
+
+async fn takeover(language: Language, stop_delay_ms: u64) {
+    let remote = remote_with_start_delay(language, stop_delay_ms).await;
+    // A replaced dial link normally reconnects. Disable that before takeover,
+    // not after start b: otherwise a can replace b while its child is still
+    // loading, and the two controllers keep evicting one another.
+    let first = controller_with_options(&remote, "a", false, stop_delay_ms).await;
     remote.wait_for("start a").await;
     let second = controller(&remote, "b").await;
     remote.wait_for("start b").await;
@@ -255,7 +276,12 @@ async fn a_newer_controller_takes_over_after_the_old_lease_is_gone(language: Lan
         stop_a < start_b,
         "the old lease goes before the new one starts: {lines:?}"
     );
-    // The replaced controller stops trying, or it would take over back.
+    eventually(
+        || matches!(*first.states.borrow(), LinkState::Stopped { .. }).then_some(()),
+        "the replaced controller stopped without reconnecting",
+    )
+    .await;
+    assert_eq!(lines, ["start a", "stop a", "start b"]);
     first.link.dispose().await.unwrap();
     drop(second);
 }
@@ -271,7 +297,7 @@ async fn a_reconnecting_controller_gets_a_new_lease(language: Language) {
     .await;
     let generation = peer.generation();
     peer.connection()
-        .close(rutis_interop::Error::Transport("cut".into()));
+        .close(rutis_bridge::session::Error::Transport("cut".into()));
     drop(peer);
     remote.wait_for("stop a").await;
     eventually(
@@ -309,6 +335,14 @@ async fn node_successive_controllers_get_clean_leases() {
 #[tokio::test(flavor = "multi_thread")]
 async fn node_takeover_after_the_old_lease_is_gone() {
     a_newer_controller_takes_over_after_the_old_lease_is_gone(Language::Node).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_takeover_with_slow_start_and_cleanup() {
+    // Stretch both cleanup and module loading beyond the maximum retry delay
+    // (including jitter). With reconnect left enabled on a, b is repeatedly
+    // evicted before applying its row; this used to time out waiting for b.
+    takeover(Language::Node, 600).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

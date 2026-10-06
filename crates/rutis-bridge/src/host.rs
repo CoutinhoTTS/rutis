@@ -24,10 +24,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::channel::PeerId;
+use crate::session::rpc::{Connection, Reply, Value};
+use crate::session::Error;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin, PluginFactory, TypeKey};
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{Connection, Reply, Value};
-use rutis_interop::Error;
 use serde_json::{json, Value as Json};
 
 use crate::{peer_key, Offered, Peer};
@@ -144,7 +144,7 @@ impl HostPlugin {
             injects: [peer_key(&peer)],
             peer,
             catalog,
-            services: Arc::new(|name: &str| Some(rutis_interop::host_key(name))),
+            services: Arc::new(|name: &str| Some(crate::session::host_key(name))),
         }
     }
 
@@ -192,7 +192,7 @@ impl Host {
     }
 
     fn describe(self: &Arc<Self>, args: Vec<Json>) -> Reply {
-        let name: String = rutis_interop::decode(args.into_iter().next().unwrap_or_default())?;
+        let name: String = crate::session::decode(args.into_iter().next().unwrap_or_default())?;
         self.installed(&name)?;
         let host = self.clone();
         Ok(Value::future(async move {
@@ -212,16 +212,16 @@ impl Host {
 
     fn load(self: &Arc<Self>, args: Vec<Json>) -> Reply {
         let mut args = args.into_iter();
-        let key: String = rutis_interop::decode(args.next().unwrap_or_default())?;
-        let name: String = rutis_interop::decode(args.next().unwrap_or_default())?;
+        let key: String = crate::session::decode(args.next().unwrap_or_default())?;
+        let name: String = crate::session::decode(args.next().unwrap_or_default())?;
         let config = args.next().unwrap_or(Json::Null);
         let isolate: Vec<(String, String)> = match args.next() {
             None | Some(Json::Null) => Vec::new(),
-            Some(isolate) => rutis_interop::decode(isolate)?,
+            Some(isolate) => crate::session::decode(isolate)?,
         };
         let inject: Vec<String> = match args.next() {
             None | Some(Json::Null) => Vec::new(),
-            Some(inject) => rutis_interop::decode(inject)?,
+            Some(inject) => crate::session::decode(inject)?,
         };
         self.installed(&name)?;
         let key_of = |service: &str| {
@@ -264,7 +264,7 @@ impl Host {
 
     fn update(&self, args: Vec<Json>) -> Reply {
         let mut args = args.into_iter();
-        let key: String = rutis_interop::decode(args.next().unwrap_or_default())?;
+        let key: String = crate::session::decode(args.next().unwrap_or_default())?;
         let config = args.next().unwrap_or(Json::Null);
         let view = self
             .loaded
@@ -277,7 +277,7 @@ impl Host {
     }
 
     fn unload(&self, args: Vec<Json>) -> Reply {
-        let key: String = rutis_interop::decode(args.into_iter().next().unwrap_or_default())?;
+        let key: String = crate::session::decode(args.into_iter().next().unwrap_or_default())?;
         match self.loaded.lock().unwrap().remove(&key) {
             Some(view) => wait(view.dispose()),
             // Already gone: unloading is idempotent.

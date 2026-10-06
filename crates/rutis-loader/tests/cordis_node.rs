@@ -1,5 +1,5 @@
 //! A rutis node and a Cordis application linked as full nodes over a
-//! loopback WebSocket (interop/node/test/fixtures/cordis-node.mjs): each
+//! loopback WebSocket (node/rutis-runtime/test/fixtures/cordis-node.mjs): each
 //! imports the other's service, rutis rows are hosted in Cordis, events
 //! cross both ways. The Cordis side reports on stdout.
 #![cfg(all(unix, feature = "peer"))]
@@ -9,17 +9,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Listener};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::session::{host_key, HostDispatch};
+use rutis_bridge::session::{settle, Reply, Value as RpcValue};
+use rutis_bridge::transport::websocket::{Config, ListenerConfig, WebSocketPlugin};
 use rutis_bridge::{
     node_event, EventsPlugin, ExportPlugin, IdentityPlugin, ImportPlugin, LinkConfig, LinkPlugin,
     NodeEvent, StaticIdentity,
 };
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{settle, Reply, Value as RpcValue};
-use rutis_interop::{host_key, HostDispatch};
 use rutis_loader::{
     Chain, Layer, LoaderOptions, LoaderPlugin, Patch, PeerResolver, PeerRowsPlugin,
 };
-use rutis_transport_websocket::{Config, ListenerConfig, WebSocketPlugin};
 use serde_json::{json, Value};
 use tokio::io::AsyncBufReadExt;
 
@@ -142,10 +142,10 @@ async fn a_rutis_node_and_a_cordis_node_share_services_rows_and_events() {
     // The Cordis node: dials main.
     let mut child = tokio::process::Command::new("node")
         .args(["--import", "tsx"])
-        .arg(repo().join("interop/node/test/fixtures/cordis-node.mjs"))
+        .arg(repo().join("node/rutis-runtime/test/fixtures/cordis-node.mjs"))
         .arg(&address)
         .arg(&anchor)
-        .current_dir(repo().join("interop/node"))
+        .current_dir(repo().join("node/rutis-runtime"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -312,10 +312,10 @@ async fn a_listening_cordis_node_lets_a_newer_connection_take_over() {
     std::fs::write(anchor.path().join("package.json"), "{}").unwrap();
     let mut child = tokio::process::Command::new("node")
         .args(["--import", "tsx"])
-        .arg(repo().join("interop/node/test/fixtures/cordis-node.mjs"))
+        .arg(repo().join("node/rutis-runtime/test/fixtures/cordis-node.mjs"))
         .arg("listen:ws://127.0.0.1:0/rutis")
         .arg(anchor.path().join("package.json"))
-        .current_dir(repo().join("interop/node"))
+        .current_dir(repo().join("node/rutis-runtime"))
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -328,7 +328,7 @@ async fn a_listening_cordis_node_lets_a_newer_connection_take_over() {
             .await
             .unwrap()
             .expect("the node's address");
-        if let Some(address) = line.strip_prefix("rutis-interop: listening on ") {
+        if let Some(address) = line.strip_prefix("rutis: listening on ") {
             break address.to_owned();
         }
     };

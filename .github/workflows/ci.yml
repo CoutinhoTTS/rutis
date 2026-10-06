@@ -1,5 +1,5 @@
 # 常规 CI:push / PR 自动跑全量测试 + 编译检查。
-# 防回归:任何改动(agent/cli/内核/interop/rutis-dsh)引入的失败在此显式变红。
+# 防回归:任何改动(agent/cli/内核/bridge/rutis-dsh)引入的失败在此显式变红。
 #
 # rutis-agent 的 rutui 依赖已从 crates.io 解析,无需额外 checkout。
 
@@ -27,59 +27,73 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The oldest Node the packages support; network-macos runs the newest.
       - uses: actions/setup-node@v4
         with:
-          node-version: '26'
+          node-version: '24'
           cache: npm
           cache-dependency-path: |
-            interop/node/package-lock.json
-            interop/baseline/package-lock.json
+            node/rutis-runtime/package-lock.json
+            node/baseline/package-lock.json
             crates/rutis-dsh/dsh/package-lock.json
-      - run: npm --prefix interop/node ci
-      - run: npm --prefix interop/node test
-      # Real published Cordis plugins for the rutis-interop baseline test.
-      - run: npm --prefix interop/baseline ci
+      # The release train: one version for every package released together.
+      - run: node scripts/train.mjs
+      - run: npm --prefix node/rutis test
+      - run: npm --prefix node/rutis-runtime ci
+      - run: npm --prefix node/rutis-runtime test
+      - run: npm --prefix node/rutis-host test
+      # Real published Cordis plugins for the Cordis mount baseline test.
+      - run: npm --prefix node/baseline ci
       # dsh (web UI and agent loop) served by aimux in the rutis-dsh host.
       - run: npm --prefix crates/rutis-dsh/dsh ci
       - run: npm --prefix crates/rutis-dsh/dsh test
-      # The Python runtime (rutis-loader multilang tests run it).
+      # The Python package (the runtime runs in the Rust tests too).
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # WebSocket channels of the Python runtime (rutis-runtime[network]).
+      # WebSocket channels of the Python runtime (rutis[network]).
       - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
-        working-directory: interop/python
+        working-directory: python/rutis
 
       - name: cargo test (workspace)
         run: cargo test --workspace
 
-      # JavaScript plugins as rutis-loader rows (needs the interop runtime).
-      - name: cargo test (rutis-loader interop rows)
-        run: cargo test -p rutis-loader --features interop,peer
+      # Plugins of other languages and of other nodes as rutis-loader rows.
+      - name: cargo test (rutis-loader, every row kind)
+        run: cargo test -p rutis-loader --features node,python,peer
 
-      # Both runtimes, every channel, and the conformance suites.
-      - name: cargo test (rutis-interop, all features)
-        run: cargo test -p rutis-interop --all-features
-
-      - name: cargo test (rutis-bridge, node conformance)
-        run: cargo test -p rutis-bridge --features conformance
+      # Both runtimes, every transport, and the conformance suites.
+      - name: cargo test (rutis-bridge, all features)
+        run: cargo test -p rutis-bridge --all-features
 
       - name: cargo check (all targets)
         run: cargo check --workspace --all-targets
 
-      # Each language runtime builds on its own: an application compiles only
-      # the languages it enables.
-      - name: cargo check (one language at a time)
+      # An application compiles only the parts it enables.
+      - name: cargo check (feature sets)
         run: |
-          cargo check -p rutis-interop --no-default-features --all-targets
-          cargo check -p rutis-interop --no-default-features --features python --all-targets
+          cargo check -p rutis-bridge --no-default-features --all-targets
+          cargo check -p rutis-bridge --no-default-features --features python --all-targets
+          cargo check -p rutis-bridge --no-default-features --features websocket --all-targets
+          cargo check -p rutis-bridge --features cordis --all-targets
           cargo check -p rutis-loader --features node --all-targets
           cargo check -p rutis-loader --features python --all-targets
+          cargo check -p rutis-loader --features peer --all-targets
+
+      # The loader test targets compile under each single feature.
+      - name: cargo test --no-run (rutis-loader, node)
+        run: cargo test -p rutis-loader --features node --no-run
+
+      - name: cargo test --no-run (rutis-loader, python)
+        run: cargo test -p rutis-loader --features python --no-run
+
+      - name: cargo test --no-run (rutis-loader, peer)
+        run: cargo test -p rutis-loader --features peer --no-run
 
   # The network stack and the runtimes on macOS: starting processes on an
   # inherited socket, Unix sockets, WebSocket links, the Node and Python
-  # runtimes. Elsewhere macOS is only checked.
+  # runtimes, rutis-host. Elsewhere macOS is only checked.
   network-macos:
     runs-on: macos-15
     steps:
@@ -90,23 +104,47 @@ jobs:
         with:
           node-version: '26'
           cache: npm
-          cache-dependency-path: interop/node/package-lock.json
-      - run: npm --prefix interop/node ci
-      - run: npm --prefix interop/node test
+          cache-dependency-path: node/rutis-runtime/package-lock.json
+      - run: npm --prefix node/rutis test
+      - run: npm --prefix node/rutis-runtime ci
+      - run: npm --prefix node/rutis-runtime test
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
-        working-directory: interop/python
-      - name: cargo test (network stack and runtimes)
+        working-directory: python/rutis
+      - name: cargo test (network stack, runtimes, host)
         run: |
-          cargo test -p rutis-channel --all-features
-          cargo test -p rutis-bridge --features conformance
-          cargo test -p rutis-transport-memory -p rutis-transport-local -p rutis-transport-websocket
-          cargo test -p rutis-runtime-local --all-features
-          cargo test -p rutis-interop --all-features
-          cargo test -p rutis-loader --features interop,peer
+          cargo test -p rutis-bridge --all-features
+          cargo test -p rutis-loader --features node,python,peer
+          cargo test -p rutis-host
+
+  # What a release publishes, packaged on every change: the crates build from
+  # their packages, the npm packages pack, the Python packages build.
+  release-dry-run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v6
+      - run: node scripts/train.mjs
+      - name: cargo package
+        run: cargo package --locked -p rutis-bridge -p rutis-loader -p rutis-host
+      - name: npm pack
+        run: |
+          for package in node/rutis node/rutis-runtime node/rutis-host; do
+            (cd "$package" && npm pack --dry-run)
+          done
+      - name: Python packages
+        run: |
+          uv build python/rutis --out-dir dist
+          uvx maturin build --release --manifest-path crates/rutis-host/Cargo.toml --out dist
+          ls dist
 
   # rutis 相对 crates.io 最新版的公开 API 变化：发现破坏性变更时给出警告，
   # 并在 job 摘要中列出，提示发布时需要提升的版本；不使 CI 失败（0.x 允许在
@@ -179,7 +217,7 @@ jobs:
         if: runner.os != 'Windows'
         with:
           node-version: '26'
-      - run: npm --prefix interop/node ci
+      - run: npm --prefix node/rutis-runtime ci
         if: runner.os != 'Windows'
       - name: keep workspace static builds available
         run: cargo check --workspace --all-targets

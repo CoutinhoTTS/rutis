@@ -5,17 +5,17 @@
 在仓库根目录运行：
 
 ```sh
-npm --prefix interop/node ci
+npm --prefix node/rutis-runtime ci
 cargo run -p native-mount-example
 # 反方向（已冻结，不再增加能力）：Cordis 应用挂载 src/lib.rs 中的 rutis 插件。
 cargo test -p native-mount-example --test cordis_mount -- --nocapture
 ```
 
-没有独立的生成步骤：挂载写在 [Cargo.toml](Cargo.toml) 的 `[package.metadata.rutis-interop]` 中，[build.rs](build.rs) 调用 `from_manifest()` 在普通 Cargo 构建时生成绑定，生成文件放在构建目录，不提交、不手工维护。接入方式见 [rutis-interop 接入文档](../../crates/rutis-interop/README.md)。
+没有独立的生成步骤：挂载写在 [Cargo.toml](Cargo.toml) 的 `[package.metadata.rutis-cordis]` 中，[build.rs](build.rs) 调用 `from_manifest()` 在普通 Cargo 构建时生成绑定，生成文件放在构建目录，不提交、不手工维护。接入方式见 [Cordis 指南](../../docs/guide/cordis.md)。
 
 | 方向 | 原插件 | 消费方式 |
 | --- | --- | --- |
-| rutis 挂载 Cordis（主） | [counter.ts](../../interop/node/test/fixtures/counter.ts) | `ctx.plugin(bindings::Plugin::new(config))`，之后 `ctx.require::<bindings::Counter>()?` |
+| rutis 挂载 Cordis（主） | [counter.ts](../../node/rutis-runtime/test/fixtures/counter.ts) | `ctx.plugin(bindings::Plugin::new(config))`，之后 `ctx.require::<bindings::Counter>()?` |
 | Cordis 挂载 rutis（冻结） | [src/lib.rs](src/lib.rs) | `ctx.plugin(plugin(executable), config)`，之后 `ctx.counter.add(1)` |
 
 原插件没有协议导入或注解。

@@ -8,22 +8,22 @@ default-run = "native-mount-example"
 
 [dependencies]
 rutis = { path = "../../crates/rutis" }
-rutis-interop = { path = "../../crates/rutis-interop" }
+rutis-bridge = { path = "../../crates/rutis-bridge", features = ["cordis"] }
 serde_json = "1"
 tokio.workspace = true
 
 [build-dependencies]
-rutis-interop = { path = "../../crates/rutis-interop" }
+rutis-bridge = { path = "../../crates/rutis-bridge", features = ["cordis"] }
 
 # The Cordis plugin this example mounts: a TypeScript source fixture.
-[package.metadata.rutis-interop]
-npm = "../../interop/node"
-runtime = "../../interop/node"
+[package.metadata.rutis-cordis]
+npm = "../../node/rutis-runtime"
+runtime = "../../node/rutis-runtime"
 
-[package.metadata.rutis-interop.mounts.bindings]
-path = "../../interop/node/test/fixtures/counter.ts"
+[package.metadata.rutis-cordis.mounts.bindings]
+path = "../../node/rutis-runtime/test/fixtures/counter.ts"
 
 # Edge cases of the generated bindings, mounted by tests/edge.rs.
-[package.metadata.rutis-interop.mounts.edge]
-path = "../../interop/node/test/fixtures/edge.ts"
+[package.metadata.rutis-cordis.mounts.edge]
+path = "../../node/rutis-runtime/test/fixtures/edge.ts"
 provide = ["edgeHost"]

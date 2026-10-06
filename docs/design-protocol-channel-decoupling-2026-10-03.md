@@ -1,5 +1,8 @@
 # 网络栈：协议与通道解耦（设计稿）
 
+> 包结构已调整（2026-10-06）：`rutis-channel`、`rutis-interop`、`rutis-transport-*`、`rutis-runtime-local` 合并为 `rutis-bridge` 的模块（`channel`、`session`、`runtime`、`transport::*`、`cordis`），见 [面向开发者的包、工具与流程](design-developer-packages-2026-10-06.md)。下文保留设计时的 crate 名。
+
+
 状态：设计稿，未实现。修订日期：2026-10-05。
 依据：[兼容层设计](design-protocol-plugin-mount.md)、[挂载 Cordis 插件：需求](requirements-protocol-plugins.md)。
 使用方：[远程插件设计](design-remote-plugins-2026-10-03.md)（下称“远程稿”）。

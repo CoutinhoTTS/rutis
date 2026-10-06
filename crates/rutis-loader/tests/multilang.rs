@@ -9,13 +9,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::{Ctx, FiberState, FiberView};
-use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, HostDispatch};
+use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::session::{host_key, HostDispatch};
+use rutis_bridge::session::{Reply, Value as RpcValue};
 use rutis_loader::{
-    Chain, EntryStatus, InteropResolver, Layer, Loader, LoaderOptions, LoaderPlugin, Patch,
+    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
     RuntimeRowsPlugin, ServiceCatalog,
 };
-use rutis_runtime_local::LocalRuntime;
 use serde_json::{json, Value};
 
 // ── The plugins, once per language ──────────────────────────────
@@ -138,7 +138,7 @@ struct Probe(Arc<Mutex<Vec<String>>>);
 impl HostDispatch for Probe {
     fn invoke(&self, method: &str, args: RpcValue) -> Reply {
         assert_eq!(method, "record");
-        let [line]: [String; 1] = rutis_interop::decode_value(args)?;
+        let [line]: [String; 1] = rutis_bridge::session::decode_value(args)?;
         self.0.lock().unwrap().push(line);
         Ok(RpcValue::Undefined)
     }
@@ -181,8 +181,8 @@ impl HostDispatch for Llm {
     }
 }
 
-fn interop() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop")
+fn repo() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 /// Plugin files: Python modules in `py/`, JavaScript in `js/`.
@@ -199,8 +199,8 @@ fn write_plugins(dir: &Path) -> (PathBuf, PathBuf) {
     ] {
         std::fs::write(py.join(format!("{name}.py")), text).unwrap();
     }
-    let plugin = interop()
-        .join("node/src/plugin.mjs")
+    let plugin = repo()
+        .join("node/rutis/src/index.mjs")
         .canonicalize()
         .unwrap();
     let plugin = format!("file://{}", plugin.display());
@@ -242,10 +242,13 @@ async fn fixture() -> Fixture {
     for name in ["probe", "llm", "py_weather", "js_weather"] {
         catalog.register_shared(name);
     }
-    let node = LocalRuntime::node(interop().join("node"), interop().join("node/package.json"));
-    let python = LocalRuntime::python(interop().join("python"), &py);
-    let node_rows = Arc::new(InteropResolver::node(node.handle()).with_catalog(&catalog));
-    let python_rows = Arc::new(InteropResolver::modules(python.handle()).with_catalog(&catalog));
+    let node = LocalRuntime::node(
+        repo().join("node/rutis-runtime"),
+        repo().join("node/rutis-runtime/package.json"),
+    );
+    let python = LocalRuntime::python(&py).python_path(repo().join("python/rutis"));
+    let node_rows = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
+    let python_rows = Arc::new(RuntimeResolver::modules(python.handle()).with_catalog(&catalog));
     let node = root.plugin(node);
     let python = root.plugin(python);
     let options = LoaderOptions {

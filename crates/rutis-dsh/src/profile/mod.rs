@@ -86,9 +86,9 @@ pub fn loader_options(context: &ProfileContext) -> LoaderOptions {
 }
 
 /// `package.json` of the npm project this binary's dsh installation is
-/// (`RUTIS_INTEROP_ROOT` when set), where bundles resolve from first.
+/// (`RUTIS_CORDIS_ROOT` when set), where bundles resolve from first.
 pub fn install_anchor() -> std::path::PathBuf {
-    rutis_interop::npm_root(concat!(env!("CARGO_MANIFEST_DIR"), "/dsh")).join("package.json")
+    rutis_bridge::cordis::npm_root(concat!(env!("CARGO_MANIFEST_DIR"), "/dsh")).join("package.json")
 }
 
 /// The composed rows of `profile` as the entry-list YAML (`!!js` kept), the

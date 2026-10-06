@@ -13,9 +13,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, Plugin, PluginFactory, TypeKey};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::session::{settle, Value as RpcValue};
 use rutis_bridge::{peer_key, Peer};
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{settle, Value as RpcValue};
 use serde_json::{json, Value};
 
 use crate::{Loader, LoaderError, Resolved, Resolver};
@@ -111,13 +111,15 @@ impl Resolver for PeerResolver {
             };
             let described = match described.and_then(RpcValue::json) {
                 Ok(described) => described,
-                Err(rutis_interop::Error::Remote { name: kind, .. }) if kind == "NotFound" => {
+                Err(rutis_bridge::session::Error::Remote { name: kind, .. })
+                    if kind == "NotFound" =>
+                {
                     return Err(LoaderError::NotFound {
                         name: name.to_owned(),
                     })
                 }
                 // The session ended meanwhile: wait for the peer again.
-                Err(rutis_interop::Error::Transport(_)) => {
+                Err(rutis_bridge::session::Error::Transport(_)) => {
                     return Ok(self.offline(name, &peer_id, plugin, "the peer went away"))
                 }
                 Err(error) => {
@@ -337,7 +339,7 @@ impl Plugin for PeerRow {
                     };
                     match unloaded {
                         // A link that ended took the hosted plugin with it.
-                        Ok(_) | Err(rutis_interop::Error::Transport(_)) => Ok(()),
+                        Ok(_) | Err(rutis_bridge::session::Error::Transport(_)) => Ok(()),
                         Err(error) => Err(failed(error)),
                     }
                 })

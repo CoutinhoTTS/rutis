@@ -6,7 +6,7 @@
     "test": "node --import tsx --test --test-isolation=none test/*.test.ts"
   },
   "dependencies": {
-    "@arcships/rutis-interop": "file:../../../interop/node",
+    "@arcships/rutis-runtime": "file:../../../node/rutis-runtime",
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/cordis-plugin-loader": "1.0.5",
     "@deepseek-ai/dsh": "0.2.0-rc.2",

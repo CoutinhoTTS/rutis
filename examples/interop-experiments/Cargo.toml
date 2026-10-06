@@ -8,19 +8,19 @@ description = "Experiments on mounted Cordis plugins: crashes of the Node proces
 
 [dependencies]
 rutis = { path = "../../crates/rutis" }
-rutis-interop = { path = "../../crates/rutis-interop" }
+rutis-bridge = { path = "../../crates/rutis-bridge", features = ["cordis"] }
 serde_json = "1"
 tokio.workspace = true
 
 [build-dependencies]
-rutis-interop = { path = "../../crates/rutis-interop" }
+rutis-bridge = { path = "../../crates/rutis-bridge", features = ["cordis"] }
 
-[package.metadata.rutis-interop]
-npm = "../../interop/node"
-runtime = "../../interop/node"
+[package.metadata.rutis-cordis]
+npm = "../../node/rutis-runtime"
+runtime = "../../node/rutis-runtime"
 
-[package.metadata.rutis-interop.mounts.fragile]
-path = "../../interop/node/test/fixtures/fragile.ts"
+[package.metadata.rutis-cordis.mounts.fragile]
+path = "../../node/rutis-runtime/test/fixtures/fragile.ts"
 
-[package.metadata.rutis-interop.mounts.bench]
-path = "../../interop/node/test/fixtures/bench.ts"
+[package.metadata.rutis-cordis.mounts.bench]
+path = "../../node/rutis-runtime/test/fixtures/bench.ts"

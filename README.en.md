@@ -180,7 +180,7 @@ Synchronous and asynchronous `apply` panics become plugin errors; a `check()` pa
 | Project | Description |
 |---|---|
 | [rutis-agent](crates/rutis-agent) / [rutis-cli](crates/rutis-cli) | A minimal coding agent sample: aimux `LanguageModel` service + tool plugin + streaming driver plugin + ratatui TUI; `cargo install rutis-cli` |
-| [rutis-dsh](crates/rutis-dsh) | Runs dsh in a rutis host: `rutis-dsh up` starts dsh's full web UI through [rutis-interop](crates/rutis-interop), with model calls served by aimux in the same process; the dsh agent loop can also be driven from Rust without a UI |
+| [rutis-dsh](crates/rutis-dsh) | Runs dsh in a rutis host: `rutis-dsh up` starts dsh's full web UI through [rutis-bridge](crates/rutis-bridge), with model calls served by aimux in the same process; the dsh agent loop can also be driven from Rust without a UI |
 | [aimux-llm](crates/aimux-llm) | A standalone LLM service plugin: apply → registers the `llm` service, 329 providers |
 
 Sample commands inside this repo:
@@ -200,7 +200,7 @@ npm --prefix crates/rutis-dsh/dsh ci && cargo run -p rutis-dsh -- up   # dsh web
 
 **Kernel & paradigm** — [kernel design (D1–D31 decision table)](docs/design-rust-port.md) · [96-spec parity ruling](docs/cordis-spec-parity-2026-08-18.md) · [hot update + dynamic events (design / three review rounds / post-mortem / audit)](docs/design-config-hot-update-and-dynamic-events-2026-09-21.md)
 
-**Mounting Cordis / dsh** — [rutis-interop guide (Chinese)](crates/rutis-interop/README.md) · [requirements](docs/requirements-protocol-plugins.md) · [design](docs/design-protocol-plugin-mount.md) · [roadmap](docs/roadmap-native-plugin-mount.md) · [rutis-dsh](crates/rutis-dsh/README.md) · history: [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
+**Mounting Cordis / dsh** — [rutis-bridge guide (Chinese)](crates/rutis-bridge/README.md) · [requirements](docs/requirements-protocol-plugins.md) · [design](docs/design-protocol-plugin-mount.md) · [roadmap](docs/roadmap-native-plugin-mount.md) · [rutis-dsh](crates/rutis-dsh/README.md) · history: [dsh bridge v1 design](docs/design-dsh-bridge-2026-08-21.md) · [aimux-llm plugin ruling](docs/decision-aimux-llm-plugin-2026-08-23.md)
 
 **Agent** — [agent framework](docs/design-min-agent-2026-08-18.md) · [verification & TUI](docs/design-agent-verification-tui-2026-08-18.md) · [minimal mode](docs/design-minimal-mode-2026-08-18.md)
 

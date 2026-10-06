@@ -1,0 +1,37 @@
+{
+  "name": "@arcships/rutis",
+  "version": "0.3.0",
+  "description": "Write rutis plugins in JavaScript or TypeScript: definePlugin, types and a test kit",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arcships/rutis.git",
+    "directory": "node/rutis"
+  },
+  "homepage": "https://github.com/arcships/rutis/tree/main/docs/guide#readme",
+  "keywords": ["rutis", "plugin", "rutis-plugin"],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./testing": {
+      "types": "./src/testing.d.ts",
+      "default": "./src/testing.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

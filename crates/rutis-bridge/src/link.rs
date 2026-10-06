@@ -10,10 +10,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::channel::{Channel, Closer, ConnectError, PeerId};
+use crate::session::rpc::{Connection, Endpoint, Format};
+use crate::session::{Error, Handshake};
 use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, Plugin, TypeKey};
-use rutis_channel::{Channel, Closer, ConnectError, PeerId};
-use rutis_interop::rpc::{Connection, Endpoint, Format};
-use rutis_interop::{Error, Handshake};
 use tokio::sync::{mpsc, watch};
 
 use crate::peer::{Operations, Peer};
@@ -21,7 +21,7 @@ use crate::{identity_key, peer_key, transport_key, Dial, Identity, Registration,
 
 /// The session protocol links speak, as a transport subprotocol.
 pub fn protocol() -> String {
-    format!("rutis.{}", rutis_interop::ENDPOINT_PROTOCOL)
+    format!("rutis.{}", crate::session::ENDPOINT_PROTOCOL)
 }
 
 /// How the link reaches its far end.

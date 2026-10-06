@@ -1,0 +1,23 @@
+# The rutis-host binary as a Python package (a wheel per platform, built by
+# maturin): `uvx rutis-host`, or `uv add --dev rutis-host` in a plugin
+# project. It depends on rutis, so the Python runtime is there too.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rutis-host"
+description = "rutis-host, a rutis host that needs no Rust: run and develop rutis plugins written in Python, TypeScript and JavaScript"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = ["rutis>=0.3,<0.4"]
+dynamic = ["version"]
+keywords = ["rutis", "plugin", "host"]
+
+[project.urls]
+Homepage = "https://github.com/arcships/rutis"
+Documentation = "https://github.com/arcships/rutis/tree/main/docs/guide"
+
+[tool.maturin]
+bindings = "bin"

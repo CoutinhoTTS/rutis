@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use rutis_channel::{Channel, PeerId};
+use crate::channel::{Channel, PeerId};
 
 use crate::{Identity, Presented};
 
@@ -252,17 +252,17 @@ mod tests {
 
     fn channel() -> Channel {
         struct Nothing;
-        impl rutis_channel::Sender for Nothing {
-            fn send(&mut self, _: &[u8]) -> Result<(), rutis_channel::ChannelError> {
+        impl crate::channel::Sender for Nothing {
+            fn send(&mut self, _: &[u8]) -> Result<(), crate::channel::ChannelError> {
                 Ok(())
             }
         }
-        impl rutis_channel::Receiver for Nothing {
-            fn recv(&mut self) -> Result<Option<Vec<u8>>, rutis_channel::ChannelError> {
+        impl crate::channel::Receiver for Nothing {
+            fn recv(&mut self) -> Result<Option<Vec<u8>>, crate::channel::ChannelError> {
                 Ok(None)
             }
         }
-        impl rutis_channel::Closer for Nothing {
+        impl crate::channel::Closer for Nothing {
             fn close(&self, _: &str) {}
         }
         Channel {

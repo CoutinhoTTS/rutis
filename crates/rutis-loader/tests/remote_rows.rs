@@ -3,7 +3,7 @@
 //! link. The loader manages its rows as it does a local runtime's: the
 //! rows inject a Rust service and provide one back, and they stop when the
 //! runtime goes away. Needs a Python with `websockets`
-//! (RUTIS_INTEROP_PYTHON, else python3).
+//! (RUTIS_PYTHON, else python3).
 #![cfg(all(unix, feature = "python"))]
 
 use std::path::Path;
@@ -11,16 +11,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::Ctx;
-use rutis_bridge::{
-    Credential, IdentityPlugin, LinkConfig, LinkPlugin, RuntimeAccessPlugin, StaticIdentity,
-};
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, HostDispatch, RuntimePlugin};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::runtime::RuntimeAccessPlugin;
+use rutis_bridge::runtime::RuntimePlugin;
+use rutis_bridge::session::{host_key, HostDispatch};
+use rutis_bridge::session::{Reply, Value as RpcValue};
+use rutis_bridge::transport::websocket::{Config, WebSocketPlugin};
+use rutis_bridge::{Credential, IdentityPlugin, LinkConfig, LinkPlugin, StaticIdentity};
 use rutis_loader::{
-    Chain, InteropResolver, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin,
+    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
 };
-use rutis_transport_websocket::{Config, WebSocketPlugin};
 use serde_json::{json, Value};
 use tokio::io::AsyncBufReadExt;
 
@@ -77,14 +77,14 @@ async fn eventually<T>(mut check: impl FnMut() -> Option<T>, what: &str) -> T {
 
 /// Start the remote runtime: `gpu`, accepting `main` with a token.
 async fn remote_python(project: &Path) -> (tokio::process::Child, String) {
-    let python = std::env::var("RUTIS_INTEROP_PYTHON").unwrap_or_else(|_| "python3".into());
-    let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/python");
+    let python = std::env::var("RUTIS_PYTHON").unwrap_or_else(|_| "python3".into());
+    let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/rutis");
     let mut child = tokio::process::Command::new(python)
-        .args(["-m", "rutis_runtime", "listen:ws://127.0.0.1:0/rutis"])
+        .args(["-m", "rutis", "listen:ws://127.0.0.1:0/rutis"])
         .args(["--id", "gpu", "--peer", "main"])
         .arg(project)
         .env("PYTHONPATH", sdk)
-        .env("RUTIS_INTEROP_TOKEN", "main-token")
+        .env("RUTIS_TOKEN", "main-token")
         .current_dir(project)
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -97,7 +97,7 @@ async fn remote_python(project: &Path) -> (tokio::process::Child, String) {
             .await
             .unwrap()
             .expect("the runtime's address");
-        if let Some(address) = line.strip_prefix("rutis-interop: listening on ") {
+        if let Some(address) = line.strip_prefix("rutis: listening on ") {
             break address.to_owned();
         }
     };
@@ -129,7 +129,7 @@ async fn a_remote_python_runtime_runs_loader_rows() {
     root.plugin(link);
     root.plugin(RuntimeAccessPlugin::new(id("gpu"), "py"));
     let python = RuntimePlugin::remote("py");
-    let rows = Arc::new(InteropResolver::modules(python.handle()));
+    let rows = Arc::new(RuntimeResolver::modules(python.handle()));
     let handle = python.handle();
     root.plugin(python);
     let plugin_loader = LoaderPlugin::new(
@@ -209,14 +209,14 @@ async fn a_remote_node_runtime_resolves_and_runs_npm_rows() {
         "export const inject = ['clock']\nexport function apply(ctx) {\n  ctx.provide('weather', { today() { return `node at ${ctx.clock.now()}` } })\n}\n",
     )
     .unwrap();
-    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/node");
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../node/rutis-runtime");
     let mut child = tokio::process::Command::new("node")
         .args(["--import", "tsx"])
         .arg(runtime.join("src/runner.mjs"))
         .arg("listen:ws://127.0.0.1:0/rutis")
         .args(["--id", "edge", "--peer", "main"])
         .arg(&anchor)
-        .env("RUTIS_INTEROP_TOKEN", "main-token")
+        .env("RUTIS_TOKEN", "main-token")
         .current_dir(&runtime)
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -229,7 +229,7 @@ async fn a_remote_node_runtime_resolves_and_runs_npm_rows() {
             .await
             .unwrap()
             .expect("the runtime's address");
-        if let Some(address) = line.strip_prefix("rutis-interop: listening on ") {
+        if let Some(address) = line.strip_prefix("rutis: listening on ") {
             break address.to_owned();
         }
     };
@@ -253,7 +253,7 @@ async fn a_remote_node_runtime_resolves_and_runs_npm_rows() {
     let node = RuntimePlugin::remote("node");
     let mut catalog = rutis_loader::ServiceCatalog::new();
     catalog.register_shared("clock");
-    let rows = Arc::new(InteropResolver::node(node.handle()).with_catalog(&catalog));
+    let rows = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
     let options = LoaderOptions {
         catalog,
@@ -338,7 +338,7 @@ async fn remote_rows_share_the_runtime_session() {
     ));
     root.plugin(RuntimeAccessPlugin::new(id("gpu"), "py"));
     let python = RuntimePlugin::remote("py");
-    let rows = Arc::new(InteropResolver::modules(python.handle()));
+    let rows = Arc::new(RuntimeResolver::modules(python.handle()));
     root.plugin(python);
     let plugin_loader = LoaderPlugin::new(
         Chain::new().with_shared(rows.clone()),

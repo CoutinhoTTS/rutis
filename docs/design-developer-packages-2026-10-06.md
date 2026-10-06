@@ -1,6 +1,6 @@
 # 面向开发者的包、工具与流程
 
-日期：2026-10-06。状态：设计，待确认。
+日期：2026-10-06。状态：已实施（第 14 节记录与设计的出入）。
 
 ## 1. 为什么现在做
 
@@ -80,7 +80,7 @@ Rust 四个，Node 三个，Python 两个。
 
 SDK 必须单独成包：插件作者不应该因为写一个插件而装上 Cordis、tsx、ws。`definePlugin` 用 `Symbol.for` 做标记（现在就是如此），SDK 和运行时之间不需要共享模块实例。
 
-`@arcships/rutis-interop` 在 npm 上标记弃用，说明指向新包。
+直接移除旧 `@arcships/rutis-interop` 包目录、别名与发布入口；不提供迁移层或旧包弃用发布步骤。
 
 ### 4.4 Python
 
@@ -103,6 +103,9 @@ SDK 在插件上打一个整数标记 `api`（从 1 开始），表示插件按�
 
 - 插件 API 的版本与包版本无关，只在插件看到的接口（`ctx` 的方法、声明格式、值的传递规则）发生不兼容变化时才增加。
 - 不经过 SDK 的 Cordis 插件视为 API 1。
+- 运行时只支持一个值：`PLUGIN_API`（当前为 1）。`api > PLUGIN_API` 的插件被拒绝，不保留对历史版本的支持。
+- `api` 的载体：Node 是 `definePlugin` 返回对象的 `api` 字段；Python 是 `Plugin.api`。
+- 与 `rutisProtocol` 的关系：`rutisProtocol` 是进程间线格式版本，握手时检查；`api` 是插件可见接口版本，加载时检查。两者独立递增。
 
 ### 5.2 Node 插件
 
@@ -164,7 +167,7 @@ SDK 在插件上打一个整数标记 `api`（从 1 开始），表示插件按�
   - `py.python` 是解释器，默认依次尝试 `$VIRTUAL_ENV/bin/python`、`./.venv/bin/python`、`python3`，`rutis` 必须装在这个环境里。
   - 缺少运行时包时，启动失败并给出安装命令。
 - **`rows`**：沿用 rutis-loader 的行格式（`isolate`、`inject`、`peer:` 行、`rutis-bridge/peer` 节点行等不变）。
-- **跨语言共享的服务名**：任何一行在 `provides` 里声明的名字自动登记为共享；需要额外共享的名字写在 `"shared": [...]`。插件作者不需要理解 `register_shared`。
+- **跨语言共享的服务名**：任何一行在 `provides` 里声明的名字自动登记为共享（`ServiceCatalog::share_by_name()`），没有额外的 `shared` 字段。插件作者不需要理解 `register_shared`。
 - **凭据**不写在配置里，从环境变量读取：`RUTIS_INTEROP_TOKEN` 等改名为 `RUTIS_TOKEN` / `RUTIS_CA` / `RUTIS_CERT` / `RUTIS_KEY`。
 - 通用宿主自己不提供 Rust 服务；插件之间共享服务，或者经 link 使用其他节点的服务。
 
@@ -256,14 +259,14 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 
 - **发布列车**：除内核 `rutis` 和 dylib 相关的 crate 之外，第 4 节的所有包使用同一个版本号，一次一起发布。用户只需记住"用同一个版本"。
 - **兼容不靠版本号对齐**：会话协议在握手时检查，插件 API 由 `api` 标记检查。列车只是让版本号易于理解。
-- **新名字从 0.1.0 开始**：`rutis-bridge` 本来就还没发布过；`rutis-loader` 继续它自己的序号，并入列车后取列车的版本号。
+- **列车从 0.3.0 开始**：`rutis-loader` 0.2 已发布，合并后的破坏性调整使用 0.3；新名字与 loader 一起采用 0.3.0。
 - **tag**：列车用 `vX.Y.Z`（最常见的写法）；现在占用 `v*` 的 `rutis-cli` 二进制发布改为 `cli-vX.Y.Z`；内核保持 `rutis-vX.Y.Z`。
 - **一个工作流**：`release.yml` 按依赖顺序发布 crate（crates.io 已有的版本跳过），然后发布 npm 包（各平台的宿主二进制包先发）和 PyPI 包，最后上传 GitHub Release 的二进制。它取代 #147 里的 `publish-bridge.yml` 以及现有的 `publish-interop.yml`、`publish-loader.yml`。
-- **旧包**：`rutis-interop` 不再发新版本。npm 上标记弃用；crates.io 上发布最后一个只含 README 的版本，指向 `rutis-bridge`。
+- **旧包直接移除**：`rutis-interop` 没有需要支持的下游，不保留兼容层、迁移文档或旧包发布入口，不发布 README-only 终版，也不执行 npm deprecate。列车只发布新结构的包；不删除或 yank 注册表上的历史版本。
 
 ### 9.2 插件作者的包
 
-- 遵循各自生态的 semver，依赖 SDK 的主版本（例如 `@arcships/rutis@^0.1`），由插件 API 标记兜底兼容。
+- 遵循各自生态的 semver，依赖 SDK 的主版本（例如 `@arcships/rutis@^0.3`），由插件 API 标记兜底兼容。
 - 模板自带 CI：测试、`rutis-host check`、打 tag 时用 trusted publishing 发布到 npm 或 PyPI。
 
 ## 10. 环境要求
@@ -296,7 +299,7 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 | P0 合并与改名 | Rust：合并为 `rutis-bridge`（features 见 4.2），删除旧 crate 与弃用接口；Node：拆出 `@arcships/rutis`，运行时改名为 `@arcships/rutis-runtime`；Python：包名与导入名改为 `rutis`；环境变量改名 | 所有现有测试在新结构下通过；每个 feature 组合都能单独编译 |
 | P1 SDK | 插件 API 标记与检查；测试工具（两种语言）；类型；Python 入口点与版本；Node 叶子插件按行重载；验证 Node 24 | SDK 有自己的测试；`load(...)` 能测仓库里的示例插件 |
 | P2 宿主 | `rutis-host` 的 run / dev / check / new；`rutis.json`；两套模板；运行时包缺失时的诊断 | 用模板新建的插件不写 Rust 就能 `dev`、测试、`check` |
-| P3 分发与发布 | 发布列车工作流；npm 平台包；maturin wheel；旧包弃用 | 在测试用的 registry 上（Verdaccio、TestPyPI、crates.io dry run）走通一次完整发布 |
+| P3 分发与发布 | 发布列车工作流；npm 平台包；maturin wheel；删除旧包发布入口 | 在测试用的 registry 上（Verdaccio、TestPyPI、crates.io dry run）走通一次完整发布 |
 | P4 文档 | 第 11 节的指南与各包 README | 按教程从零走一遍，不看源码也能完成 |
 | 之后 | `rutis-host dev --join`；Windows 二进制 | — |
 
@@ -313,3 +316,19 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 | 5 | 插件 API 用独立的整数版本，从 1 开始 | 包版本会因为与插件无关的修改而变化，不适合用来判断插件能否加载 |
 | 6 | 各包 README 用英文，指南先写中文 | registry 上的读者面向整个生态；指南先保证质量，再翻译 |
 | 7 | P0–P3 完成后第一次发布；在此之前不发布 interop 0.3 / bridge 0.1 | 避免刚发布就改名；名字一旦发布就很难收回 |
+
+## 14. 实施记录
+
+按本设计一次实施完成。与上文的出入：
+
+- **版本统一为 0.3.0**：`rutis-loader` 0.2 已发布；所有列车包及新名字采用 0.3.0，使用示例与迁移文档同步。
+- **共享服务名**：`rutis-host` 用 `ServiceCatalog::share_by_name()` 让所有名字按名字共享，不需要 `"shared"` 字段，配置里去掉了它。
+- **开发模式不开开发通道**（`rutis-dev`）：重载由 `rutis-host dev` 自己监听文件完成；需要时再加。
+- **Python 项目在开发模式下按入口点的模块加载**（`py:<模块>`），这样项目不必先安装到 venv；发布后宿主仍按入口点名加载。
+- **相对路径的行**：`rutis.json` 和 `rutis.dev.json` 里 `./…`、`../…` 的行名相对于文件所在目录。
+- **远程运行时**：`rutis.json` 的 `runtimes.remote` 声明别处的运行时（Python 行名 `<名字>:<模块>`；Node 行按包名在它那里解析）。
+- **Node 24**：用 Node 24 跑通了所有 Node 测试，`engines` 放宽到 `>=24`；CI 在 Linux 上用 24，在 macOS 上用 26。
+- **目录**：`node/rutis`（SDK）、`node/rutis-runtime`、`node/rutis-host`、`node/baseline`、`python/rutis`；`rutis-host` 的 maturin 配置在 `crates/rutis-host/pyproject.toml`。
+- **发布**：`release.yml`（tag `vX.Y.Z`）取代 `publish-interop.yml`、`publish-loader.yml` 和 #147 的 `publish-bridge.yml`；`rutis-cli` 的二进制发布改为 `release-cli.yml`（tag `cli-vX.Y.Z`）。`scripts/train.mjs` 核对列车版本。
+- **tokio 的 `signal` feature 不能在工作区里打开**：它会让 `rutis-dylib` 的示例链接失败（标准库出现两份）。`rutis-host` 和冒烟示例不处理 Ctrl-C，进程按默认行为结束，运行时进程随通道关闭而结束。
+
