@@ -18,7 +18,7 @@
 3. 发布前在两台机器上跑一次冒烟（下文）。
 4. 打 tag `vX.Y.Z` 并推送。release.yml：核对版本 → 构建四个平台的二进制和 wheel → 发布 crate、npm 包、PyPI 包 → 创建 GitHub Release（说明取自 `docs/releases/X.Y.Z.en.md`，打 tag 前要写好）。各步只发布注册表里还没有的版本，中途失败时修好后重新运行即可。
 
-需要的配置：GitHub environment `release`（`CARGO_TOKEN`、`NPM_TOKEN`）和 `pypi`（PyPI 上为 `rutis`、`rutis-host` 配置 trusted publisher，指向 release.yml）。
+需要的配置：GitHub environment `release`（`CARGO_TOKEN`、`NPM_TOKEN`）、`pypi` 和 `pypi-host`。PyPI 上 `rutis` 的 trusted publisher 指向 release.yml 与 environment `pypi`，`rutis-host` 的指向 environment `pypi-host`：两个项目的 publisher 不能完全相同，否则一次发布拿到的令牌只对其中一个有效。
 
 插件 API（`PLUGIN_API`，SDK 与运行时各有一份）只在插件看到的接口不兼容时增加；会话协议版本（`rutisProtocol` 与 `rutis_bridge::session::PROTOCOL`）在线格式不兼容时增加。
 

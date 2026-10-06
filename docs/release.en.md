@@ -18,7 +18,7 @@ Except for the `rutis` core (`rutis-v*`, `publish-rutis.yml`), `rutis-cli` (`cli
 3. Run the smoke test on two machines before publishing (see below).
 4. Create and push a tag such as `vX.Y.Z`. `release.yml` checks versions, builds binaries and wheels for four platforms, publishes crates/npm/PyPI packages, and creates a GitHub Release (its notes come from `docs/releases/X.Y.Z.en.md`, which must exist before tagging). Each step skips versions already present in its registry, so after fixing a mid-release failure you can rerun it.
 
-Required configuration: GitHub environment `release` with `CARGO_TOKEN` and `NPM_TOKEN`, and environment `pypi` with trusted publishers configured on PyPI for `rutis` and `rutis-host`, pointing to `release.yml`.
+Required configuration: GitHub environment `release` with `CARGO_TOKEN` and `NPM_TOKEN`, and environments `pypi` and `pypi-host`. On PyPI, the trusted publisher of `rutis` points to `release.yml` with environment `pypi`, and that of `rutis-host` to environment `pypi-host`: the two must differ, or a release gets a token valid for only one of them.
 
 Increment `PLUGIN_API` (present in both the SDK and runtime) only when the interface visible to plugins becomes incompatible. Increment the session protocol version (`rutisProtocol` and `rutis_bridge::session::PROTOCOL`) when the wire format becomes incompatible.
 
