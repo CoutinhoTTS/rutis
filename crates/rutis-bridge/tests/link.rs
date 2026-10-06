@@ -284,6 +284,15 @@ async fn failures_are_retried_by_category() {
     )
     .await;
 
+    // app() installs plugins but does not wait for the listener to register.
+    // Before registration a dial is Retryable, regardless of its credentials.
+    state(
+        &_main.states,
+        |s| matches!(s, LinkState::Connecting),
+        "the listener registration",
+    )
+    .await;
+
     // A wrong token: slow retries, reported as an authentication failure.
     let guessing = app(
         &transport,

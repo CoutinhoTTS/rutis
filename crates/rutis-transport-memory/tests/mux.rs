@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use rutis::{BoxFuture, Ctx};
 use rutis_bridge::{
-    peer_key, transport_key, Credential, Dial, IdentityPlugin, LinkConfig, LinkPlugin, Peer,
-    Presented, Refusal, Registered, Registration, RegistrationError, Registrations, Retry,
+    peer_key, transport_key, Credential, Dial, Failure, IdentityPlugin, LinkConfig, LinkPlugin,
+    Peer, Presented, Refusal, Registered, Registration, RegistrationError, Registrations, Retry,
     StaticIdentity, Transport,
 };
 use rutis_channel::{
@@ -38,6 +38,7 @@ enum Frame {
     },
     Refused {
         channel: u32,
+        failure: Failure,
         reason: String,
     },
     Data {
@@ -66,7 +67,19 @@ impl Frame {
                 format!("{listener}\n{token}\n{protocol}").into_bytes(),
             ),
             Frame::Accepted { channel, peer } => (1, *channel, peer.clone().into_bytes()),
-            Frame::Refused { channel, reason } => (2, *channel, reason.clone().into_bytes()),
+            Frame::Refused {
+                channel,
+                failure,
+                reason,
+            } => {
+                let mut rest = vec![match failure {
+                    Failure::Retryable => 0,
+                    Failure::AuthRejected => 1,
+                    Failure::Incompatible => 2,
+                }];
+                rest.extend_from_slice(reason.as_bytes());
+                (2, *channel, rest)
+            }
             Frame::Data { channel, payload } => (3, *channel, payload.clone()),
             Frame::Credit { channel } => (4, *channel, Vec::new()),
             Frame::Close { channel } => (5, *channel, Vec::new()),
@@ -98,7 +111,13 @@ impl Frame {
             },
             2 => Frame::Refused {
                 channel,
-                reason: text(),
+                failure: match rest[0] {
+                    0 => Failure::Retryable,
+                    1 => Failure::AuthRejected,
+                    2 => Failure::Incompatible,
+                    _ => panic!("invalid refusal failure"),
+                },
+                reason: String::from_utf8(rest[1..].to_vec()).unwrap(),
             },
             3 => Frame::Data {
                 channel,
@@ -106,6 +125,41 @@ impl Frame {
             },
             4 => Frame::Credit { channel },
             _ => Frame::Close { channel },
+        }
+    }
+}
+
+#[test]
+fn refusal_classification_is_independent_of_diagnostics() {
+    for failure in [
+        Failure::Retryable,
+        Failure::AuthRejected,
+        Failure::Incompatible,
+    ] {
+        for reason in [
+            "protocol",
+            "not listening",
+            "not accepted",
+            "",
+            "诊断\nchanged",
+        ] {
+            let encoded = Frame::Refused {
+                channel: 42,
+                failure,
+                reason: reason.into(),
+            }
+            .encode();
+            let Frame::Refused {
+                channel,
+                failure: decoded_failure,
+                reason: decoded_reason,
+            } = Frame::decode(&encoded)
+            else {
+                panic!("expected refusal");
+            };
+            assert_eq!(channel, 42);
+            assert_eq!(decoded_failure, failure);
+            assert_eq!(decoded_reason, reason);
         }
     }
 }
@@ -136,7 +190,7 @@ struct Physical {
     sender: Mutex<Box<dyn Sender>>,
     closer: Arc<dyn Closer>,
     channels: Mutex<HashMap<u32, Arc<Logical>>>,
-    pending: Mutex<HashMap<u32, std::sync::mpsc::Sender<Result<String, String>>>>,
+    pending: Mutex<HashMap<u32, std::sync::mpsc::Sender<Result<String, (Failure, String)>>>>,
     next: AtomicU32,
     alive: Mutex<bool>,
 }
@@ -153,7 +207,7 @@ impl Physical {
             logical.end(Err(reason.to_owned()));
         }
         for (_, waiting) in self.pending.lock().unwrap().drain() {
-            let _ = waiting.send(Err(reason.to_owned()));
+            let _ = waiting.send(Err((Failure::AuthRejected, reason.to_owned())));
         }
     }
 
@@ -345,9 +399,13 @@ impl Mux {
                             let _ = waiting.send(Ok(peer));
                         }
                     }
-                    Frame::Refused { channel, reason } => {
+                    Frame::Refused {
+                        channel,
+                        failure,
+                        reason,
+                    } => {
                         if let Some(waiting) = reading.pending.lock().unwrap().remove(&channel) {
-                            let _ = waiting.send(Err(reason));
+                            let _ = waiting.send(Err((failure, reason)));
                         }
                     }
                     Frame::Open {
@@ -380,6 +438,7 @@ impl Mux {
                             Ok(_) => {
                                 let _ = reading.send(Frame::Refused {
                                     channel,
+                                    failure: Failure::Incompatible,
                                     reason: "protocol".into(),
                                 });
                             }
@@ -388,12 +447,14 @@ impl Mux {
                             Err(Refusal::NotListening) => {
                                 let _ = reading.send(Frame::Refused {
                                     channel,
+                                    failure: Failure::Retryable,
                                     reason: "not listening".into(),
                                 });
                             }
                             Err(_) => {
                                 let _ = reading.send(Frame::Refused {
                                     channel,
+                                    failure: Failure::AuthRejected,
                                     reason: "not accepted".into(),
                                 });
                             }
@@ -451,17 +512,13 @@ impl Transport for Mux {
                     .unwrap();
             match answer {
                 Ok(Ok(_peer)) => Ok(channel),
-                Ok(Err(reason)) if reason == "protocol" => {
+                Ok(Err((failure, reason))) => {
                     physical.channels.lock().unwrap().remove(&id);
-                    Err(ConnectError::Incompatible { reason })
-                }
-                Ok(Err(reason)) if reason == "not listening" => {
-                    physical.channels.lock().unwrap().remove(&id);
-                    Err(ConnectError::Retryable { reason })
-                }
-                Ok(Err(reason)) => {
-                    physical.channels.lock().unwrap().remove(&id);
-                    Err(ConnectError::AuthRejected { reason })
+                    Err(match failure {
+                        Failure::Retryable => ConnectError::Retryable { reason },
+                        Failure::AuthRejected => ConnectError::AuthRejected { reason },
+                        Failure::Incompatible => ConnectError::Incompatible { reason },
+                    })
                 }
                 Err(_) => Err(ConnectError::Retryable {
                     reason: "no answer".into(),

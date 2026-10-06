@@ -1,5 +1,7 @@
 # 发布：多语言插件与网络栈（interop 0.3、loader 0.2、bridge 0.1）
 
+> 发布暂停：#148 / #149 的开发者包方案替代本文的独立包发布方案。#147 可以先合并以保留修复和验证，但不要按下列旧 tag 发布；最终发布以开发者包方案的版本和工作流为准。
+
 ## 发布哪些包
 
 | 包 | 版本 | tag | 工作流 |
@@ -19,7 +21,7 @@ crates.io 要求依赖（包括可选依赖）先发布，所以按依赖顺序�
 2. `bridge-v0.1.0`：按顺序发 bridge、memory、local、websocket、runtime-local；crates.io 已有的版本跳过。它会先检查 rutis、rutis-channel、rutis-interop 已在 crates.io 上。
 3. `loader-v0.2.0`：它的 `peer` feature 依赖 rutis-bridge，工作流同样先检查。
 
-工作流只在 crates.io 没有该版本时发布，中途失败后修好重打同一个 tag 即可（先删掉远端 tag）。
+仅 publish-bridge 对列出的 crate 跳过已发布版本；publish-interop 和 publish-loader 不保证整条流程可重复执行。失败后先核对注册表与成功步骤，不删除或移动已发布 tag，也不直接重跑整条发布链。
 
 ## 发布前的验证
 
