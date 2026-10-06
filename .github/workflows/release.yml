@@ -161,6 +161,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  # One job per PyPI project, each in its own environment: PyPI matches a
+  # trusted-publishing token to a single publisher, so two projects with
+  # identical publishers (same workflow and environment) cannot share a job.
   pypi:
     needs: [binaries, wheels]
     runs-on: ubuntu-24.04
@@ -171,18 +174,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-*
-          merge-multiple: true
-          path: dist
       - run: uv build python/rutis --out-dir dist
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
 
+  pypi-host:
+    needs: [binaries, wheels]
+    runs-on: ubuntu-24.04
+    environment: pypi-host
+    permissions:
+      contents: read
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
   github:
-    needs: [crates, npm, pypi]
+    needs: [crates, npm, pypi, pypi-host]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
