@@ -6,15 +6,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Listener, Plugin, PluginFactory};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::session::{host_key, HostDispatch};
+use rutis_bridge::session::{settle, Reply, Value};
+use rutis_bridge::transport::memory::{MemoryPlugin, MemoryTransport};
 use rutis_bridge::{
     node_event, peer_key, Credential, Described, EventsPlugin, ExportPlugin, HostPlugin,
     IdentityPlugin, ImportPlugin, LinkConfig, LinkPlugin, NodeEvent, Peer, Retry, StaticCatalog,
     StaticIdentity,
 };
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{settle, Reply, Value};
-use rutis_interop::{host_key, HostDispatch};
-use rutis_transport_memory::{MemoryPlugin, MemoryTransport};
 use serde_json::{json, Value as Json};
 
 fn id(s: &str) -> PeerId {
@@ -82,7 +82,7 @@ impl HostDispatch for Clock {
         match method {
             "now" => Ok(json!(now).into()),
             "later" => Ok(Value::future(async move { Ok(json!(now + 1000).into()) })),
-            _ => Err(rutis_interop::Error::Value(method.into())),
+            _ => Err(rutis_bridge::session::Error::Value(method.into())),
         }
     }
     fn methods(&self) -> Option<Json> {
@@ -278,7 +278,9 @@ async fn a_host_loads_installed_plugins_for_its_peer() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(missing, rutis_interop::Error::Remote { ref name, .. } if name == "NotFound"));
+    assert!(
+        matches!(missing, rutis_bridge::session::Error::Remote { ref name, .. } if name == "NotFound")
+    );
     assert!(session
         .invoke_async(
             "",
@@ -700,7 +702,7 @@ async fn an_exporter_announces_again_to_a_new_offer_it_never_saw_withdrawn() {
         .register(
             "services",
             Arc::new(
-                move |_: &rutis_interop::rpc::Connection, _: &str, method: &str, _| {
+                move |_: &rutis_bridge::session::Connection, _: &str, method: &str, _| {
                     if method == "services.announce" {
                         count.fetch_add(1, Ordering::SeqCst);
                     }

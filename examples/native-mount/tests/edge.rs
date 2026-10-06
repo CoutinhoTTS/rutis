@@ -3,14 +3,18 @@
 //! versus undefined in parameters, fields and configuration; parameter
 //! names that match generated locals; unions of live objects.
 
-rutis_interop::include_mounts!();
+rutis_bridge::include_mounts!();
 
 use edge::{Edge, Input, JoinerHost, Left, Right};
 
 struct Host;
 impl JoinerHost for Host {
     // Named like the dispatcher's own locals once were.
-    fn call(&self, args: Vec<String>, suffix: String) -> Result<String, rutis_interop::Error> {
+    fn call(
+        &self,
+        args: Vec<String>,
+        suffix: String,
+    ) -> Result<String, rutis_bridge::session::Error> {
         Ok(format!("{}{suffix}", args.join("+")))
     }
 }

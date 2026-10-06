@@ -110,7 +110,7 @@ rutis-runtime-local = { version = "0.1", features = ["python"] }   # node 默认
 - `InteropResolver::modules`：按模块名加载的运行时（Python）的行，行名 `py:<模块名>`。
 - `Projection::withdraw`：撤销全部投影的服务并等使用者停下。
 - `rpc::caller`：当前正在分发的 `invoke` 来自哪个会话。
-- npm 包新增 `@arcships/rutis-interop/plugin`（`definePlugin`）；Python 包 `rutis_runtime`（本仓库 `interop/python`）。
+- npm 包新增 `@arcships/rutis-interop/plugin`（`definePlugin`）；Python 包 `rutis_runtime`（本仓库 `python/rutis`）。
 
 网络栈与远程运行时：
 

@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::channel::PeerId;
 use rutis::TypeKey;
-use rutis_channel::PeerId;
 
 /// A credential presented when dialing. Its `Debug` never shows the secret.
 #[derive(Clone)]

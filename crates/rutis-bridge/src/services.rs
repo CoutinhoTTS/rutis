@@ -15,10 +15,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::channel::PeerId;
+use crate::session::rpc::{Connection, Reference, Reply, Value};
+use crate::session::{host_key, Error, HostDispatch};
 use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, Plugin, TypeKey};
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{Connection, Reference, Reply, Value};
-use rutis_interop::{host_key, Error, HostDispatch};
 use serde_json::{json, Value as Json};
 
 use crate::{peer_key, Offered, Peer};
@@ -107,8 +107,8 @@ impl Plugin for ExportOne {
                     "the service does not report its methods, so it cannot cross",
                 )
             })?;
-            let methods: BTreeMap<String, Json> =
-                rutis_interop::decode(shape.clone()).map_err(|error| failed(&self.label, error))?;
+            let methods: BTreeMap<String, Json> = crate::session::decode(shape.clone())
+                .map_err(|error| failed(&self.label, error))?;
             let record: BTreeMap<String, Value> = methods
                 .keys()
                 .map(|method| {
@@ -144,7 +144,7 @@ impl Plugin for ExportOne {
                             )
                             .await;
                         if let Ok(withdrawn) = withdrawn {
-                            let _ = rutis_interop::rpc::settle(withdrawn).await;
+                            let _ = crate::session::rpc::settle(withdrawn).await;
                         }
                         Ok(())
                     })
@@ -250,7 +250,7 @@ impl HostDispatch for Remote {
         // node, say): that session's call chain is rebased for this one, so
         // a call back reaches the caller that waits for it.
         let source =
-            rutis_interop::rpc::caller().filter(|source| source.tag() != self.session.tag());
+            crate::session::rpc::caller().filter(|source| source.tag() != self.session.tag());
         if self.asynchronous.contains(method) {
             // The far end answers with its own future: wait for that too.
             let call = async move {
@@ -258,7 +258,7 @@ impl HostDispatch for Remote {
                     Call::Function(reference) => reference.call_async(args).await?,
                     Call::Method(object, method) => object.call_method_async(&method, args).await?,
                 };
-                rutis_interop::rpc::settle(reply).await
+                crate::session::rpc::settle(reply).await
             };
             return Ok(match source {
                 Some(source) => Value::future(self.session.forward_async(&source, call)),
@@ -308,14 +308,14 @@ impl Importer {
                 .remove(key)
                 .ok_or_else(|| Error::Value(format!("services.announce lacks {key}")))
         };
-        let name: String = rutis_interop::decode(take(&mut fields, "name")?.json()?)?;
-        let version: u64 = rutis_interop::decode(take(&mut fields, "version")?.json()?)?;
+        let name: String = crate::session::decode(take(&mut fields, "name")?.json()?)?;
+        let version: u64 = crate::session::decode(take(&mut fields, "version")?.json()?)?;
         let shape = take(&mut fields, "shape")?.json()?;
         if !self.names.contains(&name) {
             // Not imported here: the reference is dropped, which releases it.
             return Ok(Value::Undefined);
         }
-        let kinds: BTreeMap<String, String> = rutis_interop::decode(shape.clone())?;
+        let kinds: BTreeMap<String, String> = crate::session::decode(shape.clone())?;
         let asynchronous = kinds
             .iter()
             .filter(|(_, kind)| *kind == "async")
@@ -390,8 +390,8 @@ impl Importer {
             .next()
             .ok_or_else(|| Error::Value("services.withdraw needs its name".into()))?
             .json()?;
-        let name: String = rutis_interop::decode(fields["name"].clone())?;
-        let version: u64 = rutis_interop::decode(fields["version"].clone())?;
+        let name: String = crate::session::decode(fields["name"].clone())?;
+        let version: u64 = crate::session::decode(fields["version"].clone())?;
         if !self.names.contains(&name) {
             return Ok(Value::Undefined);
         }

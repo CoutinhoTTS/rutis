@@ -32,13 +32,13 @@ jobs:
           node-version: '26'
           cache: npm
           cache-dependency-path: |
-            interop/node/package-lock.json
-            interop/baseline/package-lock.json
+            node/rutis-runtime/package-lock.json
+            node/baseline/package-lock.json
             crates/rutis-dsh/dsh/package-lock.json
-      - run: npm --prefix interop/node ci
-      - run: npm --prefix interop/node test
+      - run: npm --prefix node/rutis-runtime ci
+      - run: npm --prefix node/rutis-runtime test
       # Real published Cordis plugins for the rutis-interop baseline test.
-      - run: npm --prefix interop/baseline ci
+      - run: npm --prefix node/baseline ci
       # dsh (web UI and agent loop) served by aimux in the rutis-dsh host.
       - run: npm --prefix crates/rutis-dsh/dsh ci
       - run: npm --prefix crates/rutis-dsh/dsh test
@@ -49,7 +49,7 @@ jobs:
       # WebSocket channels of the Python runtime (rutis-runtime[network]).
       - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
-        working-directory: interop/python
+        working-directory: python/rutis
 
       - name: cargo test (workspace)
         run: cargo test --workspace
@@ -90,15 +90,15 @@ jobs:
         with:
           node-version: '26'
           cache: npm
-          cache-dependency-path: interop/node/package-lock.json
-      - run: npm --prefix interop/node ci
-      - run: npm --prefix interop/node test
+          cache-dependency-path: node/rutis-runtime/package-lock.json
+      - run: npm --prefix node/rutis-runtime ci
+      - run: npm --prefix node/rutis-runtime test
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python3 -m pip install "websockets>=13"
       - run: python3 -m unittest discover -s tests
-        working-directory: interop/python
+        working-directory: python/rutis
       - name: cargo test (network stack and runtimes)
         run: |
           cargo test -p rutis-channel --all-features
@@ -179,7 +179,7 @@ jobs:
         if: runner.os != 'Windows'
         with:
           node-version: '26'
-      - run: npm --prefix interop/node ci
+      - run: npm --prefix node/rutis-runtime ci
         if: runner.os != 'Windows'
       - name: keep workspace static builds available
         run: cargo check --workspace --all-targets

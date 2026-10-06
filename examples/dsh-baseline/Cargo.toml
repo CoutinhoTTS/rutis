@@ -4,47 +4,47 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Typed rutis bindings for published dsh Cordis plugins (interop/baseline)"
+description = "Typed rutis bindings for published dsh Cordis plugins (node/baseline)"
 
 [dependencies]
 rutis = { path = "../../crates/rutis" }
-rutis-interop = { path = "../../crates/rutis-interop" }
+rutis-bridge = { path = "../../crates/rutis-bridge", features = ["cordis"] }
 tokio.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
 
 [build-dependencies]
-rutis-interop = { path = "../../crates/rutis-interop" }
+rutis-bridge = { path = "../../crates/rutis-bridge", features = ["cordis"] }
 
 # Cordis plugins mounted by this crate. The npm project pins the packages;
-# `npm --prefix interop/baseline ci` installs them.
-[package.metadata.rutis-interop]
-npm = "../../interop/baseline"
-runtime = "../../interop/node"
+# `npm --prefix node/baseline ci` installs them.
+[package.metadata.rutis-cordis]
+npm = "../../node/baseline"
+runtime = "../../node/rutis-runtime"
 
-[package.metadata.rutis-interop.mounts.invariants]
+[package.metadata.rutis-cordis.mounts.invariants]
 plugin = "@deepseek-ai/dsh-invariants"
 version = "0.2.0-rc.1"
 
-[package.metadata.rutis-interop.mounts.credentials]
+[package.metadata.rutis-cordis.mounts.credentials]
 plugin = "@deepseek-ai/dsh-credentials-local"
 version = "0.2.0-rc.1"
 # Credential changes are forwarded to rutis listeners.
 events = ["credentials/reference-updated", "credentials/record-updated"]
 
-[package.metadata.rutis-interop.mounts.fs]
+[package.metadata.rutis-cordis.mounts.fs]
 plugin = "@deepseek-ai/dsh-fs-local"
 
-[package.metadata.rutis-interop.mounts.jobs]
+[package.metadata.rutis-cordis.mounts.jobs]
 plugin = "@deepseek-ai/dsh-jobs-local"
 
-[package.metadata.rutis-interop.mounts.commands]
+[package.metadata.rutis-cordis.mounts.commands]
 plugin = "@deepseek-ai/dsh-commands"
 
 # dsh-workspace needs storage and session persistence, which other plugins
 # provide: they are mounted together so the dependencies resolve natively.
-[package.metadata.rutis-interop.mounts.workspace]
+[package.metadata.rutis-cordis.mounts.workspace]
 group = [
     { name = "storage", plugin = "@deepseek-ai/dsh-storage" },
     { name = "storage_json", plugin = "@deepseek-ai/dsh-storage-json" },
@@ -55,7 +55,7 @@ group = [
 
 # dsh-persona contributes prompt sections to `systemPrompt`, which this rutis
 # application provides; the host announces prompt changes like the registry.
-[package.metadata.rutis-interop.mounts.persona]
+[package.metadata.rutis-cordis.mounts.persona]
 plugin = "@deepseek-ai/dsh-persona"
 provide = ["systemPrompt"]
 emits = ["system-prompt/change"]

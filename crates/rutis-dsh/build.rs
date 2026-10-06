@@ -1,4 +1,4 @@
-//! Bindings come from `[package.metadata.rutis-interop]` in Cargo.toml.
+//! Bindings come from `[package.metadata.rutis-cordis]` in Cargo.toml.
 //! When the npm project is not installed, nothing is built.
 
 fn main() {
@@ -8,6 +8,6 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() != Ok("unix") || !modules.exists() {
         return;
     }
-    rutis_interop::build::from_manifest().unwrap_or_else(|error| panic!("{error}"));
+    rutis_bridge::cordis::build::from_manifest().unwrap_or_else(|error| panic!("{error}"));
     println!("cargo:rustc-cfg=dsh_installed");
 }

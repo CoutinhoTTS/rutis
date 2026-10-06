@@ -9,7 +9,7 @@
 | `rutis-bridge`、`rutis-transport-memory`、`rutis-transport-local`、`rutis-transport-websocket`、`rutis-runtime-local` | 0.1.0（新） | `bridge-v0.1.0` | publish-bridge |
 | `rutis-loader` | 0.2.0 | `loader-v0.2.0` | publish-loader |
 
-`rutis` 内核不变（0.6.1），不发。Python 包 `rutis_runtime` 这次不发 PyPI，仍从仓库的 `interop/python` 安装。
+`rutis` 内核不变（0.6.1），不发。Python 包 `rutis_runtime` 这次不发 PyPI，仍从仓库的 `python/rutis` 安装。
 
 ## 顺序
 

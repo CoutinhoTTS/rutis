@@ -8,16 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin, PluginFactory, TypeKey};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::transport::memory::{MemoryPlugin, MemoryTransport};
 use rutis_bridge::{
     peer_key, Credential, Described, HostPlugin, IdentityPlugin, LinkConfig, LinkPlugin, Peer,
     Retry, StaticCatalog, StaticIdentity,
 };
-use rutis_channel::PeerId;
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch,
     PeerResolver, PeerRowsPlugin,
 };
-use rutis_transport_memory::{MemoryPlugin, MemoryTransport};
 use serde_json::{json, Value};
 
 fn id(s: &str) -> PeerId {
@@ -263,8 +263,8 @@ async fn rows_stop_with_the_host_and_the_link_and_the_peer_stays() {
 /// each, mac hosting what its own loader resolves.
 #[tokio::test(flavor = "multi_thread")]
 async fn loader_rows_compose_links_and_change_features_in_place() {
-    use rutis_interop::rpc::{Reply, Value as RpcValue};
-    use rutis_interop::{host_key, HostDispatch};
+    use rutis_bridge::session::{host_key, HostDispatch};
+    use rutis_bridge::session::{Reply, Value as RpcValue};
     use rutis_loader::{register_peer_node, Builtins};
 
     struct Fixed(u64);
@@ -491,7 +491,7 @@ async fn nodes_hosting_for_each_other_start_and_reconnect_without_deadlock() {
     let session = a.get_as::<Peer>(peer_key(&id("b"))).unwrap();
     session
         .connection()
-        .close(rutis_interop::Error::Transport("cut".into()));
+        .close(rutis_bridge::session::Error::Transport("cut".into()));
     drop(session);
     eventually(
         || (a_hosts.load(Ordering::SeqCst) >= 2).then_some(()),

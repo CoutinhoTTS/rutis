@@ -13,10 +13,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::channel::PeerId;
+use crate::session::rpc::{Connection, Reply, Value};
+use crate::session::Error;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Listener, Plugin, TypeKey};
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{Connection, Reply, Value};
-use rutis_interop::Error;
 use serde_json::{json, Value as Json};
 
 use crate::{peer_key, Offered, Peer};
@@ -91,7 +91,7 @@ impl Listener<NodeEvent> for Forward {
                 )
                 .await;
             // The far end answers once its listeners finished.
-            rutis_interop::rpc::settle(
+            crate::session::rpc::settle(
                 forwarded.map_err(|error| CordisError::PluginFailed(Box::new(error)))?,
             )
             .await
@@ -117,7 +117,7 @@ impl crate::Handler for Inbound {
             .next()
             .ok_or_else(|| Error::Value("events.forward needs the event".into()))?
             .json()?;
-        let name: String = rutis_interop::decode(fields["name"].clone())?;
+        let name: String = crate::session::decode(fields["name"].clone())?;
         if !self.names.contains(&name) {
             return Err(Error::Value(format!("event {name} is not forwarded here")));
         }

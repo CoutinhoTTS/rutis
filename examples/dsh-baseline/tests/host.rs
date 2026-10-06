@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use dsh_baseline::persona::{self, PromptSection, SystemPromptHostGetSectionOrderName as Order};
 use rutis::{Ctx, FiberState};
-use rutis_interop::rpc::Value;
-use rutis_interop::Error;
+use rutis_bridge::session::Error;
+use rutis_bridge::session::Value;
 
 #[derive(Default, Clone)]
 struct Prompts {

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use dsh_baseline::{credentials, fs, invariants, jobs};
 use rutis::{Ctx, Plugin};
-use rutis_interop::serde_json::json;
+use rutis_bridge::cordis::serde_json::json;
 
 async fn mount(ctx: &Ctx, plugin: impl Plugin + 'static) {
     let view = ctx.plugin(plugin);

@@ -16,10 +16,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::channel::PeerId;
+use crate::session::rpc::{Connection, Dispatch, Reply, Value};
+use crate::session::Error;
 use rutis::TypeKey;
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{Connection, Dispatch, Reply, Value};
-use rutis_interop::Error;
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -137,10 +137,10 @@ impl Dispatch for Operations {
                 .next()
                 .ok_or_else(|| Error::Value("link.offers needs its offers".into()))?
                 .json()?;
-            let families: BTreeSet<String> = rutis_interop::decode(announced["families"].clone())?;
-            let version: u64 = rutis_interop::decode(announced["version"].clone())?;
+            let families: BTreeSet<String> = crate::session::decode(announced["families"].clone())?;
+            let version: u64 = crate::session::decode(announced["version"].clone())?;
             let since: BTreeMap<String, u64> = match announced.get("since") {
-                Some(since) => rutis_interop::decode(since.clone())?,
+                Some(since) => crate::session::decode(since.clone())?,
                 None => BTreeMap::new(),
             };
             // An older announcement never overrides a newer one.

@@ -4,4 +4,4 @@
 //! native service proxy types.
 #![cfg(all(unix, dsh_baseline))]
 
-rutis_interop::include_mounts!();
+rutis_bridge::include_mounts!();

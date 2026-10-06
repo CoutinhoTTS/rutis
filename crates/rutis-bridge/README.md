@@ -26,7 +26,7 @@
 
 服务调用跨节点保留调用链：同步调用期间的回调、回调里再调回去的重入调用，都能穿过多跳转发。
 
-feature `conformance` 提供节点一致性测试（`conformance::node`），其他实现（例如 Node 的 `@arcships/rutis-interop/bridge`）可以拿它对照自己。
+feature `conformance` 提供节点一致性测试（`conformance::node`），其他实现（例如 Node 的 `@arcships/rutis-runtime/bridge`）可以拿它对照自己。
 
 ## 例子
 

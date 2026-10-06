@@ -42,7 +42,7 @@ async fn mounts_load_from_the_npm_project_named_at_run_time() {
     std::fs::write(&probe, marked).unwrap();
 
     // This test binary holds only this test: the variable reaches no other mount.
-    std::env::set_var(rutis_interop::ROOT_VARIABLE, &copy);
+    std::env::set_var(rutis_bridge::cordis::ROOT_VARIABLE, &copy);
     let ctx = mounted(Arc::new(Scripted::default())).await;
     let chunks = ctx
         .get::<agent::LlmProbe>()

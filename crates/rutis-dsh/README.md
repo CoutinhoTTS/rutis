@@ -64,7 +64,7 @@ cargo run -p rutis-dsh -- dump-config --profile web
 
 ## 部署
 
-二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_INTEROP_ROOT` 指向它（见 rutis-interop README 的“部署”）。仓库内的 npm 项目以 `file:` 依赖引用 `interop/node`；独立部署时可改为 npm 上的 `@arcships/rutis-interop`。
+二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_CORDIS_ROOT` 指向它（见 rutis-interop README 的“部署”）。仓库内的 npm 项目以 `file:` 依赖引用 `node/rutis-runtime`；独立部署时可改为 npm 上的 `@arcships/rutis-runtime`。
 
 ## 从旧桥迁移
 

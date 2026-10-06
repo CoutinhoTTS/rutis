@@ -1,0 +1,46 @@
+{
+  "name": "@arcships/rutis-runtime",
+  "version": "0.2.0",
+  "description": "The Node runtime of rutis: runs JavaScript and TypeScript plugins (and Cordis plugins) for a rutis host, and links Cordis applications to rutis nodes",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arcships/rutis.git",
+    "directory": "node/rutis-runtime"
+  },
+  "homepage": "https://github.com/arcships/rutis/tree/main/node/rutis-runtime#readme",
+  "keywords": [
+    "rutis",
+    "cordis",
+    "plugin",
+    "runtime"
+  ],
+  "rutisProtocol": 2,
+  "rutisChannels": [
+    "unix",
+    "fd"
+  ],
+  "type": "module",
+  "exports": {
+    "./bridge": "./src/bridge/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none test/*.test.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "tsx": "^4.20.0",
+    "typescript": "6.0.3",
+    "ws": "^8.22.0"
+  }
+}

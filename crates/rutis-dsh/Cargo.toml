@@ -13,7 +13,7 @@ aimux-core = "0.3.0"
 aimux-llm = { path = "../aimux-llm" }
 futures = "0.3"
 rutis = { path = "../rutis" }
-rutis-interop = { path = "../rutis-interop" }
+rutis-bridge = { path = "../rutis-bridge", features = ["cordis"] }
 rutis-loader = { path = "../rutis-loader" }
 saphyr-parser = "0.0.12"
 semver = "1"
@@ -34,7 +34,7 @@ async-trait = "0.1.92"
 tempfile = "3"
 
 [build-dependencies]
-rutis-interop = { path = "../rutis-interop" }
+rutis-bridge = { path = "../rutis-bridge", features = ["cordis"] }
 
 [[bin]]
 name = "rutis-dsh"
@@ -42,18 +42,18 @@ path = "src/bin/rutis_dsh.rs"
 
 # The npm project with dsh, the launcher and the aimux bundle;
 # `npm --prefix crates/rutis-dsh/dsh ci` installs it.
-[package.metadata.rutis-interop]
+[package.metadata.rutis-cordis]
 npm = "dsh"
 
 # The dsh web UI: the launcher starts a dsh profile in the mounted Context.
-[package.metadata.rutis-interop.mounts.web]
+[package.metadata.rutis-cordis.mounts.web]
 path = "dsh/launcher.ts"
 provide = ["aimux"]
 events = ["rutis-dsh/ready", "rutis-dsh/startup-failed", "rutis-dsh/exit"]
 
 # The dsh agent loop without a UI: the smallest composition that runs an agent
 # turn with tools. The probes are test drivers.
-[package.metadata.rutis-interop.mounts.agent]
+[package.metadata.rutis-cordis.mounts.agent]
 group = [
     { name = "invariants", plugin = "@deepseek-ai/dsh-invariants" },
     { name = "typert", plugin = "@deepseek-ai/dsh-typert-registry" },

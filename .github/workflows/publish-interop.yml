@@ -1,5 +1,5 @@
 # rutis-interop releases with tags interop-vX.Y.Z: the crate (crates.io) and
-# its Node runtime @arcships/rutis-interop (npm, interop/node) at the same
+# its Node runtime @arcships/rutis-runtime (npm, node/rutis-runtime) at the same
 # version. The core crate uses rutis-vX.Y.Z.
 name: publish rutis-interop
 
@@ -34,14 +34,14 @@ jobs:
       - name: Verify tag, versions and protocol
         run: |
           crate_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rutis-interop") | .version')
-          npm_version=$(node -p "require('./interop/node/package.json').version")
+          npm_version=$(node -p "require('./node/rutis-runtime/package.json').version")
           test "$GITHUB_REF_NAME" = "interop-v$crate_version"
           test "$npm_version" = "$crate_version"
-          protocol=$(node -p "require('./interop/node/package.json').rutisProtocol")
+          protocol=$(node -p "require('./node/rutis-runtime/package.json').rutisProtocol")
           grep -q "^pub const PROTOCOL: u32 = $protocol;" crates/rutis-interop/src/lib.rs
 
       - name: Test the Node runtime
-        working-directory: interop/node
+        working-directory: node/rutis-runtime
         run: |
           npm ci
           npm test
@@ -64,7 +64,7 @@ jobs:
       - name: Dry runs
         run: |
           cargo publish --locked -p rutis-interop --dry-run
-          (cd interop/node && npm publish --provenance --access public --dry-run)
+          (cd node/rutis-runtime && npm publish --provenance --access public --dry-run)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -73,8 +73,8 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
 
-      - name: Publish @arcships/rutis-interop to npm
-        working-directory: interop/node
+      - name: Publish @arcships/rutis-runtime to npm
+        working-directory: node/rutis-runtime
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

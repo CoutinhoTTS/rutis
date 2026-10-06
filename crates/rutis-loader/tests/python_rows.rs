@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use rutis::Ctx;
-use rutis_interop::rpc::{Reply, Value as RpcValue};
-use rutis_interop::{host_key, HostDispatch};
+use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::session::{host_key, HostDispatch};
+use rutis_bridge::session::{Reply, Value as RpcValue};
 use rutis_loader::{
-    Chain, InteropResolver, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin,
+    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
 };
-use rutis_runtime_local::LocalRuntime;
 use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
@@ -19,7 +19,7 @@ struct Probe(Arc<Mutex<Vec<String>>>);
 
 impl HostDispatch for Probe {
     fn invoke(&self, _method: &str, args: RpcValue) -> Reply {
-        let [line]: [String; 1] = rutis_interop::decode_value(args)?;
+        let [line]: [String; 1] = rutis_bridge::session::decode_value(args)?;
         self.0.lock().unwrap().push(line);
         Ok(RpcValue::Undefined)
     }
@@ -57,9 +57,9 @@ async fn reloading_a_row_runs_the_edited_module() {
     let root = Ctx::root().unwrap();
     root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
         .unwrap();
-    let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/python");
-    let python = LocalRuntime::python(sdk, dir.path());
-    let rows = Arc::new(InteropResolver::modules(python.handle()));
+    let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/rutis");
+    let python = LocalRuntime::python(dir.path()).python_path(sdk);
+    let rows = Arc::new(RuntimeResolver::modules(python.handle()));
     root.plugin(python).await.unwrap();
     let plugin_loader = LoaderPlugin::new(
         Chain::new().with_shared(rows.clone()),

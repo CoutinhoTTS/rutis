@@ -8,24 +8,19 @@
 mod catalog;
 mod edit;
 mod error;
-#[cfg(all(unix, feature = "runtimes"))]
-mod interop;
 mod loader;
 mod patch;
 #[cfg(feature = "peer")]
 mod peer;
 mod persist;
 mod resolver;
+#[cfg(all(unix, feature = "runtimes"))]
+mod runtime;
 mod volatile;
 
 pub use catalog::{ExprScope, Expressions, ServiceCatalog};
 pub use edit::{apply_edit, Edit};
 pub use error::{Failure, LoaderError, PersistError};
-#[cfg(all(unix, feature = "node"))]
-pub use interop::resolve_entry;
-#[cfg(all(unix, feature = "runtimes"))]
-#[allow(deprecated)]
-pub use interop::{CordisRuntimeRows, InteropResolver, RuntimeRows, RuntimeRowsPlugin};
 pub use loader::{
     Editable, EntryInfo, EntryStatus, Isolate, Loader, LoaderChanged, LoaderOptions, LoaderPlugin,
     NewEntry, PendingEditDropped, ReconcileReport, RowInfo,
@@ -37,4 +32,8 @@ pub use peer::{
 };
 pub use persist::{NoPersist, Persist, Version};
 pub use resolver::{Builtins, Chain, Resolved, Resolver};
+#[cfg(all(unix, feature = "node"))]
+pub use runtime::resolve_entry;
+#[cfg(all(unix, feature = "runtimes"))]
+pub use runtime::{RuntimeResolver, RuntimeRows, RuntimeRowsPlugin};
 pub use volatile::{volatile_key, volatile_paths, VolatileUpdate};

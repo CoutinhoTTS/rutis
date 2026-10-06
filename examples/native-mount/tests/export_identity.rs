@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use rutis_interop::server::Dispatch;
+use rutis_bridge::cordis::server::Dispatch;
 use serde_json::json;
 
 // The executable entry is unused here; exercise its generated mount directly.
@@ -8,7 +8,7 @@ use serde_json::json;
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/rutis.rs"));
 
-    pub async fn exports(ctx: rutis::Ctx) -> impl rutis_interop::server::Dispatch {
+    pub async fn exports(ctx: rutis::Ctx) -> impl rutis_bridge::cordis::server::Dispatch {
         mount(ctx, serde_json::json!({"initial": 7})).await.unwrap()
     }
 }

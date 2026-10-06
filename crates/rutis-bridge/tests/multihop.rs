@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rutis::Ctx;
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::session::{host_key, Error, HostDispatch};
+use rutis_bridge::session::{settle, Reply, Value};
+use rutis_bridge::transport::memory::{MemoryPlugin, MemoryTransport};
 use rutis_bridge::{
     Credential, ExportPlugin, Identity, IdentityPlugin, ImportPlugin, LinkConfig, LinkPlugin,
     Retry, StaticIdentity,
 };
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{settle, Reply, Value};
-use rutis_interop::{host_key, Error, HostDispatch};
-use rutis_transport_memory::{MemoryPlugin, MemoryTransport};
 use serde_json::{json, Value as Json};
 
 fn id(s: &str) -> PeerId {
@@ -144,7 +144,7 @@ async fn a_service_reexported_across_two_links_keeps_calls_callbacks_and_withdra
             // b calls this back while c waits; it calls the clock again.
             let again = clock.clone();
             let callback = Value::callback(move |args| {
-                let [day]: [String; 1] = rutis_interop::decode_value(args)?;
+                let [day]: [String; 1] = rutis_bridge::session::decode_value(args)?;
                 let now = again.invoke("now", Value::List(vec![]))?.json()?;
                 Ok(json!(format!("{}@{now}", day.to_uppercase())).into())
             });

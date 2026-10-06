@@ -3,24 +3,25 @@
 //! connection takes over only after the old lease is gone; a controller
 //! that reconnects gets a new lease. Each plugin start and cleanup is
 //! written to a log on the runtime's side. Python needs `websockets`
-//! (RUTIS_INTEROP_PYTHON, else python3).
-#![cfg(all(unix, feature = "interop"))]
+//! (RUTIS_PYTHON, else python3).
+#![cfg(all(unix, feature = "node", feature = "python"))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rutis::{Ctx, FiberView};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::runtime::RuntimeAccessPlugin;
+use rutis_bridge::runtime::RuntimePlugin;
+use rutis_bridge::transport::websocket::{Config, WebSocketPlugin};
 use rutis_bridge::{
     peer_key, Credential, IdentityPlugin, LinkConfig, LinkPlugin, LinkState, Peer, Retry,
-    RuntimeAccessPlugin, StaticIdentity,
+    StaticIdentity,
 };
-use rutis_channel::PeerId;
-use rutis_interop::RuntimePlugin;
 use rutis_loader::{
-    Chain, InteropResolver, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeRowsPlugin,
+    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
 };
-use rutis_transport_websocket::{Config, WebSocketPlugin};
 use serde_json::json;
 use tokio::io::AsyncBufReadExt;
 
@@ -101,13 +102,13 @@ async fn remote(language: Language) -> Remote {
                 ),
             )
             .unwrap();
-            let python = std::env::var("RUTIS_INTEROP_PYTHON").unwrap_or_else(|_| "python3".into());
+            let python = std::env::var("RUTIS_PYTHON").unwrap_or_else(|_| "python3".into());
             let mut command = tokio::process::Command::new(python);
             command
-                .args(["-m", "rutis_runtime", "listen:ws://127.0.0.1:0/rutis"])
+                .args(["-m", "rutis", "listen:ws://127.0.0.1:0/rutis"])
                 .args(["--id", "remote", "--peer", "main"])
                 .arg(project.path())
-                .env("PYTHONPATH", repo().join("interop/python"))
+                .env("PYTHONPATH", repo().join("python/rutis"))
                 .current_dir(project.path());
             command
         }
@@ -129,7 +130,7 @@ async fn remote(language: Language) -> Remote {
                 ),
             )
             .unwrap();
-            let runtime = repo().join("interop/node");
+            let runtime = repo().join("node/rutis-runtime");
             let mut command = tokio::process::Command::new("node");
             command
                 .args(["--import", "tsx"])
@@ -142,7 +143,7 @@ async fn remote(language: Language) -> Remote {
         }
     };
     let mut process = command
-        .env("RUTIS_INTEROP_TOKEN", "main-token")
+        .env("RUTIS_TOKEN", "main-token")
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -154,7 +155,7 @@ async fn remote(language: Language) -> Remote {
             .await
             .unwrap()
             .expect("the runtime's address");
-        if let Some(address) = line.strip_prefix("rutis-interop: listening on ") {
+        if let Some(address) = line.strip_prefix("rutis: listening on ") {
             break address.to_owned();
         }
     };
@@ -204,8 +205,8 @@ async fn controller(remote: &Remote, who: &str) -> Controller {
     root.plugin(RuntimeAccessPlugin::new(id("remote"), remote.runtime()));
     let runtime = RuntimePlugin::remote(remote.runtime());
     let rows = Arc::new(match remote.language {
-        Language::Python => InteropResolver::modules(runtime.handle()),
-        Language::Node => InteropResolver::node(runtime.handle()),
+        Language::Python => RuntimeResolver::modules(runtime.handle()),
+        Language::Node => RuntimeResolver::node(runtime.handle()),
     });
     root.plugin(runtime);
     let plugin = LoaderPlugin::new(
@@ -271,7 +272,7 @@ async fn a_reconnecting_controller_gets_a_new_lease(language: Language) {
     .await;
     let generation = peer.generation();
     peer.connection()
-        .close(rutis_interop::Error::Transport("cut".into()));
+        .close(rutis_bridge::session::Error::Transport("cut".into()));
     drop(peer);
     remote.wait_for("stop a").await;
     eventually(

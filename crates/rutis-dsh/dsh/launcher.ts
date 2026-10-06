@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// Runs a dsh profile (by default the web UI) inside the Context rutis-interop
+// Runs a dsh profile (by default the web UI) inside the Context rutis-bridge
 // mounts this plugin in, with the aimux routes as one bundle. It follows what
 // `@deepseek-ai/dsh/profile-boot` and dsh-app-boot's `boot()` do, without
 // creating a Context, installing signal handlers or exiting the process: the

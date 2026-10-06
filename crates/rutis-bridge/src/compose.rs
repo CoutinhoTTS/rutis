@@ -11,9 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin};
 
+use crate::runtime::RuntimeAccessPlugin;
 use crate::{
     EventsPlugin, ExportPlugin, HostPlugin, ImportPlugin, LinkConfig, LinkPlugin, LinkState,
-    PluginCatalog, RuntimeAccessPlugin, ServiceKeys,
+    PluginCatalog, ServiceKeys,
 };
 
 /// What a peer composition runs on its link.

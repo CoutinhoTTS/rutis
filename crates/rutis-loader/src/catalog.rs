@@ -100,14 +100,14 @@ impl ServiceCatalog {
     #[cfg(all(unix, feature = "runtimes"))]
     pub fn register_shared(&mut self, name: impl Into<String>) -> &mut Self {
         let name = name.into();
-        let key = rutis_interop::host_key(&name);
-        self.register_keyed::<dyn rutis_interop::HostDispatch>(name, key)
+        let key = rutis_bridge::session::host_key(&name);
+        self.register_keyed::<dyn rutis_bridge::session::HostDispatch>(name, key)
     }
 
     /// Whether `name` was registered with [`ServiceCatalog::register_shared`].
     #[cfg(all(unix, feature = "runtimes"))]
     pub fn is_shared(&self, name: &str) -> bool {
-        self.key(name) == Some(&rutis_interop::host_key(name))
+        self.key(name) == Some(&rutis_bridge::session::host_key(name))
     }
 
     /// The key of a named service.

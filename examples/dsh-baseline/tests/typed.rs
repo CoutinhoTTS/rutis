@@ -3,7 +3,7 @@
 
 use dsh_baseline::{commands, credentials, fs, invariants, jobs, workspace};
 use rutis::{Ctx, FiberView, Plugin};
-use rutis_interop::Error;
+use rutis_bridge::session::Error;
 
 async fn mount(ctx: &Ctx, plugin: impl Plugin + 'static) -> FiberView {
     let view = ctx.plugin(plugin);

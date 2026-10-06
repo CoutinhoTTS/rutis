@@ -1,26 +1,67 @@
 [package]
 name = "rutis-bridge"
-description = "Connecting rutis to other processes and machines: the Transport service that transport plugins provide"
-version = "0.1.0"
+description = "Connect rutis to other processes, languages and machines: plugins in Node and Python, links between rutis nodes, Cordis plugins mounted with Rust bindings"
+# The release train: released together with rutis-loader, rutis-host, and the
+# npm and PyPI packages, at the same version.
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-keywords = ["rutis", "transport", "interop", "bridge"]
-categories = ["network-programming"]
+readme = "README.md"
+keywords = ["rutis", "plugin", "python", "node", "websocket"]
+categories = ["development-tools::ffi", "network-programming"]
 
 [dependencies]
 rutis = { path = "../rutis", version = "0.6.0" }
-rutis-channel = { path = "../rutis-channel", version = "0.1.0" }
-sha2 = "0.10"
-thiserror.workspace = true
-rutis-interop = { path = "../rutis-interop", version = "0.3.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { workspace = true }
+sha2 = "0.10"
+tempfile = "3"
+thiserror.workspace = true
+tokio.workspace = true
+# websocket
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+socket2 = { version = "0.6", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+# cordis
+proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
+quote = { version = "1", optional = true }
+syn = { version = "2", features = ["full", "visit"], optional = true }
+toml = { version = "0.9", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
-# The node conformance suite other node implementations run.
-conformance = []
+default = ["node"]
+# Local Node runtimes (Unix).
+node = []
+# Local Python runtimes (Unix).
+python = []
+# The WebSocket transport.
+websocket = [
+    "dep:futures-util",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:socket2",
+    "dep:tokio-rustls",
+    "dep:tokio-tungstenite",
+]
+# Cordis plugins mounted with Rust bindings generated at build time.
+cordis = ["node", "dep:proc-macro2", "dep:quote", "dep:syn", "dep:toml"]
+# The channel contract tests, and the session, runtime and node conformance
+# suites other implementations run.
+testing = []
 
 [dev-dependencies]
-rutis-transport-memory = { path = "../rutis-transport-memory" }
+rcgen = "0.14"
+tempfile = "3"
+tokio = { workspace = true }
+
+[[example]]
+name = "smoke"
+required-features = ["websocket"]

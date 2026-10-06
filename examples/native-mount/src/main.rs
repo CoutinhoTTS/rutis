@@ -1,4 +1,4 @@
-rutis_interop::include_mounts!();
+rutis_bridge::include_mounts!();
 
 #[cfg(unix)]
 #[tokio::main]
@@ -37,13 +37,16 @@ mod tests {
 
     #[test]
     fn generated_config_round_trips_through_json() {
-        let config: bindings::Config = rutis_interop::serde_json::from_value(
-            rutis_interop::serde_json::json!({ "initial": 3.5 }),
+        let config: bindings::Config = rutis_bridge::cordis::serde_json::from_value(
+            rutis_bridge::cordis::serde_json::json!({ "initial": 3.5 }),
         )
         .unwrap();
         assert_eq!(config.initial, 3.5);
-        let back = rutis_interop::serde_json::to_value(&config).unwrap();
-        assert_eq!(back, rutis_interop::serde_json::json!({ "initial": 3.5 }));
+        let back = rutis_bridge::cordis::serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            back,
+            rutis_bridge::cordis::serde_json::json!({ "initial": 3.5 })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -59,12 +62,12 @@ mod tests {
         assert_eq!(counter.current().unwrap(), 15.0);
         assert!(matches!(
             counter.add(f64::NAN),
-            Err(rutis_interop::Error::Value(_))
+            Err(rutis_bridge::session::Error::Value(_))
         ));
         assert_eq!(counter.current().unwrap(), 15.0);
         let error = counter.fail().unwrap_err();
         assert!(
-            matches!(error, rutis_interop::Error::Remote { ref message, .. } if message == "counter refused operation")
+            matches!(error, rutis_bridge::session::Error::Remote { ref message, .. } if message == "counter refused operation")
         );
         assert_eq!(counter.current().unwrap(), 15.0);
         view.dispose().await.unwrap();

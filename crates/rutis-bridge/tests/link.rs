@@ -6,14 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rutis::{Ctx, FiberView};
+use rutis_bridge::channel::PeerId;
+use rutis_bridge::session::Error;
+use rutis_bridge::session::{Connection, Endpoint, Format, Value};
+use rutis_bridge::transport::memory::{MemoryPlugin, MemoryTransport};
 use rutis_bridge::{
     peer_key, protocol, Credential, Dial, Failure, Identity, IdentityPlugin, LinkConfig,
     LinkPlugin, LinkState, Peer, Retry, StaticIdentity, Transport,
 };
-use rutis_channel::PeerId;
-use rutis_interop::rpc::{Connection, Endpoint, Format, Value};
-use rutis_interop::Error;
-use rutis_transport_memory::{MemoryPlugin, MemoryTransport};
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -249,8 +249,14 @@ async fn a_newer_connection_takes_over_and_the_old_one_is_told() {
         .await
         .unwrap();
     struct Nothing;
-    impl rutis_interop::rpc::Dispatch for Nothing {
-        fn invoke(&self, _: &Connection, _: &str, _: &str, _: Value) -> rutis_interop::rpc::Reply {
+    impl rutis_bridge::session::Dispatch for Nothing {
+        fn invoke(
+            &self,
+            _: &Connection,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> rutis_bridge::session::Reply {
             Ok(Value::Undefined)
         }
     }
@@ -422,7 +428,7 @@ async fn stopping_a_link_withdraws_its_peer_and_revokes_its_registration() {
                     .protocol(protocol())
             )
             .await,
-        Err(rutis_channel::ConnectError::Retryable { .. })
+        Err(rutis_bridge::channel::ConnectError::Retryable { .. })
     ));
 }
 

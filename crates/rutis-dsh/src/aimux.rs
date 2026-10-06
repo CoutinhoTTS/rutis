@@ -14,7 +14,7 @@ use aimux_llm::service::{MessageSpec, PartStream, PromptSpec, ToolCallSpec, Tool
 use aimux_llm::{LlmService, StreamRequest};
 use futures::{FutureExt, StreamExt};
 use rutis::BoxFuture;
-use rutis_interop::Error;
+use rutis_bridge::session::Error;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -127,7 +127,7 @@ macro_rules! serve_aimux {
             fn open(
                 &self,
                 request: $mount::AimuxRequest,
-            ) -> ::rutis::BoxFuture<'static, Result<String, ::rutis_interop::Error>> {
+            ) -> ::rutis::BoxFuture<'static, Result<String, ::rutis_bridge::session::Error>> {
                 match $crate::aimux::convert(&request) {
                     Ok(request) => $crate::aimux::AimuxBridge::open(self, request),
                     Err(error) => Box::pin(async move { Err(error) }),
@@ -137,13 +137,15 @@ macro_rules! serve_aimux {
             fn next(
                 &self,
                 stream: String,
-            ) -> ::rutis::BoxFuture<'static, Result<Vec<$mount::AimuxPart>, ::rutis_interop::Error>>
-            {
+            ) -> ::rutis::BoxFuture<
+                'static,
+                Result<Vec<$mount::AimuxPart>, ::rutis_bridge::session::Error>,
+            > {
                 let parts = $crate::aimux::AimuxBridge::next(self, stream);
                 Box::pin(async move { $crate::aimux::convert(&parts.await?) })
             }
 
-            fn close(&self, stream: String) -> Result<Option<()>, ::rutis_interop::Error> {
+            fn close(&self, stream: String) -> Result<Option<()>, ::rutis_bridge::session::Error> {
                 $crate::aimux::AimuxBridge::close(self, &stream);
                 Ok(None)
             }
@@ -152,7 +154,8 @@ macro_rules! serve_aimux {
                 &self,
                 provider: String,
                 api_key: Option<String>,
-            ) -> ::rutis::BoxFuture<'static, Result<Vec<String>, ::rutis_interop::Error>> {
+            ) -> ::rutis::BoxFuture<'static, Result<Vec<String>, ::rutis_bridge::session::Error>>
+            {
                 $crate::aimux::AimuxBridge::list_models(self, provider, api_key)
             }
         }
