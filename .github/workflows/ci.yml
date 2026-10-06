@@ -146,6 +146,17 @@ jobs:
           uvx maturin build --release --manifest-path crates/rutis-host/Cargo.toml --out dist
           ls dist
 
+  # The cross-compiled wheel of release.yml, built before a tag needs it.
+  release-wheel-aarch64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64
+          manylinux: "2_28"
+          args: --release --locked --manifest-path crates/rutis-host/Cargo.toml --out wheels
+
   # rutis 相对 crates.io 最新版的公开 API 变化：发现破坏性变更时给出警告，
   # 并在 job 摘要中列出，提示发布时需要提升的版本；不使 CI 失败（0.x 允许在
   # minor 版本中破坏）。真正的拦截在 publish-rutis.yml：版本号不允许的破坏性

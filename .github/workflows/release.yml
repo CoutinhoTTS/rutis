@@ -79,8 +79,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, target: x86_64 }
-          - { os: ubuntu-24.04, target: aarch64 }
+          - { os: ubuntu-24.04, target: x86_64, manylinux: auto }
+          # ring's assembly needs __ARM_ARCH, which the GCC of the default
+          # (manylinux2014) aarch64 cross image does not define.
+          - { os: ubuntu-24.04, target: aarch64, manylinux: "2_28" }
           - { os: macos-14, target: x86_64-apple-darwin }
           - { os: macos-14, target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
@@ -89,7 +91,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          manylinux: auto
+          manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --locked --manifest-path crates/rutis-host/Cargo.toml --out wheels
       - uses: actions/upload-artifact@v4
         with:
