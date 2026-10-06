@@ -6,11 +6,11 @@
 //!
 //! ```text
 //! # on the listening machine (certificate and key for its host name)
-//! cargo run -p rutis-transport-websocket --example smoke -- \
+//! cargo run -p rutis-bridge --features websocket --example smoke -- \
 //!     listen 0.0.0.0:7443 --cert server.pem --key server.key --token secret
 //!
 //! # on the dialing machine (the CA that signed the server's certificate)
-//! cargo run -p rutis-transport-websocket --example smoke -- \
+//! cargo run -p rutis-bridge --features websocket --example smoke -- \
 //!     dial wss://server.example:7443/rutis --ca ca.pem --token secret
 //! ```
 //!

@@ -1,5 +1,8 @@
 # 远程插件：运行时接入与节点互联
 
+> 包结构已调整（2026-10-06）：`rutis-channel`、`rutis-interop`、`rutis-transport-*`、`rutis-runtime-local` 合并为 `rutis-bridge` 的模块（`channel`、`session`、`runtime`、`transport::*`、`cordis`），见 [面向开发者的包、工具与流程](design-developer-packages-2026-10-06.md)。下文保留设计时的 crate 名。
+
+
 状态：远程能力设计稿，未实现。更新：2026-10-05。
 
 配套规范：[网络栈](design-protocol-channel-decoupling-2026-10-03.md)、[兼容层](design-protocol-plugin-mount.md)、[loader](design-rutis-loader-2026-10-02.md)。多语言基线：[总体设计 #121](https://github.com/arcships/rutis/pull/121)、[M1 设计 #127](https://github.com/arcships/rutis/pull/127)、[M1a #129](https://github.com/arcships/rutis/pull/129)、[M1b #128](https://github.com/arcships/rutis/pull/128)、[M1c #130](https://github.com/arcships/rutis/pull/130)、[M2 #131](https://github.com/arcships/rutis/pull/131)。PR 中的本机运行时实现不代表已支持网络部署。

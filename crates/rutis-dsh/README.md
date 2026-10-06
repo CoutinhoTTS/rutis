@@ -1,6 +1,6 @@
 # rutis-dsh：在 rutis 宿主里运行 dsh
 
-`rutis-dsh up` 启动 dsh 的完整 web 界面。dsh 跑在 rutis 启动和管理的 Node 进程里，模型调用由同一进程中的 [aimux-llm](../aimux-llm) 提供。接入机制见 [rutis-interop](../rutis-interop/README.md)；需要 Unix 与 Node（CI 使用 Node 26）。
+`rutis-dsh up` 启动 dsh 的完整 web 界面。dsh 跑在 rutis 启动和管理的 Node 进程里，模型调用由同一进程中的 [aimux-llm](../aimux-llm) 提供。接入机制见 [Cordis 指南](../../docs/guide/cordis.md)；需要 Unix 与 Node 24 或更高。
 
 ## 使用
 
@@ -64,7 +64,7 @@ cargo run -p rutis-dsh -- dump-config --profile web
 
 ## 部署
 
-二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_CORDIS_ROOT` 指向它（见 rutis-interop README 的“部署”）。仓库内的 npm 项目以 `file:` 依赖引用 `node/rutis-runtime`；独立部署时可改为 npm 上的 `@arcships/rutis-runtime`。
+二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_CORDIS_ROOT` 指向它（见 [Cordis 指南](../../docs/guide/cordis.md) 的“部署”）。仓库内的 npm 项目以 `file:` 依赖引用 `node/rutis-runtime`；独立部署时可改为 npm 上的 `@arcships/rutis-runtime`。
 
 ## 从旧桥迁移
 

@@ -1,6 +1,6 @@
 # 面向开发者的包、工具与流程
 
-日期：2026-10-06。状态：设计，待确认。
+日期：2026-10-06。状态：已实施（第 14 节记录与设计的出入）。
 
 ## 1. 为什么现在做
 
@@ -313,3 +313,19 @@ Rust 宿主作者用 `rutis-loader` 和 `rutis-bridge` 嵌入，行的格式与 
 | 5 | 插件 API 用独立的整数版本，从 1 开始 | 包版本会因为与插件无关的修改而变化，不适合用来判断插件能否加载 |
 | 6 | 各包 README 用英文，指南先写中文 | registry 上的读者面向整个生态；指南先保证质量，再翻译 |
 | 7 | P0–P3 完成后第一次发布；在此之前不发布 interop 0.3 / bridge 0.1 | 避免刚发布就改名；名字一旦发布就很难收回 |
+
+## 14. 实施记录
+
+按本设计一次实施完成。与上文的出入：
+
+- **版本从 0.2.0 开始**，不是 0.1.0：`rutis-loader` 0.1.0 已在 crates.io 上，列车取 0.2.0，所有新名字随之从 0.2.0 开始。
+- **共享服务名**：`rutis-host` 用 `ServiceCatalog::share_by_name()` 让所有名字按名字共享，不需要 `"shared"` 字段，配置里去掉了它。
+- **开发模式不开开发通道**（`rutis-dev`）：重载由 `rutis-host dev` 自己监听文件完成；需要时再加。
+- **Python 项目在开发模式下按入口点的模块加载**（`py:<模块>`），这样项目不必先安装到 venv；发布后宿主仍按入口点名加载。
+- **相对路径的行**：`rutis.json` 和 `rutis.dev.json` 里 `./…`、`../…` 的行名相对于文件所在目录。
+- **远程运行时**：`rutis.json` 的 `runtimes.remote` 声明别处的运行时（Python 行名 `<名字>:<模块>`；Node 行按包名在它那里解析）。
+- **Node 24**：用 Node 24 跑通了所有 Node 测试，`engines` 放宽到 `>=24`；CI 在 Linux 上用 24，在 macOS 上用 26。
+- **目录**：`node/rutis`（SDK）、`node/rutis-runtime`、`node/rutis-host`、`node/baseline`、`python/rutis`；`rutis-host` 的 maturin 配置在 `crates/rutis-host/pyproject.toml`。
+- **发布**：`release.yml`（tag `vX.Y.Z`）取代 `publish-interop.yml`、`publish-loader.yml` 和 #147 的 `publish-bridge.yml`；`rutis-cli` 的二进制发布改为 `release-cli.yml`（tag `cli-vX.Y.Z`）。`scripts/train.mjs` 核对列车版本。
+- **tokio 的 `signal` feature 不能在工作区里打开**：它会让 `rutis-dylib` 的示例链接失败（标准库出现两份）。`rutis-host` 和冒烟示例不处理 Ctrl-C，进程按默认行为结束，运行时进程随通道关闭而结束。
+
