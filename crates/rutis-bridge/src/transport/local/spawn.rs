@@ -11,7 +11,9 @@ use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::channel::{Channel, ChannelError, ChannelInfo, Closer, ConnectError, PeerId, Receiver};
+use crate::channel::{
+    Channel, ChannelError, ChannelInfo, Closer, ConnectError, PeerId, Receiver, Sender,
+};
 use tokio::sync::oneshot;
 
 use crate::transport::local::lines;
@@ -93,7 +95,10 @@ pub(crate) async fn start(spawn: &Spawn) -> Result<Channel, ConnectError> {
     } = channel;
     info.peer = Some(spawn.peer.clone());
     Ok(Channel {
-        sender,
+        sender: Box::new(EndedSender {
+            sender,
+            ended: child.ended.clone(),
+        }),
         receiver: Box::new(Ended {
             receiver,
             ended: Some(child.ended.clone()),
@@ -226,6 +231,27 @@ impl Receiver for Ended {
                 },
             }),
         }
+    }
+}
+
+/// A process that ends before reading (exiting at once, say) fails the
+/// first send rather than the first receive: that error says how it ended
+/// too, instead of `Broken pipe`.
+struct EndedSender {
+    sender: Box<dyn Sender>,
+    ended: Arc<Exit>,
+}
+
+impl Sender for EndedSender {
+    fn send(&mut self, message: &[u8]) -> Result<(), ChannelError> {
+        self.sender
+            .send(message)
+            .map_err(|error| match self.ended.wait() {
+                Some(status) => ChannelError::Closed {
+                    reason: format!("the process {status}"),
+                },
+                None => error,
+            })
     }
 }
 
