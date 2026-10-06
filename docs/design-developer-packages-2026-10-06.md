@@ -103,6 +103,9 @@ SDK 在插件上打一个整数标记 `api`（从 1 开始），表示插件按�
 
 - 插件 API 的版本与包版本无关，只在插件看到的接口（`ctx` 的方法、声明格式、值的传递规则）发生不兼容变化时才增加。
 - 不经过 SDK 的 Cordis 插件视为 API 1。
+- 运行时只支持一个值：`PLUGIN_API`（当前为 1）。`api > PLUGIN_API` 的插件被拒绝，不保留对历史版本的支持。
+- `api` 的载体：Node 是 `definePlugin` 返回对象的 `api` 字段；Python 是 `Plugin.api`。
+- 与 `rutisProtocol` 的关系：`rutisProtocol` 是进程间线格式版本，握手时检查；`api` 是插件可见接口版本，加载时检查。两者独立递增。
 
 ### 5.2 Node 插件
 
@@ -164,7 +167,7 @@ SDK 在插件上打一个整数标记 `api`（从 1 开始），表示插件按�
   - `py.python` 是解释器，默认依次尝试 `$VIRTUAL_ENV/bin/python`、`./.venv/bin/python`、`python3`，`rutis` 必须装在这个环境里。
   - 缺少运行时包时，启动失败并给出安装命令。
 - **`rows`**：沿用 rutis-loader 的行格式（`isolate`、`inject`、`peer:` 行、`rutis-bridge/peer` 节点行等不变）。
-- **跨语言共享的服务名**：任何一行在 `provides` 里声明的名字自动登记为共享；需要额外共享的名字写在 `"shared": [...]`。插件作者不需要理解 `register_shared`。
+- **跨语言共享的服务名**：任何一行在 `provides` 里声明的名字自动登记为共享（`ServiceCatalog::share_by_name()`），没有额外的 `shared` 字段。插件作者不需要理解 `register_shared`。
 - **凭据**不写在配置里，从环境变量读取：`RUTIS_INTEROP_TOKEN` 等改名为 `RUTIS_TOKEN` / `RUTIS_CA` / `RUTIS_CERT` / `RUTIS_KEY`。
 - 通用宿主自己不提供 Rust 服务；插件之间共享服务，或者经 link 使用其他节点的服务。
 

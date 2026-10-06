@@ -17,6 +17,9 @@ mod project;
 #[cfg(unix)]
 mod status;
 
+/// The plugin API this host supports; plugins needing more cannot run here.
+const PLUGIN_API: u32 = 1;
+
 const USAGE: &str = "\
 rutis-host: run rutis plugins written in TypeScript, JavaScript and Python
 
@@ -164,6 +167,7 @@ async fn check(args: &[String]) -> Result<(), String> {
     };
     let host = host::Host::start(&config).await?;
     host.runtimes_ready().await?;
+    println!("plugin API: {PLUGIN_API} (supported by this host)");
     let mut failed = 0;
     for row in config.rows() {
         let id = row["id"].as_str().unwrap_or("?");
@@ -172,6 +176,14 @@ async fn check(args: &[String]) -> Result<(), String> {
             Ok(resolved) => {
                 println!("{id} ({name}): ok");
                 let meta = &resolved.meta;
+                if let Some(api) = meta.get("api").and_then(|api| api.as_u64()) {
+                    let compatible = if api <= PLUGIN_API as u64 {
+                        "compatible"
+                    } else {
+                        "incompatible: the plugin needs a newer runtime"
+                    };
+                    println!("  api: {api} ({compatible})");
+                }
                 for field in ["version", "inject", "provides"] {
                     if let Some(value) = meta.get(field).filter(|value| !value.is_null()) {
                         println!("  {field}: {value}");

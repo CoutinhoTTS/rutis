@@ -2,7 +2,7 @@
 //! session constructors that took a socket before sessions ran on any
 //! [`Channel`](crate::channel::Channel).
 //!
-//! Transports belong to the transport crates (`rutis-transport-local`);
+//! Transports belong to the transport modules ([`crate::transport::local`]);
 //! this copy exists only because the facade still starts its own processes.
 //! It goes once runtimes get their sessions through local + link (N2).
 use std::io::{BufRead, BufReader, Write};

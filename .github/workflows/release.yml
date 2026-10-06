@@ -156,8 +156,10 @@ jobs:
           publish node/rutis-runtime
           for platform in npm/*; do publish "$platform"; done
           publish node/rutis-host
-          # The former package points to its successors.
-          npm deprecate @arcships/rutis-interop "replaced by @arcships/rutis-runtime (the runtime) and @arcships/rutis (for plugins)" || true
+          # The former package points to its successors. Leaving the old
+          # package un-deprecated would mislead users into installing it,
+          # so a failure here must fail the release, not be ignored.
+          npm deprecate @arcships/rutis-interop "replaced by @arcships/rutis-runtime (the runtime) and @arcships/rutis (for plugins)"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

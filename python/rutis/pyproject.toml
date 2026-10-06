@@ -1,6 +1,6 @@
 [project]
 name = "rutis"
-version = "0.2.0"
+version = "0.3.0"
 description = "Write rutis plugins in Python, and the runtime that runs them"
 readme = "README.md"
 license = "MIT"

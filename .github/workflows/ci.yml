@@ -81,6 +81,16 @@ jobs:
           cargo check -p rutis-loader --features python --all-targets
           cargo check -p rutis-loader --features peer --all-targets
 
+      # The loader test targets compile under each single feature.
+      - name: cargo test --no-run (rutis-loader, node)
+        run: cargo test -p rutis-loader --features node --no-run
+
+      - name: cargo test --no-run (rutis-loader, python)
+        run: cargo test -p rutis-loader --features python --no-run
+
+      - name: cargo test --no-run (rutis-loader, peer)
+        run: cargo test -p rutis-loader --features peer --no-run
+
   # The network stack and the runtimes on macOS: starting processes on an
   # inherited socket, Unix sockets, WebSocket links, the Node and Python
   # runtimes, rutis-host. Elsewhere macOS is only checked.

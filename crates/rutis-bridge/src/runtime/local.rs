@@ -1,7 +1,7 @@
 //! Local language runtimes: a process this machine starts, a link to it,
 //! and the runtime plugin running its rows, composed. Its session comes the
 //! way a remote runtime's does (`RuntimeSession#<name>` from a link), only
-//! started here: the local transport (`rutis-transport-local`) spawns it on
+//! started here: the local transport ([`crate::transport::local`]) spawns it on
 //! an inherited socket, the
 //! link speaks the compat protocol with it and does not reconnect, since a
 //! local runtime process is not restarted.
@@ -12,7 +12,7 @@
 //! application's decision.
 //!
 //! What a language's process is (its program, arguments, how it takes its
-//! channel) comes from `rutis-interop` ([`Launcher`]); the transport only
+//! channel) comes from [`crate::runtime`] ([`Launcher`]); the transport only
 //! starts it.
 
 #![cfg(unix)]
@@ -48,7 +48,7 @@ pub struct LocalRuntime {
 }
 
 impl LocalRuntime {
-    /// The Node runtime, named `"node"`. `node_package`: the rutis-interop
+    /// The Node runtime, named `"node"`. `node_package`: the rutis-bridge
     /// npm runtime (`node/rutis-runtime`, or a deployed `@arcships/rutis-runtime`).
     /// `anchor`: the `package.json` plugins and Cordis resolve from.
     #[cfg(feature = "node")]

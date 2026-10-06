@@ -3054,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "libc",
@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "rutis-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rutis",
  "rutis-bridge",
@@ -3186,11 +3186,12 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]
 name = "rutis-loader"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rutis",
  "rutis-bridge",

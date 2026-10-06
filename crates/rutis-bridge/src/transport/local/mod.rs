@@ -8,7 +8,7 @@
 //! every channel it opened, and so ends the processes it started.
 //!
 //! It knows nothing of what runs in the process: a language runtime started
-//! this way is composed on top (`rutis-runtime-local`).
+//! this way is composed on top ([`crate::runtime::LocalRuntime`]).
 
 #[cfg(unix)]
 use std::collections::HashMap;

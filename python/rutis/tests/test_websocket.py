@@ -43,7 +43,7 @@ def dial(address, token="secret", protocol=PROTOCOL, **options):
     return connect(address, additional_headers=headers, subprotocols=[protocol], **options)
 
 
-@unittest.skipIf(websocket is None, "needs the websockets package (rutis-runtime[network])")
+@unittest.skipIf(websocket is None, "needs the websockets package (rutis[network])")
 class WebSocketTest(unittest.TestCase):
     def test_messages_cross_and_an_orderly_close_is_a_normal_end(self):
         address, channels = listen()

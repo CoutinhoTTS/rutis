@@ -5,7 +5,7 @@ One connection carries one channel of UTF-8 JSON text messages; the
 session protocol is the subprotocol; the controller presents a bearer token
 in the Authorization header, never in the URL. Both sides ping; a far end
 silent for 30 s is dropped. Messages are limited to 16 MiB (1009 over it).
-Needs the `websockets` package: `pip install rutis-runtime[network]`.
+Needs the `websockets` package: `pip install rutis[network]`.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ try:
     from websockets.sync.server import serve
 except ImportError as error:  # pragma: no cover - depends on the environment
     raise ImportError(
-        "WebSocket channels need the websockets package: pip install rutis-runtime[network]"
+        "WebSocket channels need the websockets package: pip install rutis[network]"
     ) from error
 
 MAX_MESSAGE = 16 * 1024 * 1024

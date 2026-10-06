@@ -1,78 +1,78 @@
-# rutis-dsh：在 rutis 宿主里运行 dsh
+# rutis-dsh: Running dsh inside a rutis host
 
-`rutis-dsh up` 启动 dsh 的完整 web 界面。dsh 跑在 rutis 启动和管理的 Node 进程里，模型调用由同一进程中的 [aimux-llm](../aimux-llm) 提供。接入机制见 [Cordis 指南](../../docs/guide/cordis.md)；需要 Unix 与 Node 24 或更高。
+`rutis-dsh up` launches the full dsh web interface. dsh runs in a Node process started and managed by rutis, and model calls are served by [aimux-llm](../aimux-llm) in the same process. For the integration mechanism see the [Cordis guide](../../docs/guide/cordis.md); requires Unix and Node 24 or later.
 
-## 使用
+## Usage
 
 ```sh
 npm --prefix crates/rutis-dsh/dsh ci
 DEEPSEEK_API_KEY=... cargo run -p rutis-dsh -- up
 ```
 
-dsh 在 stderr 打印带登录令牌的地址（`dsh web: http://127.0.0.1:3080/?token=…`），默认会打开浏览器。
+dsh prints an address with a login token to stderr (`dsh web: http://127.0.0.1:3080/?token=…`) and opens a browser by default.
 
 ```text
-rutis-dsh up [--profile <name>] [dsh 选项...]
+rutis-dsh up [--profile <name>] [dsh options...]
 ```
 
-| 选项 | 说明 |
+| Option | Description |
 | --- | --- |
-| `--profile <name>` | `$DSH_HOME/profiles` 下的 profile，默认 `rutis-web`；首次启动时以 dsh-base、dsh-web-app 和 aimux bundle 创建 |
-| 其余参数 | 交给 dsh web，例如 `--port 3081`、`--host 0.0.0.0`、`--no-open` |
+| `--profile <name>` | Profile under `$DSH_HOME/profiles`, default `rutis-web`; created on first start from the dsh-base, dsh-web-app, and aimux bundles |
+| Other arguments | Passed to `dsh web`, e.g. `--port 3081`, `--host 0.0.0.0`, `--no-open` |
 
-工作目录即 dsh 的工作区（读取其中的 `.env`）。Ctrl-C 或 dsh 自身退出（如 `--help`）时，rutis 卸载挂载并结束 Node 进程；Node 进程意外结束时 `rutis-dsh` 随之退出。
+The working directory is dsh's workspace (`.env` inside it is read). On Ctrl-C or when dsh exits on its own (e.g. `--help`), rutis unloads the mount and terminates the Node process; if the Node process dies unexpectedly, `rutis-dsh` exits with it.
 
-## 模型路由
+## Model Routing
 
-模型选择器中的 **aimux (rutis)** 一组由 aimux 提供。路由在 dsh 模型页（设置段 `llm-aimux`）配置，修改即时生效：
+The **aimux (rutis)** group in the model selector is provided by aimux. Routing is configured on the dsh models page (settings section `llm-aimux`) and takes effect immediately:
 
-| 字段 | 说明 |
+| Field | Description |
 | --- | --- |
-| 路由名 | dsh 中的 provider 名，不能与其他适配器的路由重名（例如官方的 `deepseek-official`） |
-| `provider` | aimux 的 provider，缺省为路由名 |
-| `apiKeyEnv` | key 的凭据引用，每次请求经 dsh 凭据服务解析（模型页保存的 key 在这里）；没有凭据服务时读同名环境变量 |
-| `displayName` | 显示名 |
+| Route name | Provider name within dsh; must not collide with routes of other adapters (e.g. the official `deepseek-official`) |
+| `provider` | The aimux provider; defaults to the route name |
+| `apiKeyEnv` | Credential reference for the key, resolved per request through the dsh credential service (keys saved on the models page live here); without a credential service, the environment variable of the same name is read |
+| `displayName` | Display name |
 
-不带 key 的路由（包括默认的 `aimux`）使用宿主的兜底 provider：`AIMUX_PROVIDER` / `AIMUX_MODEL`（默认 `deepseek` / `deepseek-chat`）及该 provider 的 key 环境变量（如 `DEEPSEEK_API_KEY`）。模型目录取自兜底 provider，界面中选择的模型按选择生效。
+Routes without a key (including the default `aimux`) use the host's fallback provider: `AIMUX_PROVIDER` / `AIMUX_MODEL` (default `deepseek` / `deepseek-chat`) and the key environment variable for that provider (e.g. `DEEPSEEK_API_KEY`). The model catalog comes from the fallback provider; the model picked in the UI takes effect as selected.
 
-## 组成
+## Components
 
-| 部分 | 位置 | 作用 |
+| Part | Location | Role |
 | --- | --- | --- |
-| 启动器 | `dsh/launcher.ts`、`dsh/launcher/boot.ts` | 在挂载的 Cordis Context 中启动 dsh profile（沿用 dsh-app-boot 的启动步骤，不新建 Context、不接管信号与退出）；启动成功、失败和退出以事件告知 rutis |
-| aimux bundle | `dsh/aimux`（npm 包 `@rutis/dsh-aimux`） | profile 中的 `llm-aimux` 行：向 dsh-llm 注册路由，模型调用经宿主服务 `aimux` 交给 Rust |
-| 宿主服务 | `src/aimux.rs` | `aimux` 的 Rust 实现：每次调用是一个 aimux-llm 流，适配器分批读取；停止读取即取消 |
-| 挂载 | `Cargo.toml` | `web`：web 界面；`agent`：不带界面的 dsh agent 组合（测试与从 Rust 驱动 agent） |
+| Launcher | `dsh/launcher.ts`, `dsh/launcher/boot.ts` | Starts the dsh profile inside the mounted Cordis Context (reuses dsh-app-boot's startup steps; does not create a Context or take over signals/exit); reports success, failure, and exit to rutis as events |
+| aimux bundle | `dsh/aimux` (npm package `@rutis/dsh-aimux`) | The `llm-aimux` row in the profile: registers routes with dsh-llm; model calls go through the host service `aimux` into Rust |
+| Host service | `src/aimux.rs` | Rust implementation of `aimux`: each call is one aimux-llm stream, read by the adapter in batches; stopping reading cancels it |
+| Mounts | `Cargo.toml` | `web`: the web interface; `agent`: a UI-less dsh agent composition (for tests and driving the agent from Rust) |
 
-## profile 配置（rutis-loader）
+## Profile Configuration (rutis-loader)
 
-`rutis_dsh::profile` 把 dsh 的 profile 配置接到 [rutis-loader](../rutis-loader)，不需要 Node：
+`rutis_dsh::profile` connects dsh's profile configuration to [rutis-loader](../rutis-loader); no Node needed:
 
-| 部分 | 作用 |
+| Part | Role |
 | --- | --- |
-| `profile::load` | 按 dsh-app-boot 的规则读出各层：bundle 的 patch 文件（解析不到、没有 `dsh.bundle`、版本不兼容的 bundle 跳过并说明原因）、用户层 `cordis.patch.yml`（可编辑）、`$DSH_HOME/cordis.patch.yml`、`--patch`、遥测开关；嵌套 include 展开为最后一层 |
-| `profile::UserLayerStore` | 用户层的 `Persist`：持有与 dsh 相同的跨进程写锁（`<profile>/package.json.lock`），比对版本，只重写变化的 patch（其余 patch 的注释保留），读回校验后原子替换 |
-| `profile::expr::JsSubset` | dsh 写在 `!!js` 里的 JavaScript 子集；`ctx` 只能读服务名目录里登记的服务 |
-| `profile::watch::watch` | 轮询 profile 的文件，变化后重新读层并 reconcile |
-| `rutis-dsh dump-config` | 打印合成后的 profile，对照 `dsh --dump-config` |
+| `profile::load` | Reads the layers following dsh-app-boot's rules: bundle patch files (bundles that can't be resolved, lack `dsh.bundle`, or have incompatible versions are skipped with a reason), the user layer `cordis.patch.yml` (editable), `$DSH_HOME/cordis.patch.yml`, `--patch`, and the telemetry switch; nested includes are expanded into the final layer |
+| `profile::UserLayerStore` | `Persist` for the user layer: holds the same cross-process write lock as dsh (`<profile>/package.json.lock`), compares versions, rewrites only the patches that changed (comments on other patches are preserved), and atomically replaces after read-back verification |
+| `profile::expr::JsSubset` | The JavaScript subset dsh writes in `!!js`; `ctx` can only read services registered in the service-name directory |
+| `profile::watch::watch` | Polls the profile's files; re-reads the layers and reconciles on change |
+| `rutis-dsh dump-config` | Prints the composed profile, for comparison against `dsh --dump-config` |
 
-与 dsh 的一致性由对拍测试保证：YAML 方言对 js-yaml，表达式对 Node，分层对 dsh-app-boot（见 `tests/profile_*.rs`，需要安装 npm 项目）。
+Consistency with dsh is guaranteed by cross-checking tests: YAML dialect against js-yaml, expressions against Node, layering against dsh-app-boot (see `tests/profile_*.rs`, which require the npm project to be installed).
 
 ```sh
 cargo run -p rutis-dsh -- dump-config --profile web
 ```
 
-## 部署
+## Deployment
 
-二进制与 npm 项目一起分发：把 `crates/rutis-dsh/dsh`（含已安装的 `node_modules`，符号链接需展开）复制到目标机器，并用 `RUTIS_CORDIS_ROOT` 指向它（见 [Cordis 指南](../../docs/guide/cordis.md) 的“部署”）。仓库内的 npm 项目以 `file:` 依赖引用 `node/rutis-runtime`；独立部署时可改为 npm 上的 `@arcships/rutis-runtime`。
+The binary is distributed together with the npm project: copy `crates/rutis-dsh/dsh` (with `node_modules` installed, symlinks dereferenced) to the target machine and point `RUTIS_CORDIS_ROOT` at it (see "Deployment" in the [Cordis guide](../../docs/guide/cordis.md)). Inside the repository the npm project references `node/rutis-runtime` via a `file:` dependency; for standalone deployment you can switch to `@arcships/rutis-runtime` on npm.
 
-## 从旧桥迁移
+## Migrating from the Old Bridge
 
-此前的 `rutis-dsh up` 启动官方 `dsh` CLI，由插入其 profile 的 `rutis-bridge` 插件经 TCP 调用 Rust（`rutis-cordis` + `host/`）。现在 rutis 是宿主，不再需要单独安装 `dsh`、`rutis-bridge` npm 包和 `RUTIS_DSH_BIN`。路由配置的字段不变（`llm-aimux` 设置段），但保存在新的 profile（`rutis-web`）中，需在模型页重新添加；也可用 `--profile` 指定已有 profile。旧桥转发给 rutis 的 dsh 事件（`HostEvent`）改为由 interop 按声明生成类型化事件。
+Previously, `rutis-dsh up` launched the official `dsh` CLI, with a `rutis-bridge` plugin inserted into its profile calling Rust over TCP (`rutis-cordis` + `host/`). Now rutis is the host, so installing `dsh` and the `rutis-bridge` npm package separately, and setting `RUTIS_DSH_BIN`, are no longer needed. The routing configuration fields are unchanged (the `llm-aimux` settings section) but are stored in a new profile (`rutis-web`) and must be re-added on the models page; you can also point `--profile` at an existing profile. dsh events formerly forwarded to rutis by the old bridge (`HostEvent`) are now generated by interop as typed events from declarations.
 
-## 测试
+## Testing
 
 ```sh
-cargo test -p rutis-dsh                          # web 界面启动 / 失败 / 停止，agent 组合，迁移部署
-DEEPSEEK_API_KEY=... cargo test -p rutis-dsh --test agent -- --ignored   # 真实模型的 agent 回合
+cargo test -p rutis-dsh                          # web UI start / failure / stop, agent composition, migration deployment
+DEEPSEEK_API_KEY=... cargo test -p rutis-dsh --test agent -- --ignored   # agent turns against a real model
 ```

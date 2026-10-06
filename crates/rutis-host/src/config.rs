@@ -144,11 +144,18 @@ impl HostConfig {
                 at(path);
             }
         }
-        // A plugin file named relative to the configuration.
+        // A plugin file named relative to the configuration. `Url` percent-
+        // encodes spaces and the like, which a bare `display()` would not;
+        // it needs an absolute path, so fall back when the base is relative.
         for row in &mut self.rows {
             if let Some(name) = row["name"].as_str() {
                 if name.starts_with("./") || name.starts_with("../") {
-                    row["name"] = json!(format!("file://{}", base.join(name).display()));
+                    let path = base.join(name);
+                    let name = match url::Url::from_file_path(&path) {
+                        Ok(url) => url.into(),
+                        Err(()) => format!("file://{}", path.display()),
+                    };
+                    row["name"] = json!(name);
                 }
             }
         }
@@ -255,7 +262,7 @@ mod tests {
             json!({ "id": "w", "name": "weather" }),
         ];
         config.rebase(Path::new("/srv/app"));
-        assert_eq!(config.rows[0]["name"], "file:///srv/app/./dev/fake.ts");
+        assert_eq!(config.rows[0]["name"], "file:///srv/app/dev/fake.ts");
         assert_eq!(config.rows[1]["name"], "weather");
         assert_eq!(
             config.runtimes.node.unwrap().project,

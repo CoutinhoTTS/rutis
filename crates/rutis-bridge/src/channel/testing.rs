@@ -2,7 +2,7 @@
 //! runs [`contract`] on connected pairs it makes:
 //!
 //! ```ignore
-//! rutis_channel::testing::contract(|| my_transport::pair());
+//! rutis_bridge::channel::testing::contract(|| my_transport::pair());
 //! ```
 //!
 //! Each check panics with what was broken. Transport-specific behaviour

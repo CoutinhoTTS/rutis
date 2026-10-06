@@ -4,7 +4,7 @@
 //! is watched and reported as the session's end.
 //!
 //! Runtimes that get their sessions through a link are started by the local
-//! transport (`rutis-transport-local`), which has its own spawner; this copy
+//! transport ([`crate::transport::local`]), which has its own spawner; this copy
 //! goes with the facade.
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
