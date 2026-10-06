@@ -20,9 +20,9 @@
 | 宿主（运行插件） | `rutis`、`rutis-loader`、`rutis-bridge` | `@arcships/rutis-runtime` | `rutis` |
 | 不写 Rust 的宿主 | `rutis-host` | `@arcships/rutis-host` | `rutis-host` |
 
-本次内核和发布列车的包版本均为 0.7.0。内核沿用独立发布流程；bridge、loader、host 及 npm/PyPI 包一起发布。`rutis-sdk` 等 dylib 工具继续独立版本。
+除内核 `rutis` 外，这些包一起发布、版本号相同（发布列车）。内核和 `rutis-sdk` 等 dylib 工具独立发版；列车 0.7.x 基于内核 0.6.1。
 
-已有项目见 [0.7 升级指南](../migration-0.6-to-0.7.md)。
+用过 `rutis-interop` 的项目见[迁移指南](../migration-interop-to-0.7.md)。
 
 ## 环境
 

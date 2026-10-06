@@ -18,7 +18,7 @@ path = "src/main.rs"
 dylib-plugins = ["dep:rutis-sdk", "dep:rutis-dylib"]
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.7.0" }
+rutis = { path = "../rutis", version = "0.6.0" }
 rutis-agent = { path = "../rutis-agent", version = "0.6.0" }
 aimux-core = "0.3.0"
 aimux-providers = "0.3.0"

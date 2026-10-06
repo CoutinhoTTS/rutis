@@ -14,7 +14,7 @@ test = false
 doctest = false
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.7.0" }
+rutis = { path = "../rutis", version = "0.6.0" }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["full"] }
 serde_json = { version = "1", features = ["preserve_order"] }

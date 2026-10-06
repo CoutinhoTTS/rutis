@@ -10,7 +10,7 @@ keywords = ["cordis", "plugin", "loader", "reconcile"]
 categories = ["asynchronous", "config"]
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.7.0" }
+rutis = { path = "../rutis", version = "0.6.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 schemars = "1"

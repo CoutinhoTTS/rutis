@@ -20,9 +20,9 @@ Choose a guide based on what you want to do:
 | Host (runs plugins) | `rutis`, `rutis-loader`, `rutis-bridge` | `@arcships/rutis-runtime` | `rutis` |
 | Host without Rust | `rutis-host` | `@arcships/rutis-host` | `rutis-host` |
 
-For 0.7.0, the core and train packages use the same version. The core keeps its separate publication workflow; bridge, loader, host and npm/PyPI packages release together. Dylib tools retain independent versions.
+Except for the `rutis` core, these packages are released together with matching version numbers (a release train). The core and dylib tools such as `rutis-sdk` are versioned on their own; the 0.7.x train builds on core 0.6.1.
 
-For existing projects, see the [0.7 migration guide](../migration-0.6-to-0.7.en.md).
+Projects that used `rutis-interop`: see the [migration guide](../migration-interop-to-0.7.en.md).
 
 ## Requirements
 

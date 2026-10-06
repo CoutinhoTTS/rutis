@@ -104,7 +104,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
       - name: Package (each crate built from its package, against the others)
-        run: cargo package --locked -p rutis -p rutis-bridge -p rutis-loader -p rutis-host
+        run: cargo package --locked -p rutis-bridge -p rutis-loader -p rutis-host
       - name: Publish what crates.io does not have
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -194,6 +194,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/rutis-host-*.tar.gz dist/rutis-host-*.tar.gz.sha256 \
             --title "rutis $GITHUB_REF_NAME" \
-            --notes "Plugins in TypeScript, JavaScript and Python; links between nodes; rutis-host. Guides: docs/guide."
+            --notes-file "docs/releases/${GITHUB_REF_NAME#v}.en.md"
         env:
           GH_TOKEN: ${{ github.token }}

@@ -13,7 +13,7 @@ keywords = ["rutis", "plugin", "python", "node", "websocket"]
 categories = ["development-tools::ffi", "network-programming"]
 
 [dependencies]
-rutis = { path = "../rutis", version = "0.7.0" }
+rutis = { path = "../rutis", version = "0.6.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

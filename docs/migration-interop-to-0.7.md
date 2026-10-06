@@ -1,20 +1,16 @@
-# 升级到 rutis 0.7
+# 从 rutis-interop 迁移到 0.7 发布列车
 
-[English](migration-0.6-to-0.7.en.md) · [发布说明](releases/0.7.0.md)
+[English](migration-interop-to-0.7.en.md) · [发布说明](releases/0.7.0.md)
 
-本指南适用于 `rutis` 0.6.x、旧 `rutis-interop` / loader 包，以及仓库中曾使用 0.3.0 版本号的未发布整合版。本次内核与 bridge、loader、host、npm/PyPI 包版本均为 0.7.0，沿用已有发布流程。
+0.7.0 是发布列车（`rutis-bridge`、`rutis-loader`、`rutis-host` 及 npm/PyPI 包）的首次发布。本指南适用于用过 crates.io / npm 上的 `rutis-interop`（0.1、0.2）、`rutis-loader` 0.1.0，或仓库里曾以 0.3.0 为版本号的未发布整合版的项目。旧的 `rutis-interop` 包已撤下。
 
-## 只使用 Rust 内核
+内核 `rutis` 不变，仍是 0.6.1：只用内核的项目无需改动，第三方 Rust 插件无需重编译，dylib SDK 身份也不变。
 
-把依赖改成 `rutis = "0.7"` 并更新锁文件。类型化插件是可选接口；已有 `Plugin` 实现可以继续使用。0.6.1 的控制面接口继续保留。若从 0.6.0 直接升级，可一并阅读[控制面说明](migration-0.6.0-to-0.6.1.md)。
-
-依赖 0.6 的第三方 Rust 插件也要更新依赖并重编译；同一宿主的服务类型、`Ctx` 和插件 trait 必须来自同一份内核，不能把 Cargo 同时解析出的 0.6 与 0.7 类型混用。
-
-## Rust 宿主与旧互操作包
+## Rust 宿主
 
 ```toml
 [dependencies]
-rutis = "0.7"
+rutis = "0.6"
 rutis-loader = { version = "0.7", features = ["node", "python", "peer"] }
 rutis-bridge = { version = "0.7", features = ["python", "websocket"] }
 ```
@@ -35,7 +31,7 @@ Cordis 的 `build.rs` 依赖也要换成带 `cordis` feature 的 `rutis-bridge`�
 
 ## JS/TS 与 Python
 
-发布后同步升级插件 SDK、运行时和宿主：
+插件 SDK、运行时和宿主一起使用 0.7：
 
 ```bash
 npm install @arcships/rutis@^0.7.0
@@ -53,11 +49,3 @@ JS/TS 叶子插件从 `@arcships/rutis` 导入 `definePlugin`，测试工具从 
 包版本 0.7.0、插件 API 标记和会话协议号是三个不同概念。本地会话协议为 2，带 endpoint 身份的会话协议为 3。不要为匹配包版本手动把 `rutisProtocol` 改成 7；宿主和运行时按同一列车一起部署。
 
 Linux/macOS 支持本地语言运行时和 host；Windows 使用 WSL。Node 要求 24+，Python 要求 3.12+。远程部署还需检查 endpoint 标识、证书主机名、CA 和认证 token；先在测试环境验证断线重连和服务撤销，再替换运行中的部署。
-
-## dylib
-
-升级内核及锁文件会改变 SDK 身份。重新生成宿主 bundle / SDK bundle，再基于该 SDK 构建所有动态插件；不要混用旧 SDK 二进制或把 Rust semver 当作 dylib ABI 兼容保证。SDK、dylib 工具本身仍有独立包版本。见 [SDK 构建包设计](design-sdk-build-package-2026-10-04.md)。
-
-## 发布标签
-
-先推送 `rutis-v0.7.0` 发布内核，成功后在同一提交推送 `v0.7.0` 发布 bridge、loader、host 及 npm/PyPI 包。`cli-v*` 仍是独立 CLI 示例的二进制发布。

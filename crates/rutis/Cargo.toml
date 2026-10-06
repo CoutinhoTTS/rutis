@@ -2,7 +2,7 @@
 name = "rutis"
 description = "Cordis core paradigms in idiomatic Rust: plugin assembly, fiber lifecycle, typed service registry, dependency-driven reload"
 edition.workspace = true
-version = "0.7.0"
+version = "0.6.1"
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true

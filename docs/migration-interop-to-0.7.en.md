@@ -1,20 +1,16 @@
-# Upgrading to rutis 0.7
+# Migrating from rutis-interop to the 0.7 release train
 
-[中文](migration-0.6-to-0.7.md) · [Release notes](releases/0.7.0.en.md)
+[中文](migration-interop-to-0.7.md) · [Release notes](releases/0.7.0.en.md)
 
-This guide covers core 0.6.x, the old interop/loader packages, and the unpublished integrated development version numbered 0.3.0. The core and train packages are versioned 0.7.0 for this release, retaining their existing publication workflows.
+0.7.0 is the first release of the release train (`rutis-bridge`, `rutis-loader`, `rutis-host` and the npm/PyPI packages). This guide covers projects that used `rutis-interop` (0.1, 0.2) on crates.io / npm, `rutis-loader` 0.1.0, or the unpublished integrated development version numbered 0.3.0 in the repository. The old `rutis-interop` packages have been withdrawn.
 
-## Rust core
+The `rutis` core is unchanged at 0.6.1: projects that use only the core need no changes, third-party Rust plugins need no rebuild, and the dylib SDK identity stays the same.
 
-Set `rutis = "0.7"` and update the lockfile. Typed plugins are optional; existing `Plugin` implementations remain usable. The 0.6.1 control-plane interfaces remain available. When upgrading directly from 0.6.0, also read the [control-plane guide](migration-0.6.0-to-0.6.1.en.md).
-
-Update and rebuild third-party Rust plugins depending on core 0.6 too. Service types, `Ctx` and plugin traits in one host must use the same core version; Cargo resolving both 0.6 and 0.7 does not make their types interchangeable.
-
-## Rust hosts and old interop packages
+## Rust hosts
 
 ```toml
 [dependencies]
-rutis = "0.7"
+rutis = "0.6"
 rutis-loader = { version = "0.7", features = ["node", "python", "peer"] }
 rutis-bridge = { version = "0.7", features = ["python", "websocket"] }
 ```
@@ -35,7 +31,7 @@ Change build dependencies for Cordis `build.rs` to `rutis-bridge` with `cordis` 
 
 ## JS/TS and Python
 
-After publication, upgrade the SDK, runtime and host together:
+Use the SDK, runtime and host at 0.7 together:
 
 ```bash
 npm install @arcships/rutis@^0.7.0
@@ -53,11 +49,3 @@ Leaf plugins import `definePlugin` from `@arcships/rutis` and testing tools from
 Package version 0.7.0, the plugin API marker and session protocol versions are independent. Local sessions use protocol 2; endpoint sessions use protocol 3. Do not set `rutisProtocol` to 7 to match the package version. Deploy hosts and runtimes from the same train together.
 
 Local runtimes and the host support Linux/macOS; use WSL on Windows. Node 24+ and Python 3.12+ are required. Check endpoint identity, certificate hostname, CA and authentication token for remote deployments. Verify reconnection and service withdrawal in staging before replacing a deployment.
-
-## dylib
-
-Changing the core and lockfile changes SDK identity. Regenerate the host/SDK bundles and rebuild all dynamic plugins against that SDK. Do not mix old SDK binaries or assume Rust semver implies dylib ABI compatibility. SDK and dylib tools retain independent package versions. See the [SDK build package design](design-sdk-build-package-2026-10-04.en.md).
-
-## Release tags
-
-Publish the core with `rutis-v0.7.0` first. Once it succeeds, push `v0.7.0` at the same commit to publish bridge, loader, host and npm/PyPI packages. `cli-v*` remains the independent CLI example binary release.
