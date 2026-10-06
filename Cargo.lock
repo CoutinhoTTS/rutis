@@ -3176,6 +3176,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rutis-host"
+version = "0.2.0"
+dependencies = [
+ "rutis",
+ "rutis-bridge",
+ "rutis-loader",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "rutis-loader"
 version = "0.2.0"
 dependencies = [

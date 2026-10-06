@@ -210,7 +210,7 @@ impl Loader {
     /// The key the catalog gives the service `name`.
     #[cfg(feature = "peer")]
     pub(crate) fn service_key(&self, name: &str) -> Option<rutis::TypeKey> {
-        self.inner.catalog.key(name).cloned()
+        self.inner.catalog.key(name)
     }
 }
 

@@ -1,0 +1,30 @@
+{
+  "name": "{{name}}",
+  "version": "0.1.0",
+  "description": "A rutis plugin",
+  "keywords": ["rutis-plugin"],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test test/*.test.ts",
+    "dev": "rutis-host dev",
+    "check": "rutis-host check",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@arcships/rutis": "^{{version}}"
+  },
+  "devDependencies": {
+    "@arcships/rutis-host": "^{{version}}",
+    "@arcships/rutis-runtime": "^{{version}}",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.0"
+  }
+}

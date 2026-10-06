@@ -29,6 +29,9 @@ struct Service {
 #[derive(Clone, Default)]
 pub struct ServiceCatalog {
     services: HashMap<String, Service>,
+    /// Every name not registered otherwise is shared by name.
+    #[cfg_attr(not(any(feature = "runtimes", feature = "peer")), allow(dead_code))]
+    by_name: bool,
 }
 
 impl ServiceCatalog {
@@ -104,15 +107,37 @@ impl ServiceCatalog {
         self.register_keyed::<dyn rutis_bridge::session::HostDispatch>(name, key)
     }
 
-    /// Whether `name` was registered with [`ServiceCatalog::register_shared`].
+    /// Share every name not registered otherwise, as
+    /// [`ServiceCatalog::register_shared`] would: a host whose services all
+    /// cross between languages and nodes by name (rutis-host).
+    #[cfg(any(feature = "runtimes", feature = "peer"))]
+    pub fn share_by_name(&mut self) -> &mut Self {
+        self.by_name = true;
+        self
+    }
+
+    /// Whether `name` is shared across languages by name.
     #[cfg(all(unix, feature = "runtimes"))]
     pub fn is_shared(&self, name: &str) -> bool {
-        self.key(name) == Some(&rutis_bridge::session::host_key(name))
+        self.key(name) == Some(rutis_bridge::session::host_key(name))
     }
 
     /// The key of a named service.
-    pub fn key(&self, name: &str) -> Option<&TypeKey> {
-        self.services.get(name).map(|s| &s.key)
+    pub fn key(&self, name: &str) -> Option<TypeKey> {
+        match self.services.get(name) {
+            Some(service) => Some(service.key.clone()),
+            None => self.shared_key(name),
+        }
+    }
+
+    #[cfg(any(feature = "runtimes", feature = "peer"))]
+    fn shared_key(&self, name: &str) -> Option<TypeKey> {
+        self.by_name.then(|| rutis_bridge::session::host_key(name))
+    }
+
+    #[cfg(not(any(feature = "runtimes", feature = "peer")))]
+    fn shared_key(&self, _: &str) -> Option<TypeKey> {
+        None
     }
 
     /// Keys for `names`, or every unknown name.
@@ -124,7 +149,7 @@ impl ServiceCatalog {
         let mut unknown = Vec::new();
         for name in names {
             match self.key(name) {
-                Some(key) => found.push((name.to_owned(), key.clone())),
+                Some(key) => found.push((name.to_owned(), key)),
                 None => unknown.push(name.to_owned()),
             }
         }
